@@ -26,7 +26,7 @@ const WINDOW_HEIGHT_DEFAULT: u32 = 720;
 const WINDOW_WIDTH_MIN: u32 = 384;
 const WINDOW_HEIGHT_MIN: u32 = 256;
 
-pub const APPNAME: &str = concat!("HOI4 Province Map Editor v", env!("CARGO_PKG_VERSION"));
+pub const APPNAME: &str = concat!("HOI4 State Editor v", env!("CARGO_PKG_VERSION"));
 
 fn main() {
   install_handler();
@@ -62,6 +62,7 @@ fn root_dir() -> io::Result<PathBuf> {
 use std::io::prelude::*;
 
 fn write_application_info(mut out: impl Write) -> Result<(), std::io::Error> {
+  writeln!(out, "Application: {}", APPNAME)?;
   writeln!(out, "Version: v{}", env!("CARGO_PKG_VERSION"))?;
   writeln!(out, "Debug Assertions Enabled: {:?}", cfg!(debug_assertions))?;
   writeln!(out, "Debug Mode Feature Enabled: {:?}", cfg!(feature = "debug-mode"))?;

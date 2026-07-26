@@ -1,11 +1,11 @@
 [package]
-name = "hoi4_province_editor"
-version = "0.5.0"
-authors = ["ScottyThePilot <scotty.codes@gmail.com>"]
+name = "hoi4_state_editor"
+version = "0.1.0"
+authors = ["ScottyThePilot <scotty.codes@gmail.com>", "AdriianCOE"]
 edition = "2024"
-description = "Map editor application for Hearts of Iron IV"
+description = "Graphical state editor for Hearts of Iron IV mods"
 readme = "README.md"
-repository = "https://github.com/ScottyThePilot/hoi4_province_editor"
+repository = "https://github.com/AdriianCOE/hoi4_state_editor"
 license = "MIT"
 
 [dependencies]

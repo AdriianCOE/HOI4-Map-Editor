@@ -27,7 +27,7 @@ pub(super) fn load_bundle(location: &Location, config: Config) -> Result<Bundle,
     Ok((province_image, definition_table, adjacencies_table, rivers))
   })?;
 
-  Ok(construct_map_data(province_image, definition_table, adjacencies_table, rivers, config))
+  construct_map_data(province_image, definition_table, adjacencies_table, rivers, config)
 }
 
 fn construct_map_data(
@@ -36,21 +36,29 @@ fn construct_map_data(
   adjacencies_table: Vec<Adjacency>,
   rivers: Option<RgbImage>,
   config: Config
-) -> Bundle {
+) -> Result<Bundle, Error> {
   let mut color_buffer = province_image;
 
-  let mut preserved_id_count = definition_table[0].id;
-  // Create a sparse array for mapping province ids to colors
-  let mut color_index = Vec::with_capacity(definition_table.len());
-  for d in definition_table.iter() {
-    let len = color_index.len().max(d.id as usize + 1);
-    preserved_id_count = preserved_id_count.max(d.id);
-    color_index.resize(len, None);
-    color_index[d.id as usize] = Some(d.rgb);
+  let preserved_id_count = u32::try_from(definition_table.len())
+    .map_err(|_| Error::from("definition.csv contains too many province records"))?;
+  if preserved_id_count == 0 {
+    return Err("definition.csv contains no province records".into());
   };
 
-  // TODO: rework? this will probably crash for certain invalid definition tables
-  assert_eq!(preserved_id_count, definition_table.len() as u32);
+  // Create a sparse array for mapping province ids to colors
+  let mut color_index = vec![None; definition_table.len() + 1];
+  for d in definition_table.iter() {
+    if d.id == 0 || d.id > preserved_id_count {
+      return Err(format!(
+        "definition.csv province IDs must be contiguous from 1 to {preserved_id_count}; found {}",
+        d.id
+      ).into());
+    };
+    let slot = &mut color_index[d.id as usize];
+    if slot.replace(d.rgb).is_some() {
+      return Err(format!("definition.csv contains duplicate province ID {}", d.id).into());
+    };
+  };
 
   // Initially convert the definition table into a province data map
   let mut definition_map = definition_table.into_iter()
@@ -129,7 +137,7 @@ fn construct_map_data(
 
   map.recalculate_all_boundaries();
 
-  Bundle { map, config }
+  Ok(Bundle { map, config })
 }
 
 pub(super) fn recolor_everything(
@@ -410,4 +418,24 @@ fn read_all<R: Read>(mut reader: R) -> io::Result<Cursor<Vec<u8>>> {
 
 fn get_color_index(color_index: &[Option<Color>], id: u32) -> Option<Color> {
   color_index.get(id as usize).and_then(Clone::clone)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::construct_map_data;
+  use crate::config::Config;
+  use image::RgbImage;
+
+  #[test]
+  fn empty_definition_table_returns_error_instead_of_panicking() {
+    let result = construct_map_data(
+      RgbImage::new(1, 1),
+      Vec::new(),
+      Vec::new(),
+      None,
+      Config::default()
+    );
+
+    assert!(result.is_err());
+  }
 }

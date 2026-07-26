@@ -3,6 +3,8 @@ pub mod canvas;
 pub mod format;
 pub mod interface;
 pub mod map;
+pub mod project;
+pub mod state;
 
 use defy::Contextualize;
 use glutin::window::CursorIcon;
@@ -19,7 +21,10 @@ use crate::events::{EventHandler, KeyMods};
 use crate::util::files::{Location, IntoLocation};
 use self::alerts::Alerts;
 use self::canvas::{Canvas, ToolMode, ViewMode};
-use self::interface::{Interface, ButtonId, get_interface};
+use self::interface::{Interface, ButtonId, StateActionAvailability, get_interface};
+use self::project::{
+  Hoi4Project, LassoSelectionMode, MapViewMode, ProvinceInclusionMode, ProjectPaths
+};
 
 use std::path::{Path, PathBuf};
 use std::fmt;
@@ -94,7 +99,7 @@ impl EventHandler for App {
       #[cfg(any(debug_assertions, feature = "debug-mode"))]
       self.raw_open_map_at("./test_map.zip");
       #[cfg(not(any(debug_assertions, feature = "debug-mode")))]
-      self.alerts.push(Ok("Drag a file, archive, or folder onto the application to load a map"));
+      self.alerts.push(Ok("Drag a mod root onto the application to load a state project"));
     };
   }
 
@@ -120,6 +125,76 @@ impl EventHandler for App {
 
   fn on_key(&mut self, key: Key, state: bool, mods: KeyMods, cursor_pos: Option<Vector2<f64>>) {
     let Some(interface) = self.interface.as_ref() else { return };
+    if state && self.canvas.as_ref().is_some_and(Canvas::property_editor_is_open) {
+      match key {
+        Key::Escape => {
+          self.resolve_property_draft();
+          return;
+        },
+        Key::L if !mods.ctrl => {
+          if self.resolve_property_draft()
+            && let Some(canvas) = self.canvas.as_mut()
+          {
+            canvas.activate_state_lasso(lasso_mode_from_mods(mods), &mut self.alerts);
+          }
+          return;
+        },
+        Key::Tab => {
+          if let Some(canvas) = self.canvas.as_mut() {
+            canvas.state_property_editor_next_field(mods.shift);
+          }
+          return;
+        },
+        Key::Backspace => {
+          if let Some(canvas) = self.canvas.as_mut() {
+            canvas.state_property_editor_backspace();
+          }
+          return;
+        },
+        Key::Delete => {
+          if let Some(canvas) = self.canvas.as_mut() {
+            canvas.state_property_editor_clear_field();
+          }
+          return;
+        },
+        Key::Return => {
+          if let Some(canvas) = self.canvas.as_mut() {
+            canvas.apply_state_property_draft(&mut self.alerts);
+          }
+          return;
+        },
+        Key::A if mods.ctrl => {
+          if let Some(canvas) = self.canvas.as_mut() {
+            canvas.state_property_editor_select_all();
+          }
+          return;
+        },
+        Key::S if mods.ctrl => (),
+        Key::O if mods.ctrl => (),
+        Key::R if mods.ctrl && mods.alt => (),
+        Key::D if mods.ctrl && mods.shift => (),
+        Key::D1 | Key::D2 | Key::D3 | Key::D4
+        | Key::D5 | Key::D6 | Key::D7 | Key::D8 => (),
+        Key::Z | Key::Y if mods.ctrl => {
+          if self.canvas.as_ref().is_some_and(Canvas::property_draft_is_modified) {
+            return;
+          }
+          if let Some(canvas) = self.canvas.as_mut() {
+            canvas.discard_unmodified_property_draft();
+          }
+        },
+        Key::M if !mods.shift => {
+          if self.resolve_property_draft()
+            && let Some(canvas) = self.canvas.as_mut()
+            && canvas.move_confirmation_message().as_deref().is_none_or(msg_dialog_confirm_state_batch)
+          {
+            canvas.move_selected_provinces_to_target(&mut self.alerts);
+          }
+          return;
+        },
+        _ => return,
+      }
+    }
     match (&mut self.canvas, state, key) {
       (_, state, Key::Tab) => self.alerts.set_state(state),
       (_, true, Key::O) if mods.ctrl => self.action_open_map(mods.alt),
@@ -128,9 +203,32 @@ impl EventHandler for App {
       (Some(_), true, Key::R) if mods.ctrl && mods.alt => self.action_reveal_map(),
       (Some(canvas), true, Key::Z) if mods.ctrl => canvas.undo(),
       (Some(canvas), true, Key::Y) if mods.ctrl => canvas.redo(),
+      (Some(canvas), true, Key::D) if mods.ctrl && mods.shift => {
+        if (!canvas.has_unsaved_state_edits() && !canvas.property_draft_is_modified())
+          || msg_dialog_discard_state_edits()
+        {
+          canvas.discard_state_edit_session(&mut self.alerts);
+        }
+      },
+      (Some(canvas), true, Key::M) if !mods.shift => {
+        if canvas.move_confirmation_message().as_deref().is_none_or(msg_dialog_confirm_state_batch) {
+          canvas.move_selected_provinces_to_target(&mut self.alerts);
+        }
+      },
+      (Some(canvas), true, Key::Delete) => {
+        if canvas.unassign_confirmation_message().as_deref().is_none_or(msg_dialog_confirm_state_batch) {
+          canvas.unassign_selected_provinces(&mut self.alerts);
+        }
+      },
       (Some(canvas), true, Key::Space) => canvas.cycle_tool_brush(interface, cursor_pos, mods.shift, &mut self.alerts),
-      (Some(canvas), true, Key::Escape) => canvas.cancel_tool(),
-      (Some(canvas), true, Key::Return) => canvas.finish_tool(),
+      (Some(canvas), true, Key::Escape) => if !canvas.cancel_state_lasso()
+        && !canvas.clear_state_selection()
+      {
+        canvas.cancel_tool();
+      },
+      (Some(canvas), true, Key::Return) => if !canvas.advance_state_lasso(&mut self.alerts) {
+        canvas.finish_tool();
+      },
       (Some(canvas), true, Key::C) if mods.shift => canvas.calculate_coastal_provinces(),
       (Some(canvas), true, Key::R) if mods.shift => canvas.calculate_recolor_map(),
       (Some(canvas), true, Key::P) if mods.shift => canvas.display_problems(&mut self.alerts),
@@ -138,21 +236,34 @@ impl EventHandler for App {
       (Some(canvas), true, Key::H) => canvas.camera.reset(),
       (Some(canvas), true, Key::A) => canvas.set_tool_mode(ToolMode::PaintArea),
       (Some(canvas), true, Key::B) => canvas.set_tool_mode(ToolMode::PaintBucket),
-      (Some(canvas), true, Key::L) => canvas.set_tool_mode(ToolMode::new_lasso()),
+      (Some(canvas), true, Key::L) => if canvas.map_view_mode() == MapViewMode::States {
+        canvas.activate_state_lasso(lasso_mode_from_mods(mods), &mut self.alerts);
+      } else {
+        canvas.set_tool_mode(ToolMode::new_lasso());
+      },
       (Some(_), true, Key::D1) => self.action_change_view_mode(ViewMode::Color),
       (Some(_), true, Key::D2) => self.action_change_view_mode(ViewMode::Kind),
       (Some(_), true, Key::D3) => self.action_change_view_mode(ViewMode::Terrain),
       (Some(_), true, Key::D4) => self.action_change_view_mode(ViewMode::Continent),
       (Some(_), true, Key::D5) => self.action_change_view_mode(ViewMode::Coastal),
       (Some(_), true, Key::D6) => self.action_change_view_mode(ViewMode::Adjacencies),
+      (Some(_), true, Key::D7) => self.action_change_map_view_mode(MapViewMode::Provinces),
+      (Some(_), true, Key::D8) => self.action_change_map_view_mode(MapViewMode::States),
       _ => ()
     };
   }
 
+  fn on_text(&mut self, text: String) {
+    if let Some(canvas) = self.canvas.as_mut() {
+      canvas.input_state_property_text(&text);
+    }
+  }
+
   fn on_mouse(&mut self, button: MouseButton, state: bool, mods: KeyMods, pos: Vector2<f64>) {
+    let ictx = self.get_interface_draw_context();
     let Some(interface) = self.interface.as_mut() else { return };
     match (&mut self.canvas, state, button) {
-      (_, true, MouseButton::Left) => match interface.on_mouse_click(pos) {
+      (_, true, MouseButton::Left) => match interface.on_mouse_click(pos, ictx) {
         Ok(id) => self.action_interface_button(id),
         Err(true) => self.action_activate_tool(pos, mods),
         Err(false) => ()
@@ -186,7 +297,7 @@ impl EventHandler for App {
     let Some(interface) = self.interface.as_ref() else { return };
     let Some(canvas) = &mut self.canvas else { return };
 
-    if mods.shift {
+    if mods.shift && !canvas.state_lasso_is_active() {
       canvas.change_tool_radius(y);
     } else {
       canvas.camera.on_mouse_zoom(interface, y, cursor_pos);
@@ -194,6 +305,14 @@ impl EventHandler for App {
   }
 
   fn on_file_drop(&mut self, path: PathBuf) {
+    if !self.resolve_property_draft() {
+      return;
+    }
+    if self.canvas.as_ref().is_some_and(Canvas::has_unsaved_state_edits)
+      && !msg_dialog_discard_state_edits()
+    {
+      return;
+    }
     self.raw_open_map_at(path);
   }
 
@@ -205,12 +324,27 @@ impl EventHandler for App {
     self.alerts.set_state(false);
   }
 
-  fn on_close(mut self) {
+  fn on_close(&mut self) -> bool {
+    if self.canvas.as_ref().is_some_and(Canvas::property_draft_is_modified) {
+      let province = self.canvas.as_ref().is_some_and(Canvas::province_data_editor_is_open);
+      if !msg_dialog_discard_property_draft_exit(province) {
+        return false;
+      }
+      if let Some(canvas) = self.canvas.as_mut() {
+        canvas.discard_state_property_draft(&mut self.alerts);
+      }
+    } else if let Some(canvas) = self.canvas.as_mut() {
+      canvas.discard_unmodified_property_draft();
+    }
+    if self.canvas.as_ref().is_some_and(Canvas::has_unsaved_state_edits) {
+      return msg_dialog_discard_state_edits_exit();
+    }
     if self.is_canvas_modified() {
       if msg_dialog_unsaved_changes_exit() {
         self.action_save_map();
       };
     };
+    true
   }
 
   fn get_cursor(&self) -> CursorIcon {
@@ -219,28 +353,51 @@ impl EventHandler for App {
 }
 
 impl App {
+  fn resolve_property_draft(&mut self) -> bool {
+    let province = self.canvas.as_ref().is_some_and(Canvas::province_data_editor_is_open);
+    let Some(canvas) = self.canvas.as_mut() else { return true };
+    if !canvas.property_editor_is_open() {
+      return true;
+    }
+    if canvas.discard_unmodified_property_draft() {
+      return true;
+    }
+    match msg_dialog_resolve_property_draft(province) {
+      DraftResolution::Apply => canvas.apply_state_property_draft(&mut self.alerts),
+      DraftResolution::Discard => {
+        canvas.discard_state_property_draft(&mut self.alerts);
+        true
+      },
+      DraftResolution::KeepEditing => false,
+    }
+  }
+
   fn get_interface_draw_context(&self) -> InterfaceDrawContext {
     match &self.canvas {
       Some(canvas) => InterfaceDrawContext {
-        view_mode: Some(canvas.view_mode()),
-        selected_tool: Some(match &canvas.tool.mode {
-          ToolMode::PaintArea => 0,
-          ToolMode::PaintBucket => 1,
-          ToolMode::Lasso(_) => 2
-        }),
-        enabled_options: canvas.enabled_options()
+        view_mode: (canvas.map_view_mode() == MapViewMode::Provinces)
+          .then_some(canvas.view_mode()),
+        selected_tool: (canvas.map_view_mode() == MapViewMode::Provinces)
+          .then_some(match &canvas.tool.mode {
+            ToolMode::PaintArea => 0,
+            ToolMode::PaintBucket => 1,
+            ToolMode::Lasso(_) => 2
+          }),
+        enabled_options: canvas.enabled_options(),
+        state_actions: canvas.state_action_availability()
       },
       None => InterfaceDrawContext {
         view_mode: None,
         selected_tool: None,
-        enabled_options: [false; 3]
+        enabled_options: [false; 3],
+        state_actions: StateActionAvailability::default()
       }
     }
   }
 
   fn is_canvas_modified(&self) -> bool {
     if let Some(canvas) = &self.canvas {
-      canvas.modified
+      canvas.modified || canvas.has_unsaved_state_edits()
     } else {
       false
     }
@@ -248,6 +405,29 @@ impl App {
 
   pub fn action_interface_button(&mut self, id: ButtonId) {
     use self::interface::ButtonId::*;
+    if id == ToolbarEditActivateStateLasso {
+      if self.resolve_property_draft()
+        && let Some(canvas) = self.canvas.as_mut()
+      {
+        canvas.activate_state_lasso(None, &mut self.alerts);
+      }
+      return;
+    }
+    if id == ToolbarEditClearStateSelection {
+      if self.resolve_property_draft()
+        && let Some(canvas) = self.canvas.as_mut()
+      {
+        canvas.clear_state_selection();
+      }
+      return;
+    }
+    if matches!(
+      id,
+      ToolbarEditMoveSelectedToTarget | ToolbarEditUnassignSelected
+    ) && !self.resolve_property_draft()
+    {
+      return;
+    }
     match (&mut self.canvas, id) {
       (_, ToolbarFileOpenFileArchive) => self.action_open_map(true),
       (_, ToolbarFileOpenFolder) => self.action_open_map(false),
@@ -259,17 +439,76 @@ impl App {
       (Some(_), ToolbarFileExportTerrainMap) => self.action_export_terrain_map(),
       (Some(canvas), ToolbarEditUndo) => canvas.undo(),
       (Some(canvas), ToolbarEditRedo) => canvas.redo(),
+      (Some(canvas), ToolbarEditNewState) => {
+        canvas.open_new_state_editor(&mut self.alerts);
+      },
+      (Some(canvas), ToolbarEditRemoveState) => {
+        canvas.open_remove_state_editor(&mut self.alerts);
+      },
+      (Some(canvas), ToolbarEditStateProperties) => {
+        canvas.open_state_property_editor(&mut self.alerts);
+      },
+      (Some(canvas), ToolbarEditProvinceData) => {
+        canvas.open_province_data_editor(&mut self.alerts);
+      },
       (Some(canvas), ToolbarEditCoastal) => canvas.calculate_coastal_provinces(),
       (Some(canvas), ToolbarEditRecolor) => canvas.calculate_recolor_map(),
       (Some(canvas), ToolbarEditProblems) => canvas.display_problems(&mut self.alerts),
       (Some(canvas), ToolbarEditToggleLassoSnap) => canvas.toggle_lasso_snap(),
       (Some(canvas), ToolbarEditNextMaskMode) => canvas.tool.cycle_brush_mask(),
+      (Some(canvas), ToolbarEditSelectTargetStateProvinces) => {
+        canvas.select_target_state_provinces(&mut self.alerts);
+      },
+      (Some(_), ToolbarEditActivateStateLasso) => unreachable!(),
+      (Some(canvas), ToolbarEditStateLassoReplace) => {
+        canvas.set_state_lasso_mode(LassoSelectionMode::Replace, &mut self.alerts);
+      },
+      (Some(canvas), ToolbarEditStateLassoAdd) => {
+        canvas.set_state_lasso_mode(LassoSelectionMode::Add, &mut self.alerts);
+      },
+      (Some(canvas), ToolbarEditStateLassoRemove) => {
+        canvas.set_state_lasso_mode(LassoSelectionMode::Remove, &mut self.alerts);
+      },
+      (Some(canvas), ToolbarEditStateLassoCentroid) => {
+        canvas.set_state_lasso_inclusion(ProvinceInclusionMode::CentroidInside, &mut self.alerts);
+      },
+      (Some(canvas), ToolbarEditStateLassoAnyIntersection) => {
+        canvas.set_state_lasso_inclusion(ProvinceInclusionMode::AnyIntersection, &mut self.alerts);
+      },
+      (Some(canvas), ToolbarEditStateLassoMajority) => {
+        canvas.set_state_lasso_inclusion(ProvinceInclusionMode::MajorityInside, &mut self.alerts);
+      },
+      (Some(canvas), ToolbarEditConfirmStateLasso) => canvas.confirm_state_lasso(&mut self.alerts),
+      (Some(canvas), ToolbarEditCancelStateLasso) => {
+        if !canvas.cancel_state_lasso() {
+          self.alerts.push(Err("No active state lasso"));
+        }
+      },
+      (Some(canvas), ToolbarEditMoveSelectedToTarget) => {
+        if canvas.move_confirmation_message().as_deref().is_none_or(msg_dialog_confirm_state_batch) {
+          canvas.move_selected_provinces_to_target(&mut self.alerts);
+        }
+      },
+      (Some(canvas), ToolbarEditUnassignSelected) => {
+        if canvas.unassign_confirmation_message().as_deref().is_none_or(msg_dialog_confirm_state_batch) {
+          canvas.unassign_selected_provinces(&mut self.alerts);
+        }
+      },
+      (Some(_), ToolbarEditClearStateSelection) => unreachable!(),
+      (Some(canvas), ToolbarEditDiscardStateSession) => if (
+        !canvas.has_unsaved_state_edits() && !canvas.property_draft_is_modified()
+      ) || msg_dialog_discard_state_edits()
+      {
+        canvas.discard_state_edit_session(&mut self.alerts);
+      },
       (Some(_), ToolbarViewMode1) => self.action_change_view_mode(ViewMode::Color),
       (Some(_), ToolbarViewMode2) => self.action_change_view_mode(ViewMode::Kind),
       (Some(_), ToolbarViewMode3) => self.action_change_view_mode(ViewMode::Terrain),
       (Some(_), ToolbarViewMode4) => self.action_change_view_mode(ViewMode::Continent),
       (Some(_), ToolbarViewMode5) => self.action_change_view_mode(ViewMode::Coastal),
       (Some(_), ToolbarViewMode6) => self.action_change_view_mode(ViewMode::Adjacencies),
+      (Some(_), ToolbarViewProvinceMap) => self.action_change_map_view_mode(MapViewMode::Provinces),
+      (Some(_), ToolbarViewStateMap) => self.action_change_map_view_mode(MapViewMode::States),
       (Some(canvas), ToolbarViewToggleProvinceIds | SidebarOptionProvinceIds) => canvas.toggle_province_ids(),
       (Some(canvas), ToolbarViewToggleProvinceBoundaries | SidebarOptionProvinceBoundaries) => canvas.toggle_province_boundaries(),
       (Some(canvas), ToolbarViewToggleRiverOverlay | SidebarOptionRiverOverlay) => if canvas.toggle_river_overlay() {
@@ -289,14 +528,42 @@ impl App {
   }
 
   fn action_activate_tool(&mut self, pos: Vector2<f64>, mods: KeyMods) {
+    let editor_consumed = self.interface.as_ref().is_some_and(|interface| {
+      self.canvas.as_mut().is_some_and(|canvas| {
+        canvas.state_property_editor_click(interface, pos, &mut self.alerts)
+      })
+    });
+    if editor_consumed {
+      return;
+    }
+    let resolve_draft = self.interface.as_ref().is_some_and(|interface| {
+      self.canvas.as_ref().is_some_and(|canvas| {
+        canvas.map_view_mode() == MapViewMode::States
+          && !canvas.state_lasso_is_active()
+          && canvas.state_click_would_change_property_draft(interface, pos)
+      })
+    });
+    if resolve_draft && !self.resolve_property_draft() {
+      return;
+    }
     let Some(interface) = self.interface.as_ref() else { return };
-    self.painting = true;
-    if let Some(canvas) = &mut self.canvas {
-      if canvas.view_mode() == ViewMode::Adjacencies && canvas.tool.adjacency_brush.is_none() {
-        self.alerts.push(Err("No Adjacency brush selected"));
+    let Some(canvas) = &mut self.canvas else { return };
+    if canvas.map_view_mode() == MapViewMode::States {
+      if canvas.state_lasso_is_active() {
+        canvas.state_lasso_add_point(
+          interface,
+          pos,
+          lasso_mode_from_mods(mods),
+          &mut self.alerts
+        );
       } else {
-        canvas.activate_tool(interface, pos, mods.shift);
-      };
+        canvas.select_state_at(interface, pos, mods.ctrl, &mut self.alerts);
+      }
+    } else if canvas.view_mode() == ViewMode::Adjacencies && canvas.tool.adjacency_brush.is_none() {
+      self.alerts.push(Err("No Adjacency brush selected"));
+    } else {
+      self.painting = true;
+      canvas.activate_tool(interface, pos, mods.shift);
     };
   }
 
@@ -314,12 +581,24 @@ impl App {
     };
   }
 
+  fn action_change_map_view_mode(&mut self, map_view_mode: MapViewMode) {
+    self.painting = false;
+    if let Some(canvas) = &mut self.canvas {
+      canvas.set_map_view_mode(&mut self.alerts, map_view_mode);
+    };
+  }
+
   fn action_open_map(&mut self, archive: bool) {
+    if !self.resolve_property_draft() {
+      return;
+    }
     if let Some(canvas) = &mut self.canvas {
       if canvas.modified {
         if msg_dialog_unsaved_changes() {
           self.action_save_map();
         };
+      } else if canvas.has_unsaved_state_edits() && !msg_dialog_discard_state_edits() {
+        return;
       };
     };
 
@@ -330,13 +609,25 @@ impl App {
 
   fn action_save_map(&mut self) {
     if let Some(canvas) = &self.canvas {
+      if canvas.map_access_mode() == self::canvas::MapAccessMode::ReadOnly {
+        self.alerts.push(Err(
+          "Saving state files is not implemented yet. Created and removed states only exist in the current session."
+        ));
+        return;
+      }
       let location = canvas.location().clone();
       self.raw_save_map_at(location);
     };
   }
 
   fn action_save_map_as(&mut self, archive: bool) {
-    if self.canvas.is_some() {
+    if self.canvas.as_ref().is_some_and(|canvas| {
+      canvas.map_access_mode() == self::canvas::MapAccessMode::ReadOnly
+    }) {
+      self.alerts.push(Err(
+        "Saving state files is not implemented yet. Created and removed states only exist in the current session."
+      ));
+    } else if self.canvas.is_some() {
       if let Some(location) = file_dialog_save(archive) {
         self.raw_save_map_at(location);
       };
@@ -370,8 +661,27 @@ impl App {
   fn raw_open_map_at(&mut self, location: impl IntoLocation) {
     let result = crate::try_block!{
       let location = location.into_location()?;
-      let success_message = format!("Loaded map from {}", location);
-      let canvas = Canvas::load(location)?;
+      let (canvas, success_message) = match location {
+        Location::Directory(root) => match ProjectPaths::discover(&root) {
+          Ok(paths) => {
+            let root = paths.root.clone();
+            let project = Hoi4Project::new(paths);
+            let canvas = Canvas::load_project(project)?;
+            let success_message = format!("Loaded state project from {}", root.display());
+            (canvas, success_message)
+          },
+          Err(err) if ProjectPaths::is_project_root_candidate(&root) => return Err(err.into()),
+          Err(_) => {
+            let location = Location::Directory(root);
+            let success_message = format!("Loaded legacy editable map from {}", location);
+            (Canvas::load(location)?, success_message)
+          }
+        },
+        location => {
+          let success_message = format!("Loaded legacy editable map from {}", location);
+          (Canvas::load(location)?, success_message)
+        }
+      };
       self.canvas = Some(canvas);
       Ok(success_message)
     };
@@ -427,7 +737,8 @@ impl fmt::Debug for App {
 pub struct InterfaceDrawContext {
   pub view_mode: Option<ViewMode>,
   pub selected_tool: Option<usize>,
-  pub enabled_options: [bool; 3]
+  pub enabled_options: [bool; 3],
+  pub state_actions: StateActionAvailability
 }
 
 use rfd::{FileDialog, MessageDialog, MessageDialogResult, MessageButtons, MessageLevel};
@@ -473,6 +784,7 @@ fn file_dialog_open(archive: bool) -> Option<Location> {
   } else {
     FileDialog::new()
       .set_directory(&root)
+      .set_title("Open HOI4 mod root (or legacy map folder)")
       .pick_folder()
       .map(Location::Directory)
   }
@@ -493,6 +805,28 @@ fn msg_dialog_unsaved_changes_exit() -> bool {
   }
 }
 
+fn lasso_mode_from_mods(mods: KeyMods) -> Option<LassoSelectionMode> {
+  if mods.alt {
+    Some(LassoSelectionMode::Remove)
+  } else if mods.shift {
+    Some(LassoSelectionMode::Add)
+  } else {
+    None
+  }
+}
+
+fn msg_dialog_confirm_state_batch(description: &str) -> bool {
+  matches!(
+    MessageDialog::new()
+      .set_title(crate::APPNAME)
+      .set_description(description)
+      .set_level(MessageLevel::Warning)
+      .set_buttons(MessageButtons::YesNo)
+      .show(),
+    MessageDialogResult::Yes
+  )
+}
+
 fn msg_dialog_unsaved_changes() -> bool {
   let result = MessageDialog::new()
     .set_title(crate::APPNAME)
@@ -506,6 +840,98 @@ fn msg_dialog_unsaved_changes() -> bool {
     MessageDialogResult::No => false,
     _ => unreachable!()
   }
+}
+
+fn msg_dialog_discard_state_edits_exit() -> bool {
+  let result = MessageDialog::new()
+    .set_title(crate::APPNAME)
+    .set_description(
+      "This editing session contains unsaved in-memory changes.\n\n\
+       Created, removed, reassigned, or edited states have not been saved.\n\
+       Saving state files is not available yet.\n\
+       Discard the changes and close?\n\n\
+       Yes = Discard and close\n\
+       No = Keep editing"
+    )
+    .set_level(MessageLevel::Warning)
+    .set_buttons(MessageButtons::YesNo)
+    .show();
+
+  match result {
+    MessageDialogResult::Yes => true,
+    MessageDialogResult::No => false,
+    _ => unreachable!()
+  }
+}
+
+fn msg_dialog_discard_state_edits() -> bool {
+  let result = MessageDialog::new()
+    .set_title(crate::APPNAME)
+    .set_description(
+      "Discard all in-memory state edits?\n\n\
+       State file saving is not available yet.\n\
+       Yes = Discard changes\n\
+       No = Keep editing"
+    )
+    .set_level(MessageLevel::Warning)
+    .set_buttons(MessageButtons::YesNo)
+    .show();
+
+  match result {
+    MessageDialogResult::Yes => true,
+    MessageDialogResult::No => false,
+    _ => unreachable!()
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DraftResolution {
+  Apply,
+  Discard,
+  KeepEditing,
+}
+
+fn msg_dialog_resolve_property_draft(province: bool) -> DraftResolution {
+  let subject = if province { "province" } else { "state" };
+  let result = MessageDialog::new()
+    .set_title(crate::APPNAME)
+    .set_description(format!(
+      "This {subject} has unapplied form changes.\n\n\
+       Yes = Apply to session\n\
+       No = Discard draft\n\
+       Cancel = Keep editing"
+    ))
+    .set_level(MessageLevel::Warning)
+    .set_buttons(MessageButtons::YesNoCancel)
+    .show();
+
+  match result {
+    MessageDialogResult::Yes => DraftResolution::Apply,
+    MessageDialogResult::No => DraftResolution::Discard,
+    MessageDialogResult::Cancel => DraftResolution::KeepEditing,
+    _ => DraftResolution::KeepEditing,
+  }
+}
+
+fn msg_dialog_discard_property_draft_exit(province: bool) -> bool {
+  let description = if province {
+    "There are unapplied province changes.\n\n\
+     Yes = Discard draft and continue closing\n\
+     No = Keep editing"
+  } else {
+    "There are unapplied state changes.\n\n\
+     Yes = Discard draft and continue closing\n\
+     No = Keep editing"
+  };
+  matches!(
+    MessageDialog::new()
+      .set_title(crate::APPNAME)
+      .set_description(description)
+      .set_level(MessageLevel::Warning)
+      .set_buttons(MessageButtons::YesNo)
+      .show(),
+    MessageDialogResult::Yes
+  )
 }
 
 pub fn reveal_in_file_browser(path: impl AsRef<Path>) -> Result<(), Error> {

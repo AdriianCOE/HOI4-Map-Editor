@@ -1383,8 +1383,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "hoi4_province_editor"
-version = "0.5.0"
+name = "hoi4_state_editor"
+version = "0.1.0"
 dependencies = [
  "ahash",
  "chrono",

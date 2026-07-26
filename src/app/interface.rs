@@ -33,6 +33,14 @@ const PALETTE_BUTTON: Palette = Palette {
   background_hover_active: colors::BUTTON_HOVER_ACTIVE
 };
 
+const PALETTE_BUTTON_DISABLED: Palette = Palette {
+  foreground: colors::NEUTRAL,
+  background: colors::BUTTON_TOOLBAR,
+  background_active: colors::BUTTON_TOOLBAR,
+  background_hover: colors::BUTTON_TOOLBAR,
+  background_hover_active: colors::BUTTON_TOOLBAR
+};
+
 const PALETTE_BUTTON_TOOLBAR: Palette = Palette {
   foreground: colors::WHITE,
   background: colors::BUTTON_TOOLBAR,
@@ -151,7 +159,11 @@ impl Interface {
   /// If a button was clicked, `Ok` is returned with the appropriate button ID.
   /// If a button was not clicked, a boolean is returned indicating whether or not
   /// the input just processed should be deferred to something below the interface.
-  pub fn on_mouse_click(&mut self, pos: Vector2<f64>) -> Result<ButtonId, bool> {
+  pub fn on_mouse_click(
+    &mut self,
+    pos: Vector2<f64>,
+    ictx: InterfaceDrawContext
+  ) -> Result<ButtonId, bool> {
     for sidebar_button in &self.sidebar_tool_buttons {
       if sidebar_button.base.test(pos) {
         return Ok(sidebar_button.id);
@@ -174,7 +186,11 @@ impl Interface {
         for button in &toolbar_button.buttons {
           if button.base.test(pos) {
             toolbar_button.enabled = false;
-            return Ok(button.id);
+            return if ictx.state_actions.button_enabled(button.id) {
+              Ok(button.id)
+            } else {
+              Err(false)
+            };
           };
         };
       };
@@ -254,7 +270,14 @@ impl Interface {
         toolbar_button.base.draw(ctx, true, true, glyph_cache, gl);
 
         for button in &toolbar_button.buttons {
-          button.draw(ctx, pos, false, glyph_cache, gl);
+          button.draw(
+            ctx,
+            pos,
+            false,
+            ictx.state_actions.button_enabled(button.id),
+            glyph_cache,
+            gl
+          );
         };
       } else {
         let hover = toolbar_button.base.test_maybe(pos);
@@ -275,8 +298,20 @@ impl ButtonElement {
     self.base.test(pos)
   }
 
-  fn draw(&self, ctx: Context, pos: Option<Vector2<f64>>, active: bool, glyph_cache: &mut FontGlyphCache, gl: &mut GlGraphics) {
-    self.base.draw(ctx, self.base.test_maybe(pos), active, glyph_cache, gl);
+  fn draw(
+    &self,
+    ctx: Context,
+    pos: Option<Vector2<f64>>,
+    active: bool,
+    enabled: bool,
+    glyph_cache: &mut FontGlyphCache,
+    gl: &mut GlGraphics
+  ) {
+    if enabled {
+      self.base.draw(ctx, self.base.test_maybe(pos), active, glyph_cache, gl);
+    } else {
+      self.base.draw_with_palette(ctx, false, false, &PALETTE_BUTTON_DISABLED, glyph_cache, gl);
+    }
   }
 
   fn tooltip(&self, view_mode: Option<ViewMode>) -> Option<&'static str> {
@@ -422,20 +457,40 @@ impl ButtonBase {
   }
 
   fn draw(&self, ctx: Context, hover: bool, active: bool, glyph_cache: &mut FontGlyphCache, gl: &mut GlGraphics) {
+    self.draw_with_palette(ctx, hover, active, self.colors(), glyph_cache, gl);
+  }
+
+  fn draw_with_palette(
+    &self,
+    ctx: Context,
+    hover: bool,
+    active: bool,
+    colors: &Palette,
+    glyph_cache: &mut FontGlyphCache,
+    gl: &mut GlGraphics
+  ) {
     match self {
-      ButtonBase::BoxFitWidth { text, plate, colors } => {
+      ButtonBase::BoxFitWidth { text, plate, .. } => {
         plate.draw(ctx, hover, active, colors, gl);
         text.draw(ctx, colors, glyph_cache, gl);
       },
-      ButtonBase::BoxDoubleText { text_left, text_right, plate, colors } => {
+      ButtonBase::BoxDoubleText { text_left, text_right, plate, .. } => {
         plate.draw(ctx, hover, active, colors, gl);
         text_left.draw(ctx, colors, glyph_cache, gl);
         text_right.draw(ctx, colors, glyph_cache, gl);
       },
-      ButtonBase::BoxTexture { texture, plate, colors } => {
+      ButtonBase::BoxTexture { texture, plate, .. } => {
         plate.draw(ctx, hover, active, colors, gl);
         texture.draw(ctx, gl);
       }
+    }
+  }
+
+  fn colors(&self) -> &'static Palette {
+    match self {
+      ButtonBase::BoxFitWidth { colors, .. }
+      | ButtonBase::BoxDoubleText { colors, .. }
+      | ButtonBase::BoxTexture { colors, .. } => colors
     }
   }
 
@@ -581,6 +636,24 @@ pub enum ButtonId {
   ToolbarFileExportTerrainMap,
   ToolbarEditUndo,
   ToolbarEditRedo,
+  ToolbarEditNewState,
+  ToolbarEditRemoveState,
+  ToolbarEditStateProperties,
+  ToolbarEditProvinceData,
+  ToolbarEditSelectTargetStateProvinces,
+  ToolbarEditActivateStateLasso,
+  ToolbarEditStateLassoReplace,
+  ToolbarEditStateLassoAdd,
+  ToolbarEditStateLassoRemove,
+  ToolbarEditStateLassoCentroid,
+  ToolbarEditStateLassoAnyIntersection,
+  ToolbarEditStateLassoMajority,
+  ToolbarEditConfirmStateLasso,
+  ToolbarEditCancelStateLasso,
+  ToolbarEditMoveSelectedToTarget,
+  ToolbarEditUnassignSelected,
+  ToolbarEditClearStateSelection,
+  ToolbarEditDiscardStateSession,
   ToolbarEditCoastal,
   ToolbarEditRecolor,
   ToolbarEditProblems,
@@ -592,6 +665,8 @@ pub enum ButtonId {
   ToolbarViewMode4,
   ToolbarViewMode5,
   ToolbarViewMode6,
+  ToolbarViewProvinceMap,
+  ToolbarViewStateMap,
   ToolbarViewToggleProvinceIds,
   ToolbarViewToggleProvinceBoundaries,
   ToolbarViewToggleRiverOverlay,
@@ -607,6 +682,63 @@ pub enum ButtonId {
   SidebarOptionProvinceIds,
   SidebarOptionProvinceBoundaries,
   SidebarOptionRiverOverlay
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StateActionAvailability {
+  pub state_view: bool,
+  pub lasso_active: bool,
+  pub lasso_preview: bool,
+  pub has_selection: bool,
+  pub has_target: bool,
+  pub can_move: bool,
+  pub can_unassign: bool,
+  pub can_edit_properties: bool,
+  pub can_edit_province_data: bool,
+  pub can_create_state: bool,
+  pub can_remove_state: bool,
+  pub property_editor_open: bool,
+  pub property_draft_modified: bool,
+  pub can_undo: bool,
+  pub can_redo: bool,
+  pub has_edits: bool
+}
+
+impl StateActionAvailability {
+  fn button_enabled(self, id: ButtonId) -> bool {
+    use ButtonId::*;
+    match id {
+      ToolbarEditUndo => self.can_undo,
+      ToolbarEditRedo => self.can_redo,
+      ToolbarEditNewState => {
+        self.state_view && self.can_create_state && !self.property_editor_open
+      },
+      ToolbarEditRemoveState => {
+        self.state_view && self.can_remove_state && !self.property_editor_open
+      },
+      ToolbarEditStateProperties => {
+        self.state_view && self.can_edit_properties && !self.property_editor_open
+      },
+      ToolbarEditProvinceData => {
+        self.state_view && self.can_edit_province_data && !self.property_editor_open
+      },
+      ToolbarEditSelectTargetStateProvinces => self.state_view && self.has_target,
+      ToolbarEditActivateStateLasso => self.state_view && !self.lasso_active,
+      ToolbarEditStateLassoReplace
+      | ToolbarEditStateLassoAdd
+      | ToolbarEditStateLassoRemove
+      | ToolbarEditStateLassoCentroid
+      | ToolbarEditStateLassoAnyIntersection
+      | ToolbarEditStateLassoMajority => self.state_view,
+      ToolbarEditConfirmStateLasso => self.lasso_preview,
+      ToolbarEditCancelStateLasso => self.lasso_active,
+      ToolbarEditMoveSelectedToTarget => self.state_view && self.can_move,
+      ToolbarEditUnassignSelected => self.state_view && self.can_unassign,
+      ToolbarEditClearStateSelection => self.state_view && self.has_selection,
+      ToolbarEditDiscardStateSession => self.state_view && self.has_edits,
+      _ => true
+    }
+  }
 }
 
 type ToolbarButtonPrimitive<'a> = (&'a str, &'a [(&'a str, &'a str, ButtonId)]);
@@ -633,11 +765,31 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
   ("Edit", &[
     ("Undo", "Ctrl+Z", ButtonId::ToolbarEditUndo),
     ("Redo", "Ctrl+Y", ButtonId::ToolbarEditRedo),
+    ("New State", "", ButtonId::ToolbarEditNewState),
+    ("Remove state from session", "", ButtonId::ToolbarEditRemoveState),
+    ("Edit state properties", "", ButtonId::ToolbarEditStateProperties),
+    ("Edit province data", "", ButtonId::ToolbarEditProvinceData),
+    ("Select All Provinces in Target State", "", ButtonId::ToolbarEditSelectTargetStateProvinces),
+    ("Move Selected Provinces to Target State", "M", ButtonId::ToolbarEditMoveSelectedToTarget),
+    ("Unassign Selected Provinces", "Delete", ButtonId::ToolbarEditUnassignSelected),
+    ("Clear State Edit Selection", "Esc", ButtonId::ToolbarEditClearStateSelection),
+    ("Discard all in-memory state edits", "Ctrl+Shift+D", ButtonId::ToolbarEditDiscardStateSession),
     ("Re-calculate Coastal Provinces", "Shift+C", ButtonId::ToolbarEditCoastal),
     ("Re-color Provinces", "Shift+R", ButtonId::ToolbarEditRecolor),
     ("Calculate Map Errors/Warnings", "Shift+P", ButtonId::ToolbarEditProblems),
     ("Toggle Lasso Pixel Snap", "", ButtonId::ToolbarEditToggleLassoSnap),
     ("Next Brush Mask Mode", "Shift+M", ButtonId::ToolbarEditNextMaskMode)
+  ]),
+  ("State Lasso", &[
+    ("Start State Lasso", "L", ButtonId::ToolbarEditActivateStateLasso),
+    ("Selection Mode: Replace", "", ButtonId::ToolbarEditStateLassoReplace),
+    ("Selection Mode: Add", "Shift+Lasso", ButtonId::ToolbarEditStateLassoAdd),
+    ("Selection Mode: Remove", "Alt+Lasso", ButtonId::ToolbarEditStateLassoRemove),
+    ("Inclusion: Centroid", "", ButtonId::ToolbarEditStateLassoCentroid),
+    ("Inclusion: Any Intersection", "", ButtonId::ToolbarEditStateLassoAnyIntersection),
+    ("Inclusion: Majority", "", ButtonId::ToolbarEditStateLassoMajority),
+    ("Confirm Selection", "Enter", ButtonId::ToolbarEditConfirmStateLasso),
+    ("Cancel", "Esc", ButtonId::ToolbarEditCancelStateLasso)
   ]),
   ("View", &[
     ("Color/Province Map View Mode", "1", ButtonId::ToolbarViewMode1),
@@ -646,6 +798,8 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
     ("Continents Map View Mode", "4", ButtonId::ToolbarViewMode4),
     ("Coastal Provinces Map View Mode", "5", ButtonId::ToolbarViewMode5),
     ("Adjacencies Map View Mode", "6", ButtonId::ToolbarViewMode6),
+    ("Province Map", "7", ButtonId::ToolbarViewProvinceMap),
+    ("State Map", "8", ButtonId::ToolbarViewStateMap),
     ("Toggle Province IDs", "", ButtonId::ToolbarViewToggleProvinceIds),
     ("Toggle Province Boundaries", "", ButtonId::ToolbarViewToggleProvinceBoundaries),
     ("Toggle Rivers Overlay", "", ButtonId::ToolbarViewToggleRiverOverlay),

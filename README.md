@@ -1,84 +1,130 @@
-# HOI4 Province Editor
-[Latest Release](https://github.com/ScottyThePilot/hoi4_province_editor/releases/latest)
+# HOI4 State Editor
 
-This program is designed to simplify or replace needing to manually edit `provinces.bmp` and `definition.csv` when
-editing HOI4 Maps. The idea behind this program is that it unifies editing both files in one place with a graphical
-editor, as well as attempting to guarantee that all province maps created by this program will load correctly into
-the game.
+Graphical state editor for Hearts of Iron IV mods.
 
-This program is not a complete replacement for MapGen, it is intended to be used to edit a map you have already
-generated with MapGen, or for making tweaks to an already complete map.
+This project is an early-stage fork of
+[ScottyThePilot/hoi4_province_editor](https://github.com/ScottyThePilot/hoi4_province_editor).
+It still inherits most of the original Province Editor, including BMP/CSV
+loading, OpenGL rendering, camera controls, province picking, borders, lasso,
+selective texture updates, diagnostics, and undo/redo.
 
-Please make backups of your maps before using HOI4PE, and regularly while using HOI4PE.
+The new editor opens a mod root and uses:
 
-![Province Map Mode](images/hoi4pe_color.png)
-![Terrain Map Mode](images/hoi4pe_terrain.png)
+```text
+mod-root/
+├─ map/
+│  ├─ provinces.bmp
+│  ├─ definition.csv
+│  ├─ adjacencies.csv  (optional)
+│  └─ rivers.bmp       (optional)
+└─ history/
+   └─ states/
+      └─ *.txt
+```
 
-To load a map, you can do one of the following:
-- Drag a folder and it will look for a `provinces.bmp` and `definition.csv` inside that folder
-- Drag a file and if its name is `provinces.bmp` or `definition.csv`, it will look in the same folder for the other file
-- Drag a ZIP archive, and it will try to load `provinces.bmp` and `definition.csv` from the archive
-- Use `Ctrl-O` or `Ctrl-Alt-O` to load a folder or archive using the file browser
+The intended data flow is:
 
-By default, HOI4PE will scramble all of the province IDs in your `definition.csv`. If you are editing a pre-existing
-map, this will probably mess up states, strategic regions, etc. In order to mitigate this, you can set the
-`preserve-ids` key to `true` in `hoi4pe_config.toml`; this will attempt to keep the ID scrambling to a minimum, and if
-IDs do change, they will be logged to `id_changes.txt`.
+```text
+provinces.bmp -> RGB -> definition.csv -> province ID -> state
+```
 
-In the terrain/biome map mode, the colors are based on what MapGen/ProvGen takes as input for terrain maps.
-In the coastal map mode, darker colors represent provinces that are not coastal, while lighter colors are coastal.
+For state projects, the geographic map is a read-only visual base.
+`history/states/*.txt` is parsed and indexed without being modified.
+State rendering and selection use an in-memory working model. Province-to-state
+associations and selected state properties can be changed temporarily,
+inspected, undone, redone, or discarded. States can also be created or removed
+from the current session, but they are not serialized and no mod file is
+created, deleted, renamed, or written.
 
-When painting continent IDs, you cannot paint continent 0 on land, and sea can only have continent 0.
+## Current status
 
-## Controls
-- `1` Color/province map view mode
-- `2` Terrain/biome map view mode
-- `3` Land type map view mode
-- `4` Continents map view mode
-- `5` Coastal provinces map view mode
-- `6` Adjacencies map view mode
-- `Left-click` will draw with a color or map data while a color or some data is selected
-- `Right-click` will grab and pan the camera around
-- `Middle-click` will pick whatever color or map data that you are pointing at
-- `Scroll` will zoom the map view
-- `Shift-Scroll` will resize your brush when in color mode
-- `Ctrl-Z` and `Ctrl-Y` are Undo and Redo, respectively
-- `Ctrl-Shift-S` will Save-As, adding `Alt` will allow you to save as an archive
-- `Ctrl-S` will Save, overwriting whatever map files you had imported
-- `Ctrl-O` will let you open a `map` folder, adding `Alt` will allow you to select archives
-- `Spacebar` will give you a new color/type/terrain/continent to paint with depending on map mode
-- `Shift-C` will re-calculate coastal provinces
-- `Shift-R` will randomly re-color all of the provinces on the map
-- `Shift-P` will calculate and display symbols indicating map errors/warnings
-- `A` switches to the area/brush tool
-- `B` switches to the bucket/fill tool
-- `L` switches to the lasso tool
-- `H` resets the camera view
-- `Tab` show all recent informative alert messages
-- `Escape` to cancel a lasso
-- `Enter` to complete a lasso
+- Mod-root discovery and validation are implemented.
+- Province map loading and rendering remain inherited.
+- State-domain models are prepared without a fake parser.
+- State files are discovered deterministically and parsed into a generic
+  PDXScript syntax tree with source spans and preserved trivia.
+- Typed state data, state IDs, province assignments, diagnostics, and loading
+  summaries are built without changing the map texture.
+- A cached state-map view assigns deterministic colors by state ID, draws
+  inter-state borders, highlights diagnostic provinces, and supports
+  read-only state selection and inspection.
+- The state view supports in-memory transactional reassignment of selected
+  land provinces to an existing target state, plus explicit unassignment,
+  undo, redo, and discard.
+- A state-specific polygon lasso selects whole land provinces without painting
+  pixels. It provides Replace, Add, and Remove modes; Centroid, Any
+  Intersection, and Majority inclusion criteria; and a cached preview that
+  must be confirmed before the edit selection changes.
+- Keys `7` and `8` switch between province and state views.
+- In state view, Ctrl+click toggles province selection for the edit session,
+  normal click selects the target state, the Edit menu can select every
+  province in that target, `M` moves the selected provinces to it, `Delete`
+  unassigns them, `Esc` clears the current edit selection, and
+  `Ctrl+Shift+D` discards the session.
+- In state view, `L` starts the state lasso. Click adds map-anchored polygon
+  points, clicking the first point or pressing `Enter` creates the preview,
+  another `Enter` confirms only the selection, and `Esc` cancels drawing or
+  preview. Shift selects Add mode and Alt selects Remove mode. The State Lasso
+  menu exposes the same controls and inclusion criteria.
+- Confirming a lasso never marks the project dirty and never enters edit
+  history. A later Move or Unassign passes the confirmed province IDs to the
+  same transactional command used by Ctrl+click selection, producing one
+  undo entry for the whole batch.
+- The Edit menu opens an explicit temporary property draft for a valid selected
+  state. General values, owner/controller, cores, claims, resources, and
+  state-level buildings are validated and enter the working session only after
+  `Apply to session`. `Discard draft` drops typing without changing history.
+- Each property Apply is one command in the same ordered undo/redo history as
+  Move and Unassign. Draft typing is not dirty; confirmed working values are
+  compared with the immutable baseline, and global discard restores both
+  province assignments and properties.
+- A separately tracked active province can open a temporary provincial-data
+  draft. Victory points and custom province buildings are validated and
+  applied together as one command in the same history. Those confirmed values
+  follow the province through Move and Unassign without regenerating the map.
+- `Edit > New State` creates either an empty state or a state containing the
+  current province selection. IDs are suggested deterministically and rejected
+  when occupied or reserved. The state exists only in the working session and
+  has no backing file.
+- `Edit > Remove state from session` either moves all provinces atomically to
+  another active state or leaves them temporarily unassigned. Loaded states
+  become session tombstones; undo restores their properties, victory points,
+  province buildings, target eligibility, and visual state.
+- Create and Remove each produce exactly one command in the unified history.
+  Redo keeps created IDs reserved, and global discard restores the loaded
+  baseline with zero created or removed states.
+- Geographic painting, recoloring, metadata changes, adjacency changes, and
+  map saving are blocked when a state project is open. `Ctrl+S` remains
+  intentionally blocked for state projects because the serializer is not part
+  of this phase. The property editor never uses a Save action.
+- Opening a direct `map/` folder or map ZIP remains available as an explicitly
+  legacy, editable compatibility mode.
 
-Adjacencies may be created by dragging from one province to another with `Left-click`.
-Note that HOI4 requires `sea` and `land` adjacencies to have a "through province" which you will have to specify manually.
+See [Architecture](docs/ARCHITECTURE.md) and
+[Migration plan](docs/MIGRATION_PLAN.md).
 
-## Features
-- Map viewing, editing, manupulation, importing and exporting
-- Flood-fill and polygonal lasso tools
-- Support for custom terrain types via `hoi4pe_config.toml`
-- Seeing map errors/warnings graphically (via `Shift-P`)
-- Auto-generating which provinces are coastal (via `Shift-C`)
-- Exporting terrain or land type view modes for MapGen/ProvGen
-- Preserving province IDs (in order to not break maps)
-- Viewing province ID numbers on the map
-- Support for creating/editing adjacencies
+## Safety
 
-## Manually Building
-1. [Install Rust](https://www.rust-lang.org/tools/install)
-2. Clone this repository to a folder and navigate there in your terminal
-3. Run `cargo build --release` in that folder, wait for it to complete
-4. The resulting executable should be located in `/target/release`
+This is experimental software. Keep backups of every mod before opening or
+editing it. The state-project path does not save `provinces.bmp`,
+`definition.csv`, `adjacencies.csv`, `rivers.bmp`, or state files in this
+phase. State edits are held only in memory until the edit session is discarded
+or the application is closed.
 
-## Credits
-This project uses icons/assets from the following projects:
-- https://github.com/tabler/tabler-icons, under the MIT license
-- https://github.com/astrit/css.gg, under the MIT license
+## Building
+
+1. Install a current Rust toolchain.
+2. Clone this repository.
+3. Run `cargo build --release`.
+4. Find the executable under `target/release`.
+
+## License and credits
+
+The project remains licensed under the MIT License. Original copyright,
+history, and credit belong to ScottyThePilot and the contributors to
+`hoi4_province_editor`.
+
+Bundled icons/assets also retain their original licenses and credits:
+
+- [Tabler Icons](https://github.com/tabler/tabler-icons)
+- [css.gg](https://github.com/astrit/css.gg)
