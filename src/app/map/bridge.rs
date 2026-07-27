@@ -27,30 +27,38 @@ pub(super) fn load_bundle(location: &Location, config: Config) -> Result<Bundle,
     Ok((province_image, definition_table, adjacencies_table, rivers))
   })?;
 
-  Ok(construct_map_data(province_image, definition_table, adjacencies_table, rivers, config))
+  construct_map_data(province_image, definition_table, adjacencies_table, rivers, config)
 }
 
-fn construct_map_data(
+pub(super) fn construct_map_data(
   province_image: RgbImage,
   definition_table: Vec<Definition>,
   adjacencies_table: Vec<Adjacency>,
   rivers: Option<RgbImage>,
   config: Config
-) -> Bundle {
+) -> Result<Bundle, Error> {
   let mut color_buffer = province_image;
 
-  let mut preserved_id_count = definition_table[0].id;
-  // Create a sparse array for mapping province ids to colors
-  let mut color_index = Vec::with_capacity(definition_table.len());
-  for d in definition_table.iter() {
-    let len = color_index.len().max(d.id as usize + 1);
-    preserved_id_count = preserved_id_count.max(d.id);
-    color_index.resize(len, None);
-    color_index[d.id as usize] = Some(d.rgb);
+  let preserved_id_count = u32::try_from(definition_table.len())
+    .map_err(|_| Error::from("definition.csv contains too many province records"))?;
+  if preserved_id_count == 0 {
+    return Err("definition.csv contains no province records".into());
   };
 
-  // TODO: rework? this will probably crash for certain invalid definition tables
-  assert_eq!(preserved_id_count, definition_table.len() as u32);
+  // Create a sparse array for mapping province ids to colors
+  let mut color_index = vec![None; definition_table.len() + 1];
+  for d in definition_table.iter() {
+    if d.id == 0 || d.id > preserved_id_count {
+      return Err(format!(
+        "definition.csv province IDs must be contiguous from 1 to {preserved_id_count}; found {}",
+        d.id
+      ).into());
+    };
+    let slot = &mut color_index[d.id as usize];
+    if slot.replace(d.rgb).is_some() {
+      return Err(format!("definition.csv contains duplicate province ID {}", d.id).into());
+    };
+  };
 
   // Initially convert the definition table into a province data map
   let mut definition_map = definition_table.into_iter()
@@ -129,7 +137,7 @@ fn construct_map_data(
 
   map.recalculate_all_boundaries();
 
-  Bundle { map, config }
+  Ok(Bundle { map, config })
 }
 
 pub(super) fn recolor_everything(
@@ -172,7 +180,7 @@ pub(super) fn recolor_everything(
 }
 
 #[derive(Debug, Clone)]
-enum IdChange {
+pub(super) enum IdChange {
   DeletedRange(u32, u32),
   CreatedRange(u32, u32),
   Reassigned(u32, u32),
@@ -190,7 +198,7 @@ impl ToString for IdChange {
   }
 }
 
-type MapData = (Vec<Definition>, Vec<Adjacency>, Option<Vec<IdChange>>);
+pub(super) type MapData = (Vec<Definition>, Vec<Adjacency>, Option<Vec<IdChange>>);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SaveOperation {
@@ -198,27 +206,10 @@ pub struct SaveOperation {
 }
 
 pub fn save_bundle(location: &Location, bundle: &Bundle) -> Result<SaveOperation, Error> {
-  let (definition_table, adjacencies_table, id_changes) = deconstruct_map_data(bundle)?;
-  location.clone().manipulate_files(|files| {
-    write_rgb_bmp_image(files.create_file("provinces.bmp")?, &bundle.map.base.color_buffer)?;
-    write_definition_table(files.create_file("definition.csv")?, definition_table)?;
-
-    if !adjacencies_table.is_empty() {
-      write_adjacencies_table(files.create_file("adjacencies.csv")?, adjacencies_table)?;
-    };
-
-    let had_id_changes = id_changes.is_some();
-    if let Some(id_changes) = id_changes {
-      write_id_changes(files.create_file("id_changes.txt")?, id_changes)?;
-    };
-
-    Ok(SaveOperation {
-      had_id_changes
-    })
-  })
+  super::province_save::save_bundle_compat(location, bundle)
 }
 
-fn deconstruct_map_data(bundle: &Bundle) -> Result<MapData, Error> {
+pub(super) fn deconstruct_map_data(bundle: &Bundle) -> Result<MapData, Error> {
   if bundle.config.preserve_ids {
     deconstruct_map_data_preserve_ids(bundle)
   } else {
@@ -383,15 +374,15 @@ pub fn write_rgb_bmp_image<W: Write>(mut writer: W, province_image: &RgbImage) -
   encoder.encode(province_image.as_raw(), width, height, ColorType::Rgb8).map_err(From::from)
 }
 
-fn write_definition_table<W: Write>(writer: W, definition_table: Vec<Definition>) -> Result<(), Error> {
+pub(super) fn write_definition_table<W: Write>(writer: W, definition_table: Vec<Definition>) -> Result<(), Error> {
   Definition::write_records(&definition_table, writer).map_err(|err| Error::Csv(err, "definition.csv"))
 }
 
-fn write_adjacencies_table<W: Write>(writer: W, adjacencies_table: Vec<Adjacency>) -> Result<(), Error> {
+pub(super) fn write_adjacencies_table<W: Write>(writer: W, adjacencies_table: Vec<Adjacency>) -> Result<(), Error> {
   Adjacency::write_records(&adjacencies_table, writer).map_err(|err| Error::Csv(err, "adjacencies.csv"))
 }
 
-fn write_id_changes<W: Write>(mut writer: W, id_changes: Vec<IdChange>) -> Result<(), Error> {
+pub(super) fn write_id_changes<W: Write>(mut writer: W, id_changes: Vec<IdChange>) -> Result<(), Error> {
   writeln!(writer, "ID Changes {}", crate::util::now())
     .context("failed to write id changes to file")?;
   for id_change in id_changes {
@@ -410,4 +401,82 @@ fn read_all<R: Read>(mut reader: R) -> io::Result<Cursor<Vec<u8>>> {
 
 fn get_color_index(color_index: &[Option<Color>], id: u32) -> Option<Color> {
   color_index.get(id as usize).and_then(Clone::clone)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::construct_map_data;
+  use crate::app::format::{Definition, DefinitionKind};
+  use crate::app::map::{Bundle, History};
+  use crate::config::Config;
+  use crate::util::files::Location;
+  use image::{Rgb, RgbImage};
+  use std::fs;
+
+  #[test]
+  fn empty_definition_table_returns_error_instead_of_panicking() {
+    let result = construct_map_data(
+      RgbImage::new(1, 1),
+      Vec::new(),
+      Vec::new(),
+      None,
+      Config::default()
+    );
+
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn province_history_paints_pixels_and_terrain_with_undo_redo() {
+    let first = [10, 20, 30];
+    let second = [40, 50, 60];
+    let image = RgbImage::from_fn(3, 1, |x, _| Rgb(if x < 2 { first } else { second }));
+    let definitions = [first, second]
+      .into_iter()
+      .enumerate()
+      .map(|(index, rgb)| Definition {
+        id: index as u32 + 1,
+        rgb,
+        kind: DefinitionKind::Land,
+        coastal: false,
+        terrain: "plains".to_owned(),
+        continent: 1
+      })
+      .collect();
+    let config = Config {
+      preserve_ids: true,
+      ..Config::default()
+    };
+    let mut bundle =
+      construct_map_data(image, definitions, Vec::new(), None, config).unwrap();
+    let mut history = History::new(8, &bundle.map);
+
+    assert!(history
+      .paint_province_terrain(&mut bundle, [0, 0], "forest".to_owned())
+      .is_some());
+    assert_eq!(bundle.map.get_province(first).terrain, "forest");
+    assert!(history.undo(&mut bundle.map).is_some());
+    assert_eq!(bundle.map.get_province(first).terrain, "plains");
+    assert!(history.redo(&mut bundle.map).is_some());
+    assert_eq!(bundle.map.get_province(first).terrain, "forest");
+
+    assert!(history.paint_pixel(&mut bundle, [1, 0], second, 1).is_some());
+    assert_eq!(bundle.map.get_color_at([1, 0]), second);
+    assert!(history.undo(&mut bundle.map).is_some());
+    assert_eq!(bundle.map.get_color_at([1, 0]), first);
+    assert!(history.redo(&mut bundle.map).is_some());
+
+    let root = std::env::temp_dir().join(format!(
+      "hoi4-province-edit-{}",
+      std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir(&root).unwrap();
+    let location = Location::Directory(root.clone());
+    bundle.save(&location).unwrap();
+    let reloaded = Bundle::load(&location, bundle.config.clone()).unwrap();
+    assert_eq!(reloaded.map.get_color_at([1, 0]), second);
+    assert_eq!(reloaded.map.get_province(first).terrain, "forest");
+    fs::remove_dir_all(root).unwrap();
+  }
 }

@@ -2,6 +2,7 @@
 mod history;
 mod bridge;
 mod problems;
+mod province_save;
 
 use ahash::{AHashMap, AHashSet};
 use graphics::types::Color as DrawColor;
@@ -22,8 +23,13 @@ use crate::error::Error;
 pub use self::bridge::{write_rgb_bmp_image, read_rgb_bmp_image, SaveOperation};
 pub use self::history::History;
 pub use self::problems::Problem;
+pub use self::province_save::{
+  ProvinceSaveCancellation, ProvinceSaveMode, ProvinceSaveProgress, ProvinceSaveReport,
+  ProvinceSaveStage, execute_province_save,
+};
 
 use std::convert::TryFrom;
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -31,7 +37,7 @@ const CARDINAL: [Vector2<i32>; 4] = [[0, 1], [0, -1], [1, 0], [-1, 0]];
 
 pub type Color = [u8; 3];
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Bundle {
   pub map: Map,
   pub config: Config
@@ -179,7 +185,7 @@ impl std::fmt::Debug for MapBase {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Map {
   base: MapBase,
   boundaries: AHashMap<UOrd<Vector2<u32>>, bool>,
@@ -649,6 +655,28 @@ impl Map {
 
   pub fn iter_province_data(&self) -> impl Iterator<Item = (Color, &ProvinceData)> {
     self.base.province_data_map.iter().map(|(i, d)| (*i, &**d))
+  }
+
+  pub fn province_ids(&self) -> impl Iterator<Item = u32> + '_ {
+    self.base.province_data_map.values().filter_map(|province| province.preserved_id)
+  }
+
+  pub fn province_extents_by_id(&self) -> BTreeMap<u32, Extents> {
+    let mut extents = BTreeMap::<u32, Extents>::new();
+    for pos in XYIter::new(0..self.width(), 0..self.height()) {
+      let Some(province_id) = self.get_province_at(pos).preserved_id.filter(|id| *id != 0) else {
+        continue;
+      };
+      extents
+        .entry(province_id)
+        .and_modify(|bounds| *bounds = bounds.join_point(pos))
+        .or_insert_with(|| Extents::new_point(pos));
+    }
+    extents
+  }
+
+  pub fn contains_province_id(&self, id: u32) -> bool {
+    self.province_ids().any(|province_id| province_id == id)
   }
 
   pub fn iter_connection_data(&self) -> impl Iterator<Item = (UOrd<Color>, &ConnectionData)> {

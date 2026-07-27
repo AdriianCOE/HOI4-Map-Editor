@@ -149,12 +149,18 @@ impl FromStr for Bool {
 
 #[cfg(test)]
 mod tests {
-  use super::{Definition, ParseCsv};
+  use super::{Definition, DefinitionKind, ParseCsv};
 
   #[test]
   fn test_definition() {
     const SAMPLE: &str = include_str!("./samples/definition.csv");
     let definition = Definition::read_records(SAMPLE.as_bytes()).unwrap();
-    assert_eq!(definition.len(), 13375);
+    assert_eq!(definition.len(), 3);
+    assert_eq!(definition[0].id, 1);
+    assert_eq!(definition[0].rgb, [10, 20, 30]);
+    assert_eq!(definition[0].kind, DefinitionKind::Land);
+    assert!(definition[0].coastal);
+    assert_eq!(definition[0].terrain, "synthetic_plains");
+    assert_eq!(definition[2].kind, DefinitionKind::Lake);
   }
 }

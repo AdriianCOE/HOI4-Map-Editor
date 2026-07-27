@@ -7,9 +7,10 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod font;
+pub mod localization;
 
 use glutin_window::GlutinWindow;
-use glutin::dpi::LogicalSize;
+use glutin::dpi::{LogicalSize, PhysicalPosition};
 use opengl_graphics::{GlGraphics, OpenGL};
 use piston::window::WindowSettings;
 
@@ -20,25 +21,46 @@ use std::path::PathBuf;
 use std::env;
 use std::io;
 
-const WINDOW_WIDTH_DEFAULT: u32 = 1280;
-const WINDOW_HEIGHT_DEFAULT: u32 = 720;
-
 const WINDOW_WIDTH_MIN: u32 = 384;
 const WINDOW_HEIGHT_MIN: u32 = 256;
 
-pub const APPNAME: &str = concat!("HOI4 Province Map Editor v", env!("CARGO_PKG_VERSION"));
+pub const PRODUCT_NAME: &str = "HOI4 Map Editor";
+pub const PRODUCT_SUBTITLE: &str = "Province and State Editing Toolkit";
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const APPNAME: &str = concat!("HOI4 Map Editor v", env!("CARGO_PKG_VERSION"));
 
 fn main() {
   install_handler();
 
   let root = root_dir().expect("unable to find root dir");
   env::set_current_dir(root).expect("unable to set root dir");
+  let global_config = crate::config::GlobalConfig::load()
+    .map(|loaded| loaded.value)
+    .unwrap_or_default();
+  crate::localization::set_language(&global_config.language);
 
   let opengl = OpenGL::V3_2;
-  let screen = [WINDOW_WIDTH_DEFAULT, WINDOW_HEIGHT_DEFAULT];
+  let screen = [
+    global_config.window.width.max(WINDOW_WIDTH_MIN),
+    global_config.window.height.max(WINDOW_HEIGHT_MIN),
+  ];
   let mut window: GlutinWindow = WindowSettings::new(APPNAME, screen)
     .graphics_api(opengl).resizable(true).vsync(true)
     .build().expect("unable to initialize window");
+  if let (Some(x), Some(y)) = (global_config.window.x, global_config.window.y) {
+    let visible = window.ctx.window().available_monitors().any(|monitor| {
+      let position = monitor.position();
+      let size = monitor.size();
+      x >= position.x - screen[0] as i32
+        && x < position.x + size.width as i32
+        && y >= position.y - screen[1] as i32
+        && y < position.y + size.height as i32
+    });
+    if visible {
+      window.ctx.window().set_outer_position(PhysicalPosition::new(x, y));
+    }
+  }
+  window.ctx.window().set_maximized(global_config.window.maximized);
   let screen_min = LogicalSize::new(WINDOW_WIDTH_MIN, WINDOW_HEIGHT_MIN);
   window.ctx.window().set_min_inner_size(Some(screen_min));
   let mut gl = GlGraphics::new(opengl);
@@ -62,12 +84,29 @@ fn root_dir() -> io::Result<PathBuf> {
 use std::io::prelude::*;
 
 fn write_application_info(mut out: impl Write) -> Result<(), std::io::Error> {
-  writeln!(out, "Version: v{}", env!("CARGO_PKG_VERSION"))?;
+  writeln!(out, "Application: {}", APPNAME)?;
+  writeln!(out, "Version: v{}", APP_VERSION)?;
+  writeln!(out, "Operating System: {}", env::consts::OS)?;
+  writeln!(out, "Architecture: {}", env::consts::ARCH)?;
   writeln!(out, "Debug Assertions Enabled: {:?}", cfg!(debug_assertions))?;
   writeln!(out, "Debug Mode Feature Enabled: {:?}", cfg!(feature = "debug-mode"))?;
   writeln!(out)?;
 
   Ok(())
+}
+
+pub(crate) fn diagnostic_summary() -> String {
+  let mut output = Vec::new();
+  write_application_info(&mut output).expect("writing application info to memory cannot fail");
+  String::from_utf8(output).expect("application information is valid UTF-8")
+}
+
+pub(crate) fn log_directory() -> PathBuf {
+  env::var_os("LOCALAPPDATA")
+    .map(PathBuf::from)
+    .unwrap_or_else(env::temp_dir)
+    .join("HOI4MapEditor")
+    .join("logs")
 }
 
 fn install_handler() {
@@ -96,7 +135,11 @@ fn install_handler() {
     // only write panic info to file if not on dev profile
     if cfg!(not(debug_assertions)) {
       let now = Local::now().format("%Y%m%d_%H%M%S");
-      match File::create(format!("crash_{}.log", now)) {
+      let log_dir = log_directory();
+      let log_path = log_dir.join(format!("crash_{}.log", now));
+      let create_result = std::fs::create_dir_all(&log_dir)
+        .and_then(|_| File::create(&log_path));
+      match create_result {
         Ok(out_file) => {
           if let Err(err) = write_application_info(&out_file) {
             eprintln!("Error while printing application info: {err:?}");
@@ -106,8 +149,22 @@ fn install_handler() {
             eprintln!("Error while printing panic: {err:?}");
           };
         },
-        Err(e) => eprintln!("Error creating crash log: {:?}", e)
+        Err(e) => eprintln!("Error creating crash log at {}: {:?}", log_path.display(), e)
       };
     };
   }));
+}
+
+#[cfg(test)]
+mod branding_tests {
+  use super::{APPNAME, APP_VERSION, PRODUCT_NAME, diagnostic_summary, log_directory};
+
+  #[test]
+  fn public_window_title_uses_map_editor_branding_without_version_bump() {
+    assert_eq!(APPNAME, "HOI4 Map Editor v0.1.0-preview.1");
+    assert_eq!(PRODUCT_NAME, "HOI4 Map Editor");
+    assert_eq!(APP_VERSION, env!("CARGO_PKG_VERSION"));
+    assert!(diagnostic_summary().contains("Operating System:"));
+    assert!(log_directory().ends_with("HOI4MapEditor\\logs"));
+  }
 }

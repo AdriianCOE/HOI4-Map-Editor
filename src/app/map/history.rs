@@ -19,7 +19,7 @@ pub struct History {
 
 impl History {
   pub fn new(max_undo_states: usize, map: &Map) -> Self {
-    assert!(max_undo_states >= 2, "The maximum number of undo states cannot be less than 2");
+    assert!(max_undo_states >= 1, "The maximum number of undo states cannot be less than 1");
     let mut steps = VecDeque::with_capacity(1);
     steps.push_front(Step {
       map_base: map.base.clone(),
@@ -31,6 +31,15 @@ impl History {
       steps,
       position: 0,
       max_undo_states
+    }
+  }
+
+  pub fn set_limit(&mut self, max_undo_states: usize) {
+    assert!(max_undo_states >= 1);
+    self.max_undo_states = max_undo_states;
+    while self.steps.len() > max_undo_states {
+      self.steps.pop_front();
+      self.position = self.position.saturating_sub(1);
     }
   }
 

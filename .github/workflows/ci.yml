@@ -1,0 +1,31 @@
+name: Windows CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-static:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check
+      - run: cargo test
+      - run: cargo clippy --all-targets --all-features
+      - run: cargo build --release
+
+  real-mod-smokes:
+    if: ${{ false }}
+    runs-on: windows-latest
+    steps:
+      - run: echo "Real-mod 4A/4B/4C smokes require a private controlled fixture and remain manual."

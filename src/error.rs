@@ -3,6 +3,7 @@ use thiserror::Error;
 
 use crate::app::format::CsvError;
 use crate::config::LoadConfigError;
+use crate::app::project::ProjectPathError;
 use crate::util::files::FilesError;
 
 
@@ -19,6 +20,8 @@ pub enum Error {
   Csv(CsvError, &'static str),
   #[error("config error: {0}")]
   ConfigError(#[from] LoadConfigError),
+  #[error(transparent)]
+  ProjectPath(#[from] ProjectPathError),
   #[error("{0}")]
   Custom(String)
 }

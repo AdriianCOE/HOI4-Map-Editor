@@ -1,84 +1,100 @@
-# HOI4 Province Editor
-[Latest Release](https://github.com/ScottyThePilot/hoi4_province_editor/releases/latest)
+# HOI4 Map Editor
 
-This program is designed to simplify or replace needing to manually edit `provinces.bmp` and `definition.csv` when
-editing HOI4 Maps. The idea behind this program is that it unifies editing both files in one place with a graphical
-editor, as well as attempting to guarantee that all province maps created by this program will load correctly into
-the game.
+An unofficial visual editor for Hearts of Iron IV province maps and state
+history files.
 
-This program is not a complete replacement for MapGen, it is intended to be used to edit a map you have already
-generated with MapGen, or for making tweaks to an already complete map.
+HOI4 Map Editor is based on
+[ScottyThePilot's HOI4 Province Editor](https://github.com/ScottyThePilot/hoi4_province_editor)
+and extends it with state editing, political views, validation, backups, and
+transactional file updates.
 
-Please make backups of your maps before using HOI4PE, and regularly while using HOI4PE.
-
-![Province Map Mode](images/hoi4pe_color.png)
-![Terrain Map Mode](images/hoi4pe_terrain.png)
-
-To load a map, you can do one of the following:
-- Drag a folder and it will look for a `provinces.bmp` and `definition.csv` inside that folder
-- Drag a file and if its name is `provinces.bmp` or `definition.csv`, it will look in the same folder for the other file
-- Drag a ZIP archive, and it will try to load `provinces.bmp` and `definition.csv` from the archive
-- Use `Ctrl-O` or `Ctrl-Alt-O` to load a folder or archive using the file browser
-
-By default, HOI4PE will scramble all of the province IDs in your `definition.csv`. If you are editing a pre-existing
-map, this will probably mess up states, strategic regions, etc. In order to mitigate this, you can set the
-`preserve-ids` key to `true` in `hoi4pe_config.toml`; this will attempt to keep the ID scrambling to a minimum, and if
-IDs do change, they will be logged to `id_changes.txt`.
-
-In the terrain/biome map mode, the colors are based on what MapGen/ProvGen takes as input for terrain maps.
-In the coastal map mode, darker colors represent provinces that are not coastal, while lighter colors are coastal.
-
-When painting continent IDs, you cannot paint continent 0 on land, and sea can only have continent 0.
-
-## Controls
-- `1` Color/province map view mode
-- `2` Terrain/biome map view mode
-- `3` Land type map view mode
-- `4` Continents map view mode
-- `5` Coastal provinces map view mode
-- `6` Adjacencies map view mode
-- `Left-click` will draw with a color or map data while a color or some data is selected
-- `Right-click` will grab and pan the camera around
-- `Middle-click` will pick whatever color or map data that you are pointing at
-- `Scroll` will zoom the map view
-- `Shift-Scroll` will resize your brush when in color mode
-- `Ctrl-Z` and `Ctrl-Y` are Undo and Redo, respectively
-- `Ctrl-Shift-S` will Save-As, adding `Alt` will allow you to save as an archive
-- `Ctrl-S` will Save, overwriting whatever map files you had imported
-- `Ctrl-O` will let you open a `map` folder, adding `Alt` will allow you to select archives
-- `Spacebar` will give you a new color/type/terrain/continent to paint with depending on map mode
-- `Shift-C` will re-calculate coastal provinces
-- `Shift-R` will randomly re-color all of the provinces on the map
-- `Shift-P` will calculate and display symbols indicating map errors/warnings
-- `A` switches to the area/brush tool
-- `B` switches to the bucket/fill tool
-- `L` switches to the lasso tool
-- `H` resets the camera view
-- `Tab` show all recent informative alert messages
-- `Escape` to cancel a lasso
-- `Enter` to complete a lasso
-
-Adjacencies may be created by dragging from one province to another with `Left-click`.
-Note that HOI4 requires `sea` and `land` adjacencies to have a "through province" which you will have to specify manually.
+> Preview software: keep an independent backup of every mod you edit.
 
 ## Features
-- Map viewing, editing, manupulation, importing and exporting
-- Flood-fill and polygonal lasso tools
-- Support for custom terrain types via `hoi4pe_config.toml`
-- Seeing map errors/warnings graphically (via `Shift-P`)
-- Auto-generating which provinces are coastal (via `Shift-C`)
-- Exporting terrain or land type view modes for MapGen/ProvGen
-- Preserving province IDs (in order to not break maps)
-- Viewing province ID numbers on the map
-- Support for creating/editing adjacencies
 
-## Manually Building
-1. [Install Rust](https://www.rust-lang.org/tools/install)
-2. Clone this repository to a folder and navigate there in your terminal
-3. Run `cargo build --release` in that folder, wait for it to complete
-4. The resulting executable should be located in `/target/release`
+- Province brush, fill, lasso, recolor, terrain, coastal, and diagnostic tools.
+- State selection, Lasso, Brush, Fill, properties, buildings, victory points,
+  creation, removal, Undo, Redo, and Discard.
+- Province Colors, Province Types, Terrain, Continents, Coastal, States, and
+  Political Map Views with independent visual overlays.
+- Lossless State Patch Preview and validation in a temporary workspace.
+- Atomic Province Save and transactional State Apply with backup and rollback.
+- Application and project settings with a 6-language interface: English,
+  Português do Brasil, Español, Français, Русский, and 简体中文.
+
+## Install and open a mod
+
+1. Download and extract the Windows x64 ZIP into a writable folder.
+2. Run `HOI4 Map Editor.exe`.
+3. Choose **File → Open HOI4 Mod...** and select the mod root.
+
+A province project needs `map/provinces.bmp` and `map/definition.csv`. The
+States workspace additionally uses `history/states/*.txt`.
+
+## Safe workflow
+
+```text
+Edit in memory
+→ Review State Changes
+→ Validate in Temporary Workspace
+→ Apply State Changes with Backup
+→ Reload and Verify
+```
+
+**Save Province Map** writes only `provinces.bmp` and `definition.csv`.
+**Apply State Changes** writes only `history/states/*.txt`.
+**Export Province Map** creates a copy and never changes the open project.
+
+Existing state files retain unrelated comments, formatting, unknown fields,
+and unsupported blocks. State transactions use `<mod>/.hoi4-state-editor/`.
+Optional project preferences use `<mod>/.hoi4-map-editor/project.toml`.
+
+## Essential shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+O` | Open a mod |
+| `Ctrl+S` | Save the current workspace only |
+| `Ctrl+Shift+S` | Export Province Map As |
+| `Ctrl+1` / `Ctrl+2` | Provinces / States workspace |
+| `1`–`7` | Change Map View |
+| `B` / `F` / `L` | Brush / Fill / Lasso |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
+| `Esc` | Cancel the current action |
+
+## Build
+
+Install a current Rust toolchain and run:
+
+```sh
+cargo build --release
+```
+
+Create the portable Windows package with:
+
+```powershell
+.\scripts\package-windows.ps1
+```
+
+## Current limitations
+
+- Preview packages currently target Windows x64.
+- Province Save and State Apply are separate transactions; there is no Save All.
+- Game-data localization, flags, icons, `.gfx`, and `.dds` loading are not yet
+  implemented.
+- Adjacencies, Strategic Regions, and Continents are not complete dedicated
+  editing workspaces.
+- No proprietary Hearts of Iron IV assets are distributed.
+
+See the [User Guide](docs/USER_GUIDE.md),
+[Troubleshooting](docs/TROUBLESHOOTING.md), and
+[Privacy](docs/PRIVACY.md).
 
 ## Credits
-This project uses icons/assets from the following projects:
-- https://github.com/tabler/tabler-icons, under the MIT license
-- https://github.com/astrit/css.gg, under the MIT license
+
+Based on HOI4 Province Editor by ScottyThePilot. Developed and extended by
+Adrian Costa.
+
+HOI4 Map Editor is an unofficial community project and is not affiliated with
+or endorsed by Paradox Interactive. The project retains the original MIT
+license and third-party notices.

@@ -15,6 +15,7 @@ pub trait EventHandler: Sized {
   fn on_render(&mut self, ctx: Context, cursor_pos: Option<Vector2<f64>>, gl: &mut GlGraphics);
   fn on_update(&mut self, dt: f32);
   fn on_key(&mut self, _key: Key, _state: bool, _mods: KeyMods, _pos: Option<Vector2<f64>>) {}
+  fn on_text(&mut self, _text: String) {}
   fn on_mouse(&mut self, _button: MouseButton, _state: bool, _mods: KeyMods, _pos: Vector2<f64>) {}
   fn on_mouse_position(&mut self, _pos: Vector2<f64>, _mods: KeyMods) {}
   fn on_mouse_relative(&mut self, _rel: Vector2<f64>) {}
@@ -22,7 +23,8 @@ pub trait EventHandler: Sized {
   fn on_file_drop(&mut self, _path: PathBuf) {}
   fn on_resize(&mut self, _viewport: Viewport) {}
   fn on_unfocus(&mut self) {}
-  fn on_close(self) {}
+  fn on_window_state(&mut self, _position: Option<[i32; 2]>, _size: [u32; 2], _maximized: bool) {}
+  fn on_close(&mut self) -> bool { true }
 
   fn get_cursor(&self) -> CursorIcon {
     CursorIcon::Default
@@ -54,15 +56,16 @@ pub fn launch<H: EventHandler>(window: &mut GlutinWindow, gl: &mut GlGraphics) {
       },
       Event::Input(event, _) => match event {
         Input::Button(args) => match args.button {
-          Button::Keyboard(Key::LShift) => mods.shift = state(args.state),
-          Button::Keyboard(Key::LCtrl) => mods.ctrl = state(args.state),
-          Button::Keyboard(Key::LAlt) => mods.alt = state(args.state),
+          Button::Keyboard(Key::LShift | Key::RShift) => mods.shift = state(args.state),
+          Button::Keyboard(Key::LCtrl | Key::RCtrl) => mods.ctrl = state(args.state),
+          Button::Keyboard(Key::LAlt | Key::RAlt) => mods.alt = state(args.state),
           Button::Keyboard(key) => event_handler.on_key(key, state(args.state), mods, cursor_pos),
           Button::Mouse(button) => if let Some(cursor_pos) = cursor_pos {
             event_handler.on_mouse(button, state(args.state), mods, cursor_pos)
           },
           _ => ()
         },
+        Input::Text(text) => event_handler.on_text(text),
         Input::Move(Motion::MouseCursor(pos)) => {
           cursor_pos = Some(pos);
           event_handler.on_mouse_position(pos, mods);
@@ -81,8 +84,20 @@ pub fn launch<H: EventHandler>(window: &mut GlutinWindow, gl: &mut GlGraphics) {
           event_handler.on_unfocus();
         },
         Input::Close(_) => {
-          event_handler.on_close();
-          break;
+          let window_ref = window.ctx.window();
+          let position = window_ref.outer_position().ok().map(|position| [position.x, position.y]);
+          let size = window_ref.inner_size();
+          let maximized = window_ref.current_monitor().is_some_and(|monitor| {
+            let monitor_position = monitor.position();
+            let monitor_size = monitor.size();
+            position == Some([monitor_position.x, monitor_position.y])
+              && size.width >= monitor_size.width.saturating_sub(32)
+              && size.height >= monitor_size.height.saturating_sub(96)
+          });
+          event_handler.on_window_state(position, [size.width, size.height], maximized);
+          if event_handler.on_close() {
+            break;
+          }
         },
         Input::Resize(resize_args) => {
           if !is_viewport_zero(resize_args.viewport()) {
