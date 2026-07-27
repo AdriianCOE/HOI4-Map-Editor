@@ -626,8 +626,10 @@ impl RoundTripValidator {
     } else {
       RoundTripStatus::Passed
     };
-    report.eligible_for_atomic_save_preparation =
-      report.status == RoundTripStatus::Passed && plan.summary.review_required_files == 0;
+    report.eligible_for_atomic_save_preparation = matches!(
+      report.status,
+      RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
+    );
     finish_report(
       &self.policy,
       &mut report,
@@ -2041,7 +2043,7 @@ mod tests {
       |_| {},
     );
     assert_eq!(review.status, RoundTripStatus::PassedWithReview, "{}", review.full_text());
-    assert!(!review.eligible_for_atomic_save_preparation);
+    assert!(review.eligible_for_atomic_save_preparation);
     fs::remove_dir_all(root).unwrap();
   }
 

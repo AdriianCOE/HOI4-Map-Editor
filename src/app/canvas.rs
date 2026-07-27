@@ -32,10 +32,11 @@ use super::project::{
     BrushProvinceClassification, BuildingScope, DiagnosticSeverity, EditableStateProperties,
     GameDefinitionCatalog, Hoi4Project, LassoSelectionMode, MapViewMode, ProjectPatchPlan,
     ProvinceDataDraft, ProvinceInclusionMode, RecoveryInfo, RoundTripCancellation, RoundTripStage,
-    RoundTripValidationPolicy, RoundTripValidationReport, RoundTripValidator, SaveTransactionState,
-    StateBrushMode, StateEditSession, StateLassoPhase, StatePropertyDraft, StateRemovalPolicy,
-    StateSaveCancellation, StateSaveConditions, StateSaveFault, StateSaveOutcome, StateSaveReport,
-    StateSelection, WorkingStateOrigin, boundaries_for_state, classify_state_lasso,
+    RoundTripStatus, RoundTripValidationPolicy, RoundTripValidationReport, RoundTripValidator,
+    SaveTransactionState, StateBrushMode, StateEditSession, StateLassoPhase, StatePropertyDraft,
+    StateRemovalPolicy, StateSaveCancellation, StateSaveConditions, StateSaveFault,
+    StateSaveOutcome, StateSaveReport, StateSelection, WorkingStateOrigin, boundaries_for_state,
+    classify_state_lasso,
     detect_state_save_recovery, execute_state_save, generate_state_view, generate_state_view_for,
     generate_state_view_region_for, plan_state_fill, plan_state_patches, ProvinceAdjacency,
     format_integer_pt_br, parse_grouped_nonnegative_integer,
@@ -131,6 +132,10 @@ pub struct Canvas {
     state_save_task: Option<StateSaveTask>,
     state_save_status: Option<String>,
     state_save_recovery: Option<RecoveryInfo>,
+    state_apply_dialog: Option<StateApplyDialog>,
+    state_apply_after_validation: bool,
+    state_apply_ready_for_confirmation: bool,
+    review_required_apply_approved: bool,
     state_lifecycle_draft: Option<StateLifecycleDraft>,
     state_property_draft: Option<StatePropertyDraft>,
     province_data_draft: Option<ProvinceDataDraft>,
@@ -201,6 +206,21 @@ struct StateSaveTask {
     receiver: Receiver<StateSaveTaskMessage>,
     cancellation: StateSaveCancellation,
     state: SaveTransactionState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateApplyDialog {
+    Review,
+    AdditionalValidation,
+    Blocked,
+    Progress,
+    Result,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateApplyDialogAction {
+    None,
+    ConfirmSave,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -449,6 +469,10 @@ impl Canvas {
                 .as_ref()
                 .map(|recovery| recovery.message.clone()),
             state_save_recovery,
+            state_apply_dialog: None,
+            state_apply_after_validation: false,
+            state_apply_ready_for_confirmation: false,
+            review_required_apply_approved: false,
             state_lifecycle_draft: None,
             state_property_draft: None,
             province_data_draft: None,
@@ -587,6 +611,7 @@ impl Canvas {
             || self.inspector_picker_is_open()
             || self.map_tag_picker.active_target().is_some()
             || self.state_save_blocks_editing()
+            || self.state_apply_dialog.is_some()
     }
 
     pub fn inspector_search_is_focused(&self) -> bool {
@@ -1596,13 +1621,7 @@ impl Canvas {
         let mut controls = Vec::new();
         match self.inspector.active_section {
             super::inspector::InspectorSection::Overview => {
-                controls.push(control_layout.body_control(
-                    InspectorControlId::Select(InspectorPickTarget::StateCategory),
-                    2,
-                    layout.body[2] - 105.0,
-                    100.0,
-                    16.0,
-                ));
+                controls.extend(overview_property_controls(layout, control_layout));
             }
             super::inspector::InspectorSection::History => {
                 for (row, target, map_target) in [
@@ -1689,6 +1708,10 @@ impl Canvas {
     fn handle_inspector_control(&mut self, id: InspectorControlId, alerts: &mut Alerts) {
         match id {
             InspectorControlId::Select(target) | InspectorControlId::Add(target) => {
+                if target == InspectorPickTarget::StateCategory {
+                    self.property_editor_field = 2;
+                    self.property_editor_replace_field = false;
+                }
                 self.open_inspector_picker(target, alerts);
             }
             InspectorControlId::MapPick(target) => {
@@ -1727,6 +1750,17 @@ impl Canvas {
                         }
                     }
                     _ => {}
+                }
+            }
+            InspectorControlId::Field(field) => {
+                self.property_editor_field = field;
+                self.property_editor_replace_field = false;
+            }
+            InspectorControlId::Toggle(5) => {
+                self.property_editor_field = StatePropertyDraft::TEXT_FIELD_COUNT;
+                self.property_editor_replace_field = false;
+                if let Some(draft) = self.state_property_draft.as_mut() {
+                    draft.impassable = !draft.impassable;
                 }
             }
             _ => {}
@@ -1896,6 +1930,14 @@ impl Canvas {
         let Some(draft) = self.state_property_draft.as_ref() else {
             return false;
         };
+        if self.inspector.visibility != StateInspectorVisibility::Hidden
+            && !interface.inspector_contains(pos)
+        {
+            if draft.is_modified() && draft.validate().is_ok() {
+                self.apply_state_property_draft(alerts);
+            }
+            return true;
+        }
         let layout = PropertyEditorLayout::new(interface);
         if !point_in_rect(pos, layout.panel) {
             return true;
@@ -2251,6 +2293,24 @@ impl Canvas {
     }
 
     pub fn state_property_editor_next_field(&mut self, backwards: bool) {
+        if self.state_property_draft.is_some()
+            && self.inspector.visibility != StateInspectorVisibility::Hidden
+            && self.inspector.active_section == super::inspector::InspectorSection::Overview
+        {
+            let fields = [0, 1, 2, 3, 4, StatePropertyDraft::TEXT_FIELD_COUNT];
+            let current = fields
+                .iter()
+                .position(|field| *field == self.property_editor_field)
+                .unwrap_or(0);
+            let next = if backwards {
+                current.checked_sub(1).unwrap_or(fields.len() - 1)
+            } else {
+                (current + 1) % fields.len()
+            };
+            self.property_editor_field = fields[next];
+            self.property_editor_replace_field = false;
+            return;
+        }
         let count = self
             .state_lifecycle_draft
             .as_ref()
@@ -2423,6 +2483,235 @@ impl Canvas {
             && self.inspector.visibility == StateInspectorVisibility::Hidden
         {
             self.draw_state_property_editor(ctx, interface, glyph_cache, gl);
+        }
+    }
+
+    pub fn draw_state_apply_dialog(
+        &self,
+        ctx: Context,
+        interface: &Interface,
+        glyph_cache: &mut FontGlyphCache,
+        gl: &mut GlGraphics,
+    ) {
+        let Some(dialog) = self.state_apply_dialog else {
+            return;
+        };
+        let layout = StateApplyDialogLayout::new(interface);
+        let window = interface.get_window_size();
+        graphics::rectangle(
+            [0.0, 0.0, 0.0, 0.66],
+            [0.0, 0.0, window[0], window[1]],
+            ctx.transform,
+            gl,
+        );
+        graphics::rectangle([0.075, 0.085, 0.105, 1.0], layout.panel, ctx.transform, gl);
+        graphics::rectangle(
+            [0.16, 0.18, 0.22, 1.0],
+            [layout.panel[0], layout.panel[1], layout.panel[2], 42.0],
+            ctx.transform,
+            gl,
+        );
+
+        let plan = self.patch_preview.as_ref();
+        let (title, primary, secondary, close, mut lines) = match dialog {
+            StateApplyDialog::Review => {
+                let summary = plan.map(|plan| &plan.summary);
+                let status = if summary.is_some_and(|summary| summary.blocked_files != 0) {
+                    "Blocked"
+                } else if summary.is_some_and(|summary| summary.review_required_files != 0) {
+                    "Review required"
+                } else {
+                    "Safe"
+                };
+                let validation_passed = matches!(
+                    self.current_round_trip_status(),
+                    Some(RoundTripStatus::Passed | RoundTripStatus::PassedWithReview)
+                );
+                let primary = if plan.is_some_and(|plan| plan.files_len() == 0) {
+                    "Done"
+                } else if validation_passed {
+                    "Apply to Mod"
+                } else {
+                    "Validate Changes"
+                };
+                (
+                    "REVIEW CHANGES",
+                    primary,
+                    "View Details",
+                    "Close",
+                    vec![
+                        format!(
+                            "{} state files will be modified",
+                            summary.map_or(0, |summary| summary.modified_files)
+                        ),
+                        format!(
+                            "{} files will be created",
+                            summary.map_or(0, |summary| summary.created_files)
+                        ),
+                        format!(
+                            "{} files will be removed",
+                            summary.map_or(0, |summary| summary.removed_files)
+                        ),
+                        String::new(),
+                        format!("Status: {status}"),
+                        self.round_trip_status.clone().unwrap_or_else(|| {
+                            "Validation has not been run for this preview.".to_owned()
+                        }),
+                    ],
+                )
+            }
+            StateApplyDialog::AdditionalValidation => (
+                "ADDITIONAL VALIDATION REQUIRED",
+                "Validate and Continue",
+                "Review Changes",
+                "Cancel",
+                vec![
+                    "These changes require validation in an isolated temporary copy.".to_owned(),
+                    "Your original mod will not be modified during validation.".to_owned(),
+                    String::new(),
+                    "After validation passes, a final Save confirmation will be shown.".to_owned(),
+                ],
+            ),
+            StateApplyDialog::Blocked => (
+                "CHANGES CANNOT BE APPLIED",
+                "View Problems",
+                "View Details",
+                "Close",
+                vec![
+                    format!(
+                        "{} blocking problems were found.",
+                        plan.map_or(0, |plan| plan.summary.blocked_files)
+                    ),
+                    "Unsafe file operations cannot continue.".to_owned(),
+                    "Resolve the reported diagnostics and regenerate the preview.".to_owned(),
+                ],
+            ),
+            StateApplyDialog::Progress => {
+                let validation_running = self.round_trip_task.is_some();
+                let status = self
+                    .state_save_status
+                    .as_ref()
+                    .filter(|_| self.state_save_task.is_some())
+                    .or(self.round_trip_status.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| "Preparing...".to_owned());
+                (
+                    if validation_running {
+                        "VALIDATING CHANGES"
+                    } else {
+                        "APPLYING CHANGES"
+                    },
+                    "Cancel Safely",
+                    "View Details",
+                    "",
+                    vec![
+                        "[x] Preparing patch".to_owned(),
+                        "[x] Checking current files".to_owned(),
+                        if validation_running {
+                            "[>] Validating temporary copy".to_owned()
+                        } else {
+                            "[x] Validating temporary copy".to_owned()
+                        },
+                        if self.state_save_task.is_some() {
+                            "[>] Backup, apply, reload and verification".to_owned()
+                        } else {
+                            "[ ] Backup, apply, reload and verification".to_owned()
+                        },
+                        String::new(),
+                        status,
+                    ],
+                )
+            }
+            StateApplyDialog::Result => {
+                let (title, lines) = if let Some(report) = self.state_save_report.as_ref() {
+                    let title = if report.outcome == StateSaveOutcome::Completed {
+                        "CHANGES APPLIED SUCCESSFULLY"
+                    } else {
+                        "APPLY DID NOT COMPLETE"
+                    };
+                    (
+                        title,
+                        vec![
+                            format!(
+                                "Modified {} | Created {} | Removed {}",
+                                report.modified_files, report.created_files, report.removed_files
+                            ),
+                            format!("Result: {}", report.state.label()),
+                            report
+                                .backup_path
+                                .as_ref()
+                                .map(|path| format!("Backup: {}", path.display()))
+                                .unwrap_or_else(|| "No real files were committed.".to_owned()),
+                            report.error.clone().unwrap_or_else(|| {
+                                if report.outcome == StateSaveOutcome::Completed {
+                                    "Reload and verification: Passed".to_owned()
+                                } else if report.outcome == StateSaveOutcome::RolledBack {
+                                    "Rollback: Completed".to_owned()
+                                } else {
+                                    "See the report for recovery guidance.".to_owned()
+                                }
+                            }),
+                        ],
+                    )
+                } else {
+                    (
+                        "VALIDATION RESULT",
+                        vec![self
+                            .round_trip_status
+                            .clone()
+                            .unwrap_or_else(|| "Validation did not complete.".to_owned())],
+                    )
+                };
+                (title, "Done", "View Report", "Close", lines)
+            }
+        };
+
+        draw_canvas_text(
+            ctx,
+            glyph_cache,
+            gl,
+            colors::WHITE,
+            [layout.panel[0] + 16.0, layout.panel[1] + 27.0],
+            title,
+        );
+        for (index, line) in lines.drain(..).enumerate() {
+            draw_canvas_text(
+                ctx,
+                glyph_cache,
+                gl,
+                if line.starts_with("Status: Blocked") {
+                    [1.0, 0.42, 0.42, 1.0]
+                } else {
+                    colors::WHITE
+                },
+                [
+                    layout.panel[0] + 18.0,
+                    layout.panel[1] + 72.0 + index as f64 * 26.0,
+                ],
+                &fit_editor_text(&line, layout.panel[2] - 36.0),
+            );
+        }
+        let primary_enabled = dialog != StateApplyDialog::Progress
+            || self.round_trip_task.is_some()
+            || self.state_save_can_cancel();
+        draw_editor_button(
+            ctx,
+            glyph_cache,
+            gl,
+            layout.primary(),
+            primary,
+            primary_enabled,
+        );
+        draw_editor_button(
+            ctx,
+            glyph_cache,
+            gl,
+            layout.secondary(),
+            secondary,
+            !secondary.is_empty(),
+        );
+        if !close.is_empty() {
+            draw_editor_button(ctx, glyph_cache, gl, layout.close(), close, true);
         }
     }
 
@@ -3046,6 +3335,107 @@ impl Canvas {
                 break;
             }
             let line_index = first + visible;
+            if self.inspector.active_section == super::inspector::InspectorSection::Overview
+                && line_index < 6
+                && let Some(draft) = self.state_property_draft.as_ref()
+            {
+                let labels = [
+                    "Name",
+                    "Manpower",
+                    "Category",
+                    "Max level factor",
+                    "Local supplies",
+                    "Impassable",
+                ];
+                let value = match line_index {
+                    0 => draft.name.clone(),
+                    1 => format_integer_input(
+                        &draft.manpower,
+                        self.property_editor_field != line_index,
+                    ),
+                    2 => draft.state_category.clone(),
+                    3 => draft.buildings_max_level_factor.clone(),
+                    4 => draft.local_supplies.clone(),
+                    5 if draft.impassable => "Yes".to_owned(),
+                    5 => "No".to_owned(),
+                    _ => unreachable!(),
+                };
+                let field_key = (line_index < 5).then_some(STATE_PROPERTY_FIELD_KEYS[line_index]);
+                let invalid = field_key.is_some_and(|field| {
+                    draft
+                        .validate()
+                        .err()
+                        .is_some_and(|errors| errors.iter().any(|error| error.field == field))
+                });
+                let input = [
+                    layout.body[0] + 112.0,
+                    y - 15.0,
+                    (layout.body[2] - 117.0).max(0.0),
+                    17.0,
+                ];
+                draw_canvas_text(
+                    ctx,
+                    glyph_cache,
+                    gl,
+                    colors::WHITE,
+                    [layout.body[0] + 8.0, y],
+                    labels[line_index],
+                );
+                graphics::rectangle(
+                    if invalid {
+                        [0.38, 0.08, 0.08, 1.0]
+                    } else if self.property_editor_field
+                        == if line_index == 5 {
+                            StatePropertyDraft::TEXT_FIELD_COUNT
+                        } else {
+                            line_index
+                        }
+                    {
+                        [0.12, 0.25, 0.42, 1.0]
+                    } else {
+                        [0.14, 0.15, 0.18, 1.0]
+                    },
+                    input,
+                    ctx.transform,
+                    gl,
+                );
+                if line_index == 5 {
+                    let check = [input[0] + 4.0, input[1] + 3.0, 11.0, 11.0];
+                    graphics::rectangle(
+                        if draft.impassable {
+                            colors::BUTTON_ACTIVE
+                        } else {
+                            colors::BUTTON
+                        },
+                        check,
+                        ctx.transform,
+                        gl,
+                    );
+                }
+                draw_canvas_text(
+                    ctx,
+                    glyph_cache,
+                    gl,
+                    if value.is_empty() {
+                        colors::WHITE_T
+                    } else {
+                        colors::WHITE
+                    },
+                    [input[0] + if line_index == 5 { 21.0 } else { 6.0 }, y],
+                    if value.is_empty() { "<none>" } else { &value },
+                );
+                if line_index == 2 {
+                    draw_canvas_text(
+                        ctx,
+                        glyph_cache,
+                        gl,
+                        colors::WHITE_T,
+                        [input[0] + input[2] - 14.0, y],
+                        "v",
+                    );
+                }
+                continue;
+            }
             let reserved_for_controls = self.state_property_draft.is_some()
                 && match self.inspector.active_section {
                     super::inspector::InspectorSection::Overview => line_index == 2,
@@ -3079,6 +3469,12 @@ impl Canvas {
             let label = match control.id {
                 InspectorControlId::Decrement(_) => "-",
                 InspectorControlId::Increment(_) => "+",
+                InspectorControlId::Select(InspectorPickTarget::StateCategory)
+                    if self.inspector.active_section
+                        == super::inspector::InspectorSection::Overview =>
+                {
+                    continue;
+                }
                 InspectorControlId::Select(_) => "Select",
                 InspectorControlId::MapPick(_) => "Pick map",
                 InspectorControlId::Add(InspectorPickTarget::Resource) => "Add resource",
@@ -3204,12 +3600,17 @@ impl Canvas {
         };
         let edit = self.state_edit_session.as_ref();
         let data = edit.and_then(|edit| edit.state_data(state_id));
-        let name = data
+        let draft = self
+            .state_property_draft
             .as_ref()
-            .and_then(|data| data.name.as_deref())
+            .filter(|draft| draft.state_id == state_id);
+        let name = draft
+            .map(|draft| draft.name.as_str())
+            .or_else(|| data.as_ref().and_then(|data| data.name.as_deref()))
             .unwrap_or("<unnamed>");
         let provinces = data.as_ref().map_or(0, |data| data.provinces.len());
-        let dirty = edit.is_some_and(|edit| edit.is_state_dirty(state_id));
+        let dirty = draft.is_some_and(StatePropertyDraft::is_modified)
+            || edit.is_some_and(|edit| edit.is_state_dirty(state_id));
         let (origin, source) = match edit.and_then(|edit| edit.state_origin(state_id)) {
             Some(WorkingStateOrigin::Loaded { document_path }) => {
                 ("loaded", Some(document_path.clone()))
@@ -3491,6 +3892,27 @@ impl Canvas {
     ) {
         let draft_modified = self.property_draft_is_modified();
         if self.state_property_draft.is_some() || self.province_data_draft.is_some() {
+            if let Some(error) = self
+                .state_property_draft
+                .as_ref()
+                .and_then(|draft| draft.validate().err())
+                .and_then(|errors| errors.into_iter().next())
+            {
+                draw_canvas_text(
+                    ctx,
+                    glyph_cache,
+                    gl,
+                    [1.0, 0.42, 0.42, 1.0],
+                    [
+                        layout.panel[0] + 8.0,
+                        layout.footer_left()[1] - 7.0,
+                    ],
+                    &fit_editor_text(
+                        &format!("{}: {}", error.field, error.message),
+                        layout.panel[2] - 16.0,
+                    ),
+                );
+            }
             draw_editor_button(
                 ctx,
                 glyph_cache,
@@ -4754,13 +5176,83 @@ impl Canvas {
         );
         self.patch_preview = Some(plan);
         self.patch_preview_file = 0;
+        self.round_trip_report = None;
+        self.round_trip_status = None;
+        self.state_save_report = None;
+        if self.state_save_recovery.is_none() {
+            self.state_save_status = None;
+        }
+        self.review_required_apply_approved = false;
         self.refresh_state_information();
         alerts.push(Ok(message));
     }
 
+    pub fn open_patch_review(&mut self, alerts: &mut Alerts) {
+        if !self.ensure_current_patch_preview(alerts) {
+            return;
+        }
+        self.state_apply_dialog = Some(if self.round_trip_task.is_some()
+            || self.state_save_task.is_some()
+        {
+            StateApplyDialog::Progress
+        } else if self
+            .patch_preview
+            .as_ref()
+            .is_some_and(|plan| plan.summary.blocked_files != 0)
+        {
+            StateApplyDialog::Blocked
+        } else {
+            StateApplyDialog::Review
+        });
+    }
+
     pub fn prepare_state_apply(&mut self, alerts: &mut Alerts) -> bool {
+        if !self.ensure_current_patch_preview(alerts) {
+            return false;
+        }
+        let Some(plan) = self.patch_preview.as_ref() else {
+            return false;
+        };
+        if plan.files_len() == 0 {
+            alerts.push(Ok("No state file changes are ready to apply"));
+            return false;
+        }
+        if plan.summary.blocked_files != 0 {
+            self.state_apply_dialog = Some(StateApplyDialog::Blocked);
+            return false;
+        }
+        if plan.summary.review_required_files != 0 {
+            if self.current_round_trip_status() == Some(RoundTripStatus::PassedWithReview) {
+                self.review_required_apply_approved = true;
+                self.state_apply_dialog = Some(StateApplyDialog::Review);
+                return true;
+            }
+            self.review_required_apply_approved = false;
+            self.state_apply_dialog = Some(StateApplyDialog::AdditionalValidation);
+            return false;
+        }
+        if self.current_round_trip_status() == Some(RoundTripStatus::Passed) {
+            self.state_apply_dialog = Some(StateApplyDialog::Review);
+            return true;
+        }
+        if self.round_trip_task.is_some() {
+            self.state_apply_after_validation = true;
+            self.state_apply_dialog = Some(StateApplyDialog::Progress);
+            return false;
+        }
+        self.state_apply_after_validation = true;
+        self.start_round_trip_validation(false, alerts);
+        if self.round_trip_task.is_some() {
+            self.state_apply_dialog = Some(StateApplyDialog::Progress);
+        } else {
+            self.state_apply_after_validation = false;
+        }
+        false
+    }
+
+    fn ensure_current_patch_preview(&mut self, alerts: &mut Alerts) -> bool {
         let Some(edit) = self.state_edit_session.as_ref() else {
-            alerts.push(Err("Apply to Mod is available only for state projects"));
+            alerts.push(Err("Review and Apply are available only for state projects"));
             return false;
         };
         if self.property_editor_is_open()
@@ -4769,7 +5261,7 @@ impl Canvas {
             || self.state_fill_is_active()
         {
             alerts.push(Err(
-                "Apply or cancel the active draft/tool before applying state files",
+                "Apply or cancel the active draft/tool before reviewing state files",
             ));
             return false;
         }
@@ -4780,36 +5272,125 @@ impl Canvas {
         {
             self.generate_patch_preview(alerts);
         }
-        let Some(plan) = self.patch_preview.as_ref() else {
-            return false;
+        self.patch_preview.is_some()
+    }
+
+    fn current_round_trip_status(&self) -> Option<RoundTripStatus> {
+        let edit = self.state_edit_session.as_ref()?;
+        let plan = self.patch_preview.as_ref()?;
+        self.round_trip_report
+            .as_ref()
+            .filter(|report| !report.is_stale(edit.revision(), Some(plan)))
+            .map(|report| report.status)
+    }
+
+    pub fn state_apply_dialog_is_open(&self) -> bool {
+        self.state_apply_dialog.is_some()
+    }
+
+    pub fn close_state_apply_dialog(&mut self) {
+        if self.state_apply_dialog != Some(StateApplyDialog::Progress) {
+            self.state_apply_dialog = None;
+        }
+    }
+
+    pub fn take_state_apply_ready_for_confirmation(&mut self) -> bool {
+        std::mem::take(&mut self.state_apply_ready_for_confirmation)
+    }
+
+    pub fn state_apply_dialog_click(
+        &mut self,
+        interface: &Interface,
+        pos: Vector2<f64>,
+        alerts: &mut Alerts,
+    ) -> StateApplyDialogAction {
+        let Some(dialog) = self.state_apply_dialog else {
+            return StateApplyDialogAction::None;
         };
-        if plan.files_len() == 0 {
-            alerts.push(Ok("No state file changes are ready to apply"));
-            return false;
+        let layout = StateApplyDialogLayout::new(interface);
+        if point_in_rect(pos, layout.primary()) {
+            match dialog {
+                StateApplyDialog::Review => {
+                    let Some(plan) = self.patch_preview.as_ref() else {
+                        return StateApplyDialogAction::None;
+                    };
+                    if plan.files_len() == 0 {
+                        self.state_apply_dialog = None;
+                    } else if plan.summary.blocked_files != 0 {
+                        self.print_patch_preview_details();
+                        alerts.push(Err("Blocked changes cannot be applied"));
+                    } else if self.current_round_trip_status().is_some_and(|status| {
+                        status == RoundTripStatus::Passed
+                            || (plan.summary.review_required_files != 0
+                                && status == RoundTripStatus::PassedWithReview)
+                    }) {
+                        self.review_required_apply_approved =
+                            plan.summary.review_required_files != 0;
+                        return StateApplyDialogAction::ConfirmSave;
+                    } else {
+                        let allow_review_required = plan.summary.review_required_files != 0;
+                        self.state_apply_after_validation = false;
+                        self.start_round_trip_validation(allow_review_required, alerts);
+                        if self.round_trip_task.is_some() {
+                            self.state_apply_dialog = Some(StateApplyDialog::Progress);
+                        }
+                    }
+                }
+                StateApplyDialog::AdditionalValidation => {
+                    self.review_required_apply_approved = false;
+                    self.state_apply_after_validation = true;
+                    self.start_round_trip_validation(true, alerts);
+                    if self.round_trip_task.is_some() {
+                        self.state_apply_dialog = Some(StateApplyDialog::Progress);
+                    } else {
+                        self.state_apply_after_validation = false;
+                    }
+                }
+                StateApplyDialog::Blocked => {
+                    self.print_patch_preview_details();
+                    alerts.push(Err(
+                        "Blocking patch diagnostics were printed to the console",
+                    ));
+                }
+                StateApplyDialog::Progress => {
+                    self.state_apply_after_validation = false;
+                    if self.round_trip_task.is_some() {
+                        self.cancel_round_trip_validation(alerts);
+                    } else if self.state_save_can_cancel() {
+                        self.cancel_state_save(alerts);
+                    } else {
+                        alerts.push(Err("The current save stage cannot be cancelled safely"));
+                    }
+                }
+                StateApplyDialog::Result => self.state_apply_dialog = None,
+            }
+        } else if point_in_rect(pos, layout.secondary()) {
+            match dialog {
+                StateApplyDialog::AdditionalValidation => {
+                    self.state_apply_dialog = Some(StateApplyDialog::Review);
+                }
+                _ if self.state_save_report.is_some() => self.view_state_save_report(alerts),
+                _ if self.round_trip_report.is_some() => self.view_round_trip_report(alerts),
+                _ => self.print_patch_preview_details(),
+            }
+        } else if point_in_rect(pos, layout.close())
+            && dialog != StateApplyDialog::Progress
+        {
+            self.state_apply_dialog = None;
         }
-        if plan.summary.blocked_files != 0 {
-            alerts.push(Err(
-                "Apply blocked: Review Changes contains blocked file operations",
-            ));
-            return false;
+        StateApplyDialogAction::None
+    }
+
+    fn print_patch_preview_details(&self) {
+        let Some(plan) = self.patch_preview.as_ref() else {
+            return;
+        };
+        println!("{}", plan.summary_text());
+        for index in 0..plan.files_len() {
+            if let Some(report) = plan.file_report(index) {
+                println!("\n{report}");
+            }
         }
-        if plan.summary.review_required_files != 0 {
-            alerts.push(Err(
-                "Apply blocked: ReviewRequired changes need explicit isolated validation",
-            ));
-            return false;
-        }
-        if self.state_action_availability().save_eligible {
-            return true;
-        }
-        if self.round_trip_task.is_some() {
-            alerts.push(Ok(
-                "Temporary validation is still running; Apply will unlock after it passes",
-            ));
-            return false;
-        }
-        self.start_round_trip_validation(false, alerts);
-        false
     }
 
     pub fn select_patch_preview_file(&mut self, offset: isize, alerts: &mut Alerts) {
@@ -4837,6 +5418,7 @@ impl Canvas {
     pub fn clear_patch_preview(&mut self, alerts: &mut Alerts) {
         self.patch_preview = None;
         self.patch_preview_file = 0;
+        self.review_required_apply_approved = false;
         self.refresh_state_information();
         alerts.push(Ok("Cleared the in-memory patch preview"));
     }
@@ -4953,6 +5535,7 @@ impl Canvas {
         }
         self.round_trip_report = None;
         self.round_trip_status = None;
+        self.review_required_apply_approved = false;
         self.refresh_state_information();
         alerts.push(Ok("Cleared the in-memory round-trip validation result"));
     }
@@ -4977,9 +5560,11 @@ impl Canvas {
             StateSaveConditions {
                 draft_pending: self.property_editor_is_open(),
                 tool_interaction_active: self.state_lasso_is_active()
-                    || self.state_brush_is_active(),
+                    || self.state_brush_is_active()
+                    || self.state_fill_is_active(),
                 recovery_required: self.state_save_recovery.is_some(),
                 save_running: self.state_save_task.is_some(),
+                allow_review_required: self.review_required_apply_approved,
             },
         );
         if !eligibility.eligible {
@@ -5023,9 +5608,11 @@ impl Canvas {
             StateSaveConditions {
                 draft_pending: self.property_editor_is_open(),
                 tool_interaction_active: self.state_lasso_is_active()
-                    || self.state_brush_is_active(),
+                    || self.state_brush_is_active()
+                    || self.state_fill_is_active(),
                 recovery_required: self.state_save_recovery.is_some(),
                 save_running: self.state_save_task.is_some(),
+                allow_review_required: self.review_required_apply_approved,
             },
         );
         let Some(authorization) = eligibility.authorization else {
@@ -5066,6 +5653,7 @@ impl Canvas {
                     state: SaveTransactionState::Preparing,
                 });
                 self.state_save_status = Some("State Save: Preparing...".to_owned());
+                self.state_apply_dialog = Some(StateApplyDialog::Progress);
                 self.refresh_state_information();
                 alerts.push(Ok(
                     "State Save started; editing is locked until it finishes safely",
@@ -5190,6 +5778,23 @@ impl Canvas {
         }
         if let Some(report) = finished {
             println!("{}", report.full_text());
+            let passed = matches!(
+                report.status,
+                RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
+            ) && report.eligible_for_atomic_save_preparation;
+            if self.state_apply_after_validation && passed {
+                self.review_required_apply_approved =
+                    report.status == RoundTripStatus::PassedWithReview;
+                self.state_apply_ready_for_confirmation = true;
+            }
+            if self.state_apply_dialog == Some(StateApplyDialog::Progress) {
+                self.state_apply_dialog = Some(if passed {
+                    StateApplyDialog::Review
+                } else {
+                    StateApplyDialog::Result
+                });
+            }
+            self.state_apply_after_validation = false;
             self.round_trip_status = Some(report.summary_text());
             self.round_trip_report = Some(report);
             self.round_trip_task = None;
@@ -5198,6 +5803,8 @@ impl Canvas {
             self.round_trip_status =
                 Some("Round-trip validation: worker ended without a report.".to_owned());
             self.round_trip_task = None;
+            self.state_apply_after_validation = false;
+            self.state_apply_dialog = Some(StateApplyDialog::Result);
             changed = true;
         }
         if changed {
@@ -5252,6 +5859,7 @@ impl Canvas {
                 self.patch_preview = None;
                 self.round_trip_report = None;
                 self.round_trip_status = None;
+                self.review_required_apply_approved = false;
             } else if report.outcome == StateSaveOutcome::RecoveryRequired
                 || report.outcome == StateSaveOutcome::RollbackFailed
             {
@@ -5263,6 +5871,7 @@ impl Canvas {
             self.state_save_status = Some(report.summary_text());
             self.state_save_report = Some(report);
             self.state_save_task = None;
+            self.state_apply_dialog = Some(StateApplyDialog::Result);
             self.refresh_state_information();
         } else if disconnected {
             self.state_save_status = Some(
@@ -5273,6 +5882,7 @@ impl Canvas {
                 .project
                 .as_ref()
                 .and_then(|project| detect_state_save_recovery(&project.paths.root));
+            self.state_apply_dialog = Some(StateApplyDialog::Result);
             self.refresh_state_information();
         } else if !stages.is_empty() {
             self.refresh_state_information();
@@ -5309,6 +5919,8 @@ impl Canvas {
         self.patch_preview_file = 0;
         self.round_trip_report = None;
         self.round_trip_status = None;
+        self.review_required_apply_approved = false;
+        self.state_apply_dialog = None;
         self.state_lifecycle_draft = None;
         self.state_property_draft = None;
         self.province_data_draft = None;
@@ -7524,6 +8136,41 @@ impl InspectorCanvasLayout {
     }
 }
 
+fn overview_property_controls(
+    layout: InspectorCanvasLayout,
+    control_layout: InspectorControlLayout,
+) -> Vec<InspectorControlRect> {
+    let input_x = 112.0;
+    let input_width = (layout.body[2] - input_x - 5.0).max(0.0);
+    let mut controls = [0, 1, 3, 4]
+        .into_iter()
+        .map(|field| {
+            control_layout.body_control(
+                InspectorControlId::Field(field),
+                field,
+                input_x,
+                input_width,
+                17.0,
+            )
+        })
+        .collect::<Vec<_>>();
+    controls.push(control_layout.body_control(
+        InspectorControlId::Select(InspectorPickTarget::StateCategory),
+        2,
+        input_x,
+        input_width,
+        17.0,
+    ));
+    controls.push(control_layout.body_control(
+        InspectorControlId::Toggle(5),
+        5,
+        input_x,
+        input_width,
+        17.0,
+    ));
+    controls
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ProvinceEditorLayout {
     panel: [f64; 4],
@@ -7638,6 +8285,52 @@ impl ProvinceEditorLayout {
 
     fn clamp_page(self, page: usize) -> usize {
         page.min(self.total_rows.saturating_sub(1) / self.visible_rows)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StateApplyDialogLayout {
+    panel: [f64; 4],
+}
+
+impl StateApplyDialogLayout {
+    fn new(interface: &Interface) -> Self {
+        let window = interface.get_window_size();
+        let width = (window[0] - 32.0).clamp(440.0, 640.0);
+        let height = (window[1] - 32.0).clamp(330.0, 390.0);
+        Self {
+            panel: [
+                (window[0] - width) / 2.0,
+                (window[1] - height) / 2.0,
+                width,
+                height,
+            ],
+        }
+    }
+
+    fn primary(self) -> [f64; 4] {
+        let width = (self.panel[2] - 48.0) / 3.0;
+        [
+            self.panel[0] + 12.0,
+            self.panel[1] + self.panel[3] - 42.0,
+            width,
+            30.0,
+        ]
+    }
+
+    fn secondary(self) -> [f64; 4] {
+        let primary = self.primary();
+        [primary[0] + primary[2] + 8.0, primary[1], primary[2], 30.0]
+    }
+
+    fn close(self) -> [f64; 4] {
+        let secondary = self.secondary();
+        [
+            secondary[0] + secondary[2] + 8.0,
+            secondary[1],
+            secondary[2],
+            30.0,
+        ]
     }
 }
 
@@ -8909,6 +9602,37 @@ mod tests {
                         || right[1] + right[3] <= left[1]
                 );
             }
+        }
+    }
+
+    #[test]
+    fn general_editor_controls_are_full_width_and_stay_inside_drawer() {
+        let layout = InspectorCanvasLayout::from_panel([100.0, 20.0, 420.0, 600.0]);
+        let control_layout = InspectorControlLayout::new(
+            [layout.body[0], layout.body[1]],
+            layout.body[2],
+            0.0,
+            0.0,
+            1.0,
+        );
+        let controls = overview_property_controls(layout, control_layout);
+        assert_eq!(controls.len(), 6);
+        for expected in [
+            InspectorControlId::Field(0),
+            InspectorControlId::Field(1),
+            InspectorControlId::Select(InspectorPickTarget::StateCategory),
+            InspectorControlId::Field(3),
+            InspectorControlId::Field(4),
+            InspectorControlId::Toggle(5),
+        ] {
+            assert!(controls.iter().any(|control| control.id == expected));
+        }
+        for control in controls {
+            assert!(control.draw.x >= layout.body[0]);
+            assert!(control.draw.right() <= layout.body[0] + layout.body[2]);
+            assert!(control.draw.y >= layout.body[1]);
+            assert!(control.draw.bottom() <= layout.body[1] + layout.body[3]);
+            assert!(control.draw.width > layout.body[2] / 2.0);
         }
     }
 }

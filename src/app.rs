@@ -19,7 +19,9 @@ use piston::input::{Key, MouseButton};
 use vecmath::Vector2;
 
 use self::alerts::Alerts;
-use self::canvas::{Canvas, InspectorExternalRequest, ToolMode, ViewMode};
+use self::canvas::{
+    Canvas, InspectorExternalRequest, StateApplyDialogAction, ToolMode, ViewMode,
+};
 use self::interface::{ButtonId, Interface, StateActionAvailability, get_interface};
 use self::map_layers::WorkspaceMode;
 use self::project::{
@@ -80,6 +82,7 @@ pub struct App {
     pub glyph_cache: FontGlyphCache,
     pub interface: Option<Interface>,
     pub painting: bool,
+    left_press_consumed: bool,
 }
 
 impl EventHandler for App {
@@ -96,6 +99,7 @@ impl EventHandler for App {
             glyph_cache,
             interface: None,
             painting: false,
+            left_press_consumed: false,
         }
     }
 
@@ -120,16 +124,25 @@ impl EventHandler for App {
             .as_ref()
             .map(Canvas::inspector_reserved_width)
             .unwrap_or(0.0);
+        let interactive_cursor = self
+            .canvas
+            .as_ref()
+            .is_none_or(|canvas| !canvas.state_apply_dialog_is_open())
+            .then_some(cursor_pos)
+            .flatten();
         let interface = get_interface(&mut self.interface, viewport);
         interface.set_inspector_width(inspector_width);
         graphics::clear(colors::NEUTRAL, gl);
 
         if let Some(canvas) = &mut self.canvas {
-            canvas.draw(ctx, interface, &mut self.glyph_cache, cursor_pos, gl);
+            canvas.draw(ctx, interface, &mut self.glyph_cache, interactive_cursor, gl);
         };
 
         self.alerts.draw(ctx, interface, &mut self.glyph_cache, gl);
-        interface.draw(ctx, ictx, cursor_pos, &mut self.glyph_cache, gl);
+        interface.draw(ctx, ictx, interactive_cursor, &mut self.glyph_cache, gl);
+        if let Some(canvas) = self.canvas.as_ref() {
+            canvas.draw_state_apply_dialog(ctx, interface, &mut self.glyph_cache, gl);
+        }
     }
 
     fn on_update(&mut self, dt: f32) {
@@ -139,12 +152,32 @@ impl EventHandler for App {
         if let Some(interface) = self.interface.as_mut() {
             interface.tick(dt);
         }
+        if self
+            .canvas
+            .as_mut()
+            .is_some_and(Canvas::take_state_apply_ready_for_confirmation)
+        {
+            self.action_save_map();
+        }
     }
 
     fn on_key(&mut self, key: Key, state: bool, mods: KeyMods, cursor_pos: Option<Vector2<f64>>) {
         let Some(interface) = self.interface.as_ref() else {
             return;
         };
+        if state
+            && self
+                .canvas
+                .as_ref()
+                .is_some_and(Canvas::state_apply_dialog_is_open)
+        {
+            if key == Key::Escape
+                && let Some(canvas) = self.canvas.as_mut()
+            {
+                canvas.close_state_apply_dialog();
+            }
+            return;
+        }
         if state
             && self
                 .canvas
@@ -370,6 +403,10 @@ impl EventHandler for App {
     }
 
     fn on_mouse(&mut self, button: MouseButton, state: bool, mods: KeyMods, pos: Vector2<f64>) {
+        if button == MouseButton::Left && !state && self.left_press_consumed {
+            self.left_press_consumed = false;
+            return;
+        }
         if state
             && let Some(interface) = self.interface.as_mut()
         {
@@ -377,10 +414,37 @@ impl EventHandler for App {
         }
         if state
             && button == MouseButton::Left
+            && self
+                .canvas
+                .as_ref()
+                .is_some_and(Canvas::state_apply_dialog_is_open)
+        {
+            self.left_press_consumed = true;
+            let action = match (self.interface.as_ref(), self.canvas.as_mut()) {
+                (Some(interface), Some(canvas)) => {
+                    canvas.state_apply_dialog_click(interface, pos, &mut self.alerts)
+                }
+                _ => StateApplyDialogAction::None,
+            };
+            if action == StateApplyDialogAction::ConfirmSave {
+                self.action_save_map();
+            }
+            return;
+        }
+        if self
+            .canvas
+            .as_ref()
+            .is_some_and(Canvas::state_apply_dialog_is_open)
+        {
+            return;
+        }
+        if state
+            && button == MouseButton::Left
             && self.canvas.as_ref().is_some_and(|canvas| {
                 canvas.property_editor_is_open() || canvas.inspector_picker_is_open()
             })
         {
+            self.left_press_consumed = true;
             self.action_activate_tool(pos, mods);
             return;
         }
@@ -389,11 +453,16 @@ impl EventHandler for App {
             return;
         };
         match (&mut self.canvas, state, button) {
-            (_, true, MouseButton::Left) => match interface.on_mouse_click(pos, ictx) {
-                Ok(id) => self.action_interface_button(id),
-                Err(true) => self.action_activate_tool(pos, mods),
-                Err(false) => (),
-            },
+            (_, true, MouseButton::Left) => {
+                match interface.on_mouse_click(pos, ictx) {
+                    Ok(id) => {
+                        self.left_press_consumed = true;
+                        self.action_interface_button(id);
+                    }
+                    Err(true) => self.action_activate_tool(pos, mods),
+                    Err(false) => self.left_press_consumed = true,
+                }
+            }
             (Some(_), false, MouseButton::Left) => self.action_deactivate_tool(),
             (Some(canvas), true, MouseButton::Right) if interface.map_contains(pos) => {
                 canvas.camera.set_panning(true)
@@ -407,6 +476,16 @@ impl EventHandler for App {
     }
 
     fn on_mouse_position(&mut self, pos: Vector2<f64>, mods: KeyMods) {
+        if self
+            .canvas
+            .as_ref()
+            .is_some_and(Canvas::state_apply_dialog_is_open)
+        {
+            if let Some(interface) = self.interface.as_mut() {
+                interface.clear_tooltip();
+            }
+            return;
+        }
         let ictx = self.get_interface_draw_context();
         let Some(interface) = self.interface.as_mut() else {
             return;
@@ -471,6 +550,7 @@ impl EventHandler for App {
 
     fn on_unfocus(&mut self) {
         self.painting = false;
+        self.left_press_consumed = false;
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.cancel_state_brush();
             canvas.camera.set_panning(false);
@@ -634,7 +714,7 @@ impl App {
             }
             WorkspaceReviewChanges => {
                 if let Some(canvas) = self.canvas.as_mut() {
-                    canvas.generate_patch_preview(&mut self.alerts);
+                    canvas.open_patch_review(&mut self.alerts);
                 }
                 return;
             }

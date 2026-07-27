@@ -24,9 +24,10 @@ visible for inspection but unsafe edits and Apply remain blocked.
 
 ## Apply is disabled
 
-Generate a fresh Review Changes plan, resolve `ReviewRequired` or `Blocked`
-diagnostics, and run temporary round-trip validation. Editing after validation
-makes the report stale and requires another review.
+Open Review Changes. The editor regenerates a stale plan and offers temporary
+validation directly. `ReviewRequired` needs **Validate and Continue**;
+`Blocked` diagnostics must be resolved. Editing after validation makes the
+report stale and requires another review.
 
 ## Validation or Save failed
 

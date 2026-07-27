@@ -416,6 +416,56 @@ impl Interface {
         ictx: InterfaceDrawContext,
     ) -> Result<ButtonId, bool> {
         self.tooltip.clear();
+        let menu_was_open = self
+            .toolbar_buttons
+            .iter()
+            .chain(self.workspace_dropdowns.iter())
+            .any(|menu| menu.enabled);
+        if menu_was_open {
+            let clicked_toolbar = self
+                .toolbar_buttons
+                .iter()
+                .position(|menu| menu.base.test(pos));
+            let clicked_workspace = self
+                .workspace_dropdowns
+                .iter()
+                .position(|menu| menu.base.test(pos));
+            if clicked_toolbar.is_some() || clicked_workspace.is_some() {
+                let enable = clicked_toolbar
+                    .map(|index| !self.toolbar_buttons[index].enabled)
+                    .or_else(|| {
+                        clicked_workspace.map(|index| !self.workspace_dropdowns[index].enabled)
+                    })
+                    .unwrap_or(false);
+                self.toolbar_buttons
+                    .iter_mut()
+                    .chain(self.workspace_dropdowns.iter_mut())
+                    .for_each(|menu| menu.enabled = false);
+                if let Some(index) = clicked_toolbar {
+                    self.toolbar_buttons[index].enabled = enable;
+                } else if let Some(index) = clicked_workspace {
+                    self.workspace_dropdowns[index].enabled = enable;
+                }
+                return Err(false);
+            }
+
+            let clicked = self
+                .toolbar_buttons
+                .iter()
+                .chain(self.workspace_dropdowns.iter())
+                .filter(|menu| menu.enabled)
+                .flat_map(|menu| menu.visible_buttons(ictx))
+                .find(|button| button.base.test(pos))
+                .map(|button| button.id);
+            self.toolbar_buttons
+                .iter_mut()
+                .chain(self.workspace_dropdowns.iter_mut())
+                .for_each(|menu| menu.enabled = false);
+            return match clicked {
+                Some(id) if ictx.state_actions.button_enabled(id) => Ok(id),
+                _ => Err(false),
+            };
+        }
         for button in &self.workspace_buttons {
             if button.base.test(pos) {
                 let enabled = match button.id {
@@ -496,27 +546,21 @@ impl Interface {
     }
 
     pub fn on_mouse_position(&mut self, pos: Vector2<f64>, ictx: InterfaceDrawContext) {
-        for toolbar_button in self
+        let hovered = self
             .toolbar_buttons
-            .iter_mut()
-            .chain(self.workspace_dropdowns.iter_mut())
+            .iter()
+            .chain(self.workspace_dropdowns.iter())
+            .position(|menu| menu.base.test(pos));
+        if self.menu_is_open()
+            && let Some(hovered) = hovered
         {
-            if toolbar_button.enabled && !toolbar_button.test(pos, ictx) {
-                toolbar_button.enabled = false;
-
-                for toolbar_button in self
-                    .toolbar_buttons
-                    .iter_mut()
-                    .chain(self.workspace_dropdowns.iter_mut())
-                {
-                    if toolbar_button.base.test(pos) {
-                        toolbar_button.enabled = true;
-                    };
-                }
-
-                break;
-            };
+            self.toolbar_buttons
+                .iter_mut()
+                .chain(self.workspace_dropdowns.iter_mut())
+                .enumerate()
+                .for_each(|(index, menu)| menu.enabled = index == hovered);
         }
+        let _ = ictx;
     }
 
     pub fn tick(&mut self, dt: f32) {
@@ -778,10 +822,6 @@ struct ButtonElement {
 }
 
 impl ButtonElement {
-    fn test(&self, pos: Vector2<f64>) -> bool {
-        self.base.test(pos)
-    }
-
     fn draw(
         &self,
         ctx: Context,
@@ -915,13 +955,6 @@ impl ToolbarButtonElement {
             .collect()
     }
 
-    fn test(&self, pos: Vector2<f64>, ictx: InterfaceDrawContext) -> bool {
-        self.base.test(pos)
-            || self
-                .visible_buttons(ictx)
-                .iter()
-                .any(|button| button.test(pos))
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2061,67 +2094,67 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 ButtonId::ToolbarEditCancelStateFill,
             ),
             (
-                "Advanced: Generate Preview",
+                "Preview / Generate",
                 "",
                 ButtonId::ToolbarPatchGenerate,
             ),
             (
-                "Advanced: Regenerate Preview",
+                "Preview / Regenerate",
                 "",
                 ButtonId::ToolbarPatchRegenerate,
             ),
             (
-                "Advanced: Previous File",
+                "Preview / Previous File",
                 "",
                 ButtonId::ToolbarPatchPreviousFile,
             ),
             (
-                "Advanced: Next File",
+                "Preview / Next File",
                 "",
                 ButtonId::ToolbarPatchNextFile,
             ),
             (
-                "Advanced: Validate in Temporary Workspace",
+                "Validation / Temporary Copy",
                 "",
                 ButtonId::ToolbarPatchValidate,
             ),
             (
-                "Advanced: Validate Review-Required Changes",
+                "Validation / Review-Required",
                 "",
                 ButtonId::ToolbarPatchValidateReview,
             ),
             (
-                "Advanced: Cancel Validation",
+                "Validation / Cancel",
                 "",
                 ButtonId::ToolbarPatchCancelValidation,
             ),
             (
-                "Advanced: View Validation Report",
+                "Validation / View Report",
                 "",
                 ButtonId::ToolbarPatchViewValidationReport,
             ),
             (
-                "Advanced: Clear Validation Result",
+                "Validation / Clear Result",
                 "",
                 ButtonId::ToolbarPatchClearValidation,
             ),
             (
-                "Advanced: Cancel Save",
+                "Save / Cancel",
                 "",
                 ButtonId::ToolbarPatchCancelSave,
             ),
             (
-                "Advanced: View Save Report",
+                "Save / View Report",
                 "",
                 ButtonId::ToolbarPatchViewSaveReport,
             ),
             (
-                "Advanced: Recover Interrupted Save",
+                "Save / Recover Interrupted",
                 "",
                 ButtonId::ToolbarPatchRecoverSave,
             ),
             (
-                "Advanced: Clear Preview",
+                "Preview / Clear",
                 "",
                 ButtonId::ToolbarPatchClear,
             ),
@@ -2320,6 +2353,67 @@ fn get_sprite(sprite_coords: [u32; 4]) -> Texture {
 mod tests {
     use super::*;
 
+    fn interface() -> Interface {
+        let viewport = Viewport {
+            rect: [0, 0, 1200, 800],
+            draw_size: [1200, 800],
+            window_size: [1200.0, 800.0],
+        };
+        let toolbar_buttons = ["File", "Edit", "View", "Tools"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let x = index as u32 * 70;
+                ToolbarButtonElement {
+                    base: ButtonBase::new_fit_width(
+                        label,
+                        [x, 0],
+                        &PALETTE_BUTTON_TOOLBAR,
+                    ),
+                    buttons: if label == "Tools" {
+                        vec![ButtonElement {
+                            base: ButtonBase::new_double_text(
+                                ["Open Mod Folder", ""],
+                                [x, 24],
+                                TOOLBAR_DROPDOWN_WIDTH,
+                                &PALETTE_BUTTON,
+                            ),
+                            id: ButtonId::ToolbarFileOpenFolder,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    enabled: false,
+                    map_view_selector: false,
+                    overlays_selector: false,
+                }
+            })
+            .collect();
+        Interface {
+            sidebar_tool_buttons: Vec::new(),
+            state_sidebar_tool_buttons: Vec::new(),
+            sidebar_option_buttons: Vec::new(),
+            toolbar_buttons,
+            workspace_buttons: Vec::new(),
+            workspace_dropdowns: Vec::new(),
+            toolbar_plate: PlateComponent {
+                pos: [0.0, 0.0],
+                size: [1200.0, 48.0],
+            }
+            .styled(&PALETTE_BUTTON_TOOLBAR),
+            toolbar_height: 48,
+            sidebar_plate: PlateComponent {
+                pos: [0.0, 48.0],
+                size: [0.0, 752.0],
+            }
+            .styled(&PALETTE_BUTTON),
+            sidebar_width: 0,
+            inspector_width: 0.0,
+            viewport,
+            tooltip: TooltipManager::default(),
+        }
+    }
+
     fn context(state_view: bool) -> InterfaceDrawContext {
         InterfaceDrawContext {
             map_view_mode: Some(MapViewMode::ProvinceColors),
@@ -2397,6 +2491,38 @@ mod tests {
             *label,
             "State Lasso" | "State Brush" | "State Fill" | "Patch Preview" | "Map View"
         )));
+    }
+
+    #[test]
+    fn open_menu_owns_overlapping_clicks_and_outside_close() {
+        let mut interface = interface();
+        let ictx = context(true);
+        let tools = interface.toolbar_buttons[3].base.plate();
+        let tools_pos = [
+            tools.pos[0] + tools.size[0] / 2.0,
+            tools.pos[1] + tools.size[1] / 2.0,
+        ];
+        assert_eq!(interface.on_mouse_click(tools_pos, ictx), Err(false));
+        assert!(interface.toolbar_buttons[3].enabled);
+        interface.on_mouse_position([600.0, 500.0], ictx);
+        assert!(interface.toolbar_buttons[3].enabled);
+
+        let first = *interface.toolbar_buttons[3].visible_buttons(ictx)[0]
+            .base
+            .plate();
+        let item_pos = [
+            first.pos[0] + first.size[0] / 2.0,
+            first.pos[1] + first.size[1] / 2.0,
+        ];
+        assert_eq!(
+            interface.on_mouse_click(item_pos, ictx),
+            Ok(ButtonId::ToolbarFileOpenFolder)
+        );
+        assert!(!interface.toolbar_buttons[3].enabled);
+
+        assert_eq!(interface.on_mouse_click(tools_pos, ictx), Err(false));
+        assert_eq!(interface.on_mouse_click([600.0, 500.0], ictx), Err(false));
+        assert!(!interface.toolbar_buttons[3].enabled);
     }
 
     #[test]

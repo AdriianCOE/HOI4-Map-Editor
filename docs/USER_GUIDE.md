@@ -53,9 +53,11 @@ Edit in memory
 → Reload and Verify
 ```
 
-Apply is unavailable when the plan is stale, `ReviewRequired`, `Blocked`, or
-not covered by a current successful validation. State backups, journals, and
-recovery records are stored under `<mod>/.hoi4-state-editor/`.
+Apply automatically regenerates a stale preview and runs the required temporary
+validation. `ReviewRequired` changes need the explicit **Validate and Continue**
+action and a current `PassedWithReview` result. `Blocked` changes cannot be
+applied. State backups, journals, and recovery records are stored under
+`<mod>/.hoi4-state-editor/`.
 
 If an interrupted transaction is detected, complete recovery before editing
 again. Keep the recovery directory until the project reloads successfully.

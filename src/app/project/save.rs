@@ -98,13 +98,13 @@ impl StateSaveBlockReason {
                 "The patch preview is outdated. Regenerate and validate it again."
             }
             Self::NoChanges => "There are no state changes to save.",
-            Self::ReviewRequired => "Review-required patches cannot be saved automatically.",
+            Self::ReviewRequired => {
+                "Review-required patches need explicit isolated validation and approval."
+            }
             Self::BlockedPatch => "Blocked patches cannot be saved.",
             Self::NoRoundTripReport => "Run the isolated round-trip validation before saving.",
             Self::RoundTripReportStale => "The round-trip validation is outdated.",
-            Self::RoundTripNotPassed => {
-                "Only an exact Passed round-trip validation can authorize Save."
-            }
+            Self::RoundTripNotPassed => "Only a current eligible round-trip report can authorize Save.",
             Self::SourceChanged => {
                 "The source project changed after validation. Regenerate and validate again."
             }
@@ -163,6 +163,8 @@ pub struct StateSaveAuthorization {
     pub patch_plan_generation: u64,
     pub patch_plan_digest: String,
     pub validation_report_digest: String,
+    #[serde(default)]
+    pub allow_review_required: bool,
     pub source_fingerprints: BTreeMap<PathBuf, PersistedFingerprint>,
 }
 
@@ -179,6 +181,7 @@ pub struct StateSaveConditions {
     pub tool_interaction_active: bool,
     pub recovery_required: bool,
     pub save_running: bool,
+    pub allow_review_required: bool,
 }
 
 pub fn state_save_eligibility(
@@ -227,7 +230,7 @@ pub fn state_save_eligibility(
     {
         reasons.push(StateSaveBlockReason::BlockedPatch);
     }
-    if plan.summary.review_required_files != 0
+    let review_required = plan.summary.review_required_files != 0
         || plan
             .modified_files
             .iter()
@@ -239,8 +242,8 @@ pub fn state_save_eligibility(
         || plan
             .removed_files
             .iter()
-            .any(|file| file.safety == PatchSafety::ReviewRequired)
-    {
+            .any(|file| file.safety == PatchSafety::ReviewRequired);
+    if review_required && !conditions.allow_review_required {
         reasons.push(StateSaveBlockReason::ReviewRequired);
     }
     let Some(report) = report else {
@@ -250,7 +253,11 @@ pub fn state_save_eligibility(
     if report.is_stale(edit.revision(), Some(plan)) {
         reasons.push(StateSaveBlockReason::RoundTripReportStale);
     }
-    if report.status != RoundTripStatus::Passed || !report.eligible_for_atomic_save_preparation {
+    let validation_passed = report.status == RoundTripStatus::Passed
+        || (review_required
+            && conditions.allow_review_required
+            && report.status == RoundTripStatus::PassedWithReview);
+    if !validation_passed || !report.eligible_for_atomic_save_preparation {
         reasons.push(StateSaveBlockReason::RoundTripNotPassed);
     }
     if verify_source(project, plan).is_err() {
@@ -265,6 +272,7 @@ pub fn state_save_eligibility(
         patch_plan_generation: plan.generation,
         patch_plan_digest: plan.content_fingerprint().digest_hex(),
         validation_report_digest: report.content_fingerprint().digest_hex(),
+        allow_review_required: conditions.allow_review_required,
         source_fingerprints: plan
             .source_fingerprints
             .iter()
@@ -465,12 +473,13 @@ pub fn save_confirmation_text(project: &Hoi4Project, plan: &ProjectPatchPlan) ->
     format!(
         "SAVE STATE FILES\n\nProject root: {}\nModified files: {}\nCreated files: {}\n\
      Removed files: {}\n\nRound-trip validation: Passed\nBlocked patches: 0\n\
-     Review-required patches: 0\n\nA verified backup will be created under:\n{}\n\n\
+     Review-required patches: {}\n\nA verified backup will be created under:\n{}\n\n\
      This will modify the real mod project. Continue?",
         project.paths.root.display(),
         plan.summary.modified_files,
         plan.summary.created_files,
         plan.summary.removed_files,
+        plan.summary.review_required_files,
         project
             .paths
             .root
@@ -1193,7 +1202,24 @@ fn validate_authorization(
     {
         return Err("The current patch plan is not the plan authorized for Save.".to_owned());
     }
-    if report.status != RoundTripStatus::Passed
+    let review_required = plan.summary.review_required_files != 0
+        || plan
+            .modified_files
+            .iter()
+            .any(|file| file.safety == PatchSafety::ReviewRequired)
+        || plan
+            .created_files
+            .iter()
+            .any(|file| file.safety == PatchSafety::ReviewRequired)
+        || plan
+            .removed_files
+            .iter()
+            .any(|file| file.safety == PatchSafety::ReviewRequired);
+    let validation_passed = report.status == RoundTripStatus::Passed
+        || (review_required
+            && authorization.allow_review_required
+            && report.status == RoundTripStatus::PassedWithReview);
+    if !validation_passed
         || !report.eligible_for_atomic_save_preparation
         || report.is_stale(edit.revision(), Some(plan))
         || authorization.validation_report_digest != report.content_fingerprint().digest_hex()
@@ -2565,7 +2591,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_passed_report_is_required_for_save() {
+    fn review_required_save_needs_explicit_approved_validation() {
         let (root, project, mut edit) = test_project("eligibility");
         change_manpower(&project, &mut edit, 2);
         let mut plan = plan_state_patches(&project, &edit);
@@ -2604,6 +2630,23 @@ mod tests {
                 .reasons
                 .contains(&StateSaveBlockReason::RoundTripNotPassed)
         );
+        let approved = state_save_eligibility(
+            &project,
+            &edit,
+            Some(&plan),
+            Some(&report),
+            StateSaveConditions {
+                allow_review_required: true,
+                ..Default::default()
+            },
+        );
+        assert!(approved.eligible);
+        let authorization = approved.authorization.unwrap();
+        assert!(authorization.allow_review_required);
+        assert!(validate_authorization(&edit, &plan, &report, &authorization).is_ok());
+        let mut denied = authorization;
+        denied.allow_review_required = false;
+        assert!(validate_authorization(&edit, &plan, &report, &denied).is_err());
         cleanup(&root);
     }
 
