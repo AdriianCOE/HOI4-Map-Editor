@@ -162,15 +162,17 @@ renderer canonico somente em memoria. Estados removidos geram plano de remocao.
 controlado, recarrega o candidato pelos loaders reais e compara semantica,
 indices, cobertura, diagnosticos estruturais e bytes. O resultado pode ser
 `Passed`, `PassedWithReview`, `Failed` ou `Cancelled`. `ReviewRequired` exige
-acao explicita e nunca autoriza Save.
+acao explicita; somente o fluxo Validate and Continue pode usar um
+`PassedWithReview` atual para autorizar Save.
 
 ## Salvamento transacional
 
 `app::project::save` e a unica fronteira que pode persistir arquivos de estado.
-O gate exige um `ProjectPatchPlan` atual e integralmente `Safe`, um
-`RoundTripValidationReport` atual com status exatamente `Passed`, digests
-correspondentes, fontes ainda identicas, nenhuma diferenca liquida vazia,
-nenhum draft ou gesto ativo e nenhuma transacao/recovery pendente.
+O gate exige um `ProjectPatchPlan` atual, sem operacoes `Blocked`, e um
+`RoundTripValidationReport` atual (`Passed`, ou `PassedWithReview` com
+autorizacao explicita), alem de digests correspondentes, fontes ainda
+identicas, nenhuma diferenca liquida vazia, nenhum draft ou gesto ativo e
+nenhuma transacao/recovery pendente.
 
 Depois da confirmacao explicita, a transacao segue:
 
