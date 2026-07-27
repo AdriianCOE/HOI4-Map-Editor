@@ -15,8 +15,9 @@ use super::alerts::Alerts;
 use super::format::DefinitionKind;
 use super::inspector::{
     ClickedState, DeveloperDiagnosticsMode, DoubleClickOutcome, DoubleClickTracker,
-    INSPECTOR_ICONS, ProvinceLabelMode, StateInspectorState, StateInspectorVisibility,
-    StateOpenSource, StateSearchEntry, StateSearchIndex,
+    INSPECTOR_ICONS, ProvinceLabelMode, ProvinceSearchEntry, ProvinceSearchIndex,
+    ProvinceSearchResult, StateInspectorState, StateInspectorVisibility, StateOpenSource,
+    StateSearchEntry, StateSearchIndex, StateSearchResult,
 };
 use super::map_layers::{
     ImageOverlaySource, MapBaseView, MapLayerState, WorkspaceMode, WorkspaceViewPreferences,
@@ -29,14 +30,14 @@ use super::inspector_controls::{
 use super::interface::{Interface, StateActionAvailability};
 use super::map::*;
 use super::project::{
-    BrushProvinceClassification, BuildingScope, DiagnosticSeverity, EditableStateProperties,
-    GameDefinitionCatalog, Hoi4Project, LassoSelectionMode, MapViewMode, ProjectPatchPlan,
-    ProvinceDataDraft, ProvinceInclusionMode, RecoveryInfo, RoundTripCancellation, RoundTripStage,
-    RoundTripStatus, RoundTripValidationPolicy, RoundTripValidationReport, RoundTripValidator,
-    SaveTransactionState, StateBrushMode, StateEditSession, StateLassoPhase, StatePropertyDraft,
-    StateRemovalPolicy, StateSaveCancellation, StateSaveConditions, StateSaveFault,
-    StateSaveOutcome, StateSaveReport, StateSelection, WorkingStateOrigin, boundaries_for_state,
-    classify_state_lasso,
+    BrushProvinceClassification, BuildingScope, DiagnosticSeverity, EditableProvinceData,
+    EditableStateProperties, GameDefinitionCatalog, Hoi4Project, LassoSelectionMode, MapViewMode,
+    ProjectPatchPlan, ProvinceDataDraft, ProvinceDataValidationError, ProvinceInclusionMode,
+    RecoveryInfo, RoundTripCancellation, RoundTripStage, RoundTripStatus,
+    RoundTripValidationPolicy, RoundTripValidationReport, RoundTripValidator, SaveTransactionState,
+    StateBrushMode, StateEditSession, StateLassoPhase, StatePropertyDraft, StateRemovalPolicy,
+    StateSaveCancellation, StateSaveConditions, StateSaveFault, StateSaveOutcome, StateSaveReport,
+    StateSelection, WorkingStateOrigin, boundaries_for_state, classify_state_lasso,
     detect_state_save_recovery, execute_state_save, generate_state_view, generate_state_view_for,
     generate_state_view_region_for, plan_state_fill, plan_state_patches, ProvinceAdjacency,
     format_integer_pt_br, parse_grouped_nonnegative_integer,
@@ -63,15 +64,15 @@ const ZOOM_SENSITIVITY: f64 = 0.125;
 const STATE_PROPERTY_LABELS: [&str; StatePropertyDraft::TEXT_FIELD_COUNT] = [
     "Name",
     "Manpower",
-    "State category",
+    "Category",
     "Max level factor",
     "Local supplies",
     "Owner",
     "Controller",
-    "Cores (comma-separated)",
-    "Claims (comma-separated)",
-    "Resources (name=value)",
-    "State buildings (name=value)",
+    "Cores",
+    "Claims",
+    "Resources",
+    "State Buildings",
 ];
 const STATE_PROPERTY_FIELD_KEYS: [&str; StatePropertyDraft::TEXT_FIELD_COUNT] = [
     "Name",
@@ -158,6 +159,7 @@ pub struct Canvas {
     map_access_mode: MapAccessMode,
     inspector: StateInspectorState,
     inspector_search_focused: bool,
+    inspector_search_index: usize,
     inspector_picker: Option<InspectorPickerState>,
     map_tag_picker: MapTagPicker,
     state_double_click: DoubleClickTracker,
@@ -253,6 +255,12 @@ struct StateBrushStroke {
 struct InspectorPickerState {
     target: InspectorPickTarget,
     picker: SearchablePicker<String>,
+}
+
+#[derive(Debug, Clone)]
+enum InspectorSearchResult {
+    State(StateSearchResult),
+    Province(ProvinceSearchResult),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -500,6 +508,7 @@ impl Canvas {
             map_access_mode,
             inspector: StateInspectorState::session_default(),
             inspector_search_focused: false,
+            inspector_search_index: 0,
             inspector_picker: None,
             map_tag_picker: MapTagPicker::default(),
             state_double_click: DoubleClickTracker::default(),
@@ -625,22 +634,65 @@ impl Canvas {
 
     pub fn inspector_search_backspace(&mut self) {
         self.inspector.search.pop();
+        self.inspector_search_index = 0;
     }
 
     pub fn inspector_search_cancel(&mut self) {
         self.inspector_search_focused = false;
+        self.inspector_search_index = 0;
     }
 
-    pub fn inspector_search_select_first(&mut self, interface: &Interface, alerts: &mut Alerts) {
-        let Some(state_id) = self
-            .inspector_search_results()
-            .first()
-            .map(|result| result.state_id)
+    pub fn focus_map_search(&mut self) {
+        self.inspector.visibility = StateInspectorVisibility::Expanded;
+        self.inspector_search_focused = true;
+        self.inspector_search_index = 0;
+    }
+
+    pub fn inspector_search_move(&mut self, next: bool) {
+        let count = self.inspector_search_results().len();
+        if count == 0 {
+            self.inspector_search_index = 0;
+            return;
+        }
+        self.inspector_search_index = if next {
+            (self.inspector_search_index + 1) % count
+        } else {
+            self.inspector_search_index
+                .checked_sub(1)
+                .unwrap_or(count - 1)
+        };
+    }
+
+    pub fn inspector_search_select(
+        &mut self,
+        interface: &Interface,
+        open_editor: bool,
+        alerts: &mut Alerts,
+    ) {
+        let results = self.inspector_search_results();
+        let Some(result) = results
+            .get(self.inspector_search_index.min(results.len().saturating_sub(1)))
+            .cloned()
         else {
             return;
         };
         self.inspector_search_focused = false;
-        self.select_state_by_id(interface, state_id, alerts);
+        self.inspector_search_index = 0;
+        match result {
+            InspectorSearchResult::State(result) => {
+                self.select_state_by_id(interface, result.state_id, alerts);
+                if open_editor {
+                    self.open_state_property_editor(alerts);
+                }
+            }
+            InspectorSearchResult::Province(result) => {
+                self.select_province_by_id(interface, result.entry.province_id, alerts);
+                if open_editor {
+                    self.set_workspace_mode(WorkspaceMode::States, alerts);
+                    self.open_province_data_editor(alerts);
+                }
+            }
+        }
     }
 
     pub fn property_draft_is_modified(&self) -> bool {
@@ -702,6 +754,8 @@ impl Canvas {
             return;
         };
         let suggested_id = edit.suggest_next_state_id();
+        self.cancel_state_brush();
+        self.cancel_state_fill();
         let properties = EditableStateProperties {
             manpower: Some(0),
             buildings_max_level_factor: Some(1.0),
@@ -804,6 +858,67 @@ impl Canvas {
         alerts.push(Ok(format!(
             "Editing Province {province_id} data in a temporary draft"
         )));
+    }
+
+    fn selected_province_position(&self, province_id: u32) -> Option<(usize, usize)> {
+        let selected = self.state_edit_session.as_ref()?.selected_provinces();
+        let index = selected.iter().position(|id| *id == province_id)?;
+        Some((index, selected.len()))
+    }
+
+    fn navigate_selected_province(
+        &mut self,
+        interface: &Interface,
+        next: bool,
+        alerts: &mut Alerts,
+    ) {
+        if let Some(draft) = self
+            .province_data_draft
+            .as_ref()
+            .filter(|draft| draft.is_modified())
+        {
+            let message = if self.validate_province_data_draft(draft).is_ok() {
+                "Apply Changes or Discard Province Changes before navigating."
+            } else {
+                "Fix the province validation errors or discard the draft before navigating."
+            };
+            alerts.push(Err(message));
+            return;
+        }
+        let selected = self
+            .state_edit_session
+            .as_ref()
+            .map(|edit| edit.selected_provinces().iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if selected.len() < 2 {
+            alerts.push(Err("Select at least two provinces to navigate the selection."));
+            return;
+        }
+        let current = self
+            .active_province_id
+            .and_then(|id| selected.iter().position(|candidate| *candidate == id))
+            .unwrap_or(0);
+        let index = if next {
+            (current + 1) % selected.len()
+        } else {
+            current.checked_sub(1).unwrap_or(selected.len() - 1)
+        };
+        let province_id = selected[index];
+        self.province_data_draft = None;
+        self.active_province_id = Some(province_id);
+        self.active_state_id = self
+            .state_edit_session
+            .as_ref()
+            .and_then(|edit| edit.province_state_id(province_id));
+        if let Some((_color, province)) = self
+            .bundle
+            .map
+            .iter_province_data()
+            .find(|(_, province)| province.preserved_id == Some(province_id))
+        {
+            self.camera.center_on(interface, province.center_of_mass());
+        }
+        self.open_province_data_editor(alerts);
     }
 
     pub fn apply_state_property_draft(&mut self, alerts: &mut Alerts) -> bool {
@@ -1039,7 +1154,7 @@ impl Canvas {
         };
         let province_id = draft.province_id;
         let state_id = draft.state_id;
-        let data = match draft.validate() {
+        let data = match self.validate_province_data_draft(draft) {
             Ok(data) => data,
             Err(errors) => {
                 alerts.push(Err(format!(
@@ -1077,6 +1192,36 @@ impl Canvas {
                 false
             }
         }
+    }
+
+    fn validate_province_data_draft(
+        &self,
+        draft: &ProvinceDataDraft,
+    ) -> Result<EditableProvinceData, Vec<ProvinceDataValidationError>> {
+        let data = draft.validate()?;
+        if self.province_is_coastal(draft.province_id)
+            || !data.buildings.keys().any(|name| is_coastal_only_building(name))
+        {
+            return Ok(data);
+        }
+        let row = draft
+            .buildings
+            .iter()
+            .position(|building| is_coastal_only_building(&building.name))
+            .unwrap_or(0);
+        Err(vec![ProvinceDataValidationError {
+            field: "Province Buildings".to_owned(),
+            field_index: Some(1 + row * 2),
+            message: "Naval Base requires a coastal province.".to_owned(),
+        }])
+    }
+
+    fn province_is_coastal(&self, province_id: u32) -> bool {
+        self.bundle
+            .map
+            .iter_province_data()
+            .find(|(_, province)| province.preserved_id == Some(province_id))
+            .is_some_and(|(_, province)| province.coastal == Some(true))
     }
 
     pub fn discard_state_property_draft(&mut self, alerts: &mut Alerts) {
@@ -1261,7 +1406,10 @@ impl Canvas {
                     .buildings
                     .iter()
                     .filter(|(_, entry)| {
-                        matches!(entry.scope, BuildingScope::State | BuildingScope::Unknown)
+                        building_matches_picker_scope(
+                            InspectorPickTarget::StateBuilding,
+                            entry.scope,
+                        )
                     })
                     .map(|(name, _)| name.clone())
                     .collect()
@@ -1272,7 +1420,10 @@ impl Canvas {
                         .buildings
                         .iter()
                         .filter(|(_, entry)| {
-                            matches!(entry.scope, BuildingScope::Province | BuildingScope::Unknown)
+                            building_matches_picker_scope(
+                                InspectorPickTarget::ProvinceBuilding,
+                                entry.scope,
+                            )
                         })
                         .map(|(name, _)| name.clone())
                         .collect()
@@ -1326,10 +1477,20 @@ impl Canvas {
         value: String,
         alerts: &mut Alerts,
     ) {
+        let province_building_blocked = target == InspectorPickTarget::ProvinceBuilding
+            && is_coastal_only_building(&value)
+            && self
+                .province_data_draft
+                .as_ref()
+                .is_some_and(|draft| !self.province_is_coastal(draft.province_id));
         let Some(draft) = self.active_state_property_draft_mut() else {
             if target == InspectorPickTarget::ProvinceBuilding
                 && let Some(draft) = self.province_data_draft.as_mut()
             {
+                if province_building_blocked {
+                    alerts.push(Err("Naval Base requires a coastal province."));
+                    return;
+                }
                 if !draft
                     .buildings
                     .iter()
@@ -1542,11 +1703,11 @@ impl Canvas {
             };
         }
         if point_in_rect(pos, layout.search()) {
-            self.inspector_search_focused = true;
+            self.focus_map_search();
             return (true, None);
         }
         if pos[1] >= layout.panel[1] + 112.0 && pos[1] < layout.panel[1] + 135.0 {
-            self.inspector_search_select_first(interface, alerts);
+            self.inspector_search_select(interface, false, alerts);
             return (true, None);
         }
         for (index, icon) in INSPECTOR_ICONS.iter().enumerate() {
@@ -1838,18 +1999,56 @@ impl Canvas {
         }
     }
 
-    fn inspector_search_results(&self) -> Vec<super::inspector::StateSearchResult> {
+    fn inspector_search_results(&self) -> Vec<InspectorSearchResult> {
         let Some(edit) = self.state_edit_session.as_ref() else {
             return Vec::new();
         };
-        let index = StateSearchIndex::new(edit.valid_state_ids().iter().filter_map(|state_id| {
-            let data = edit.state_data(*state_id)?;
-            Some(StateSearchEntry::new(
-                *state_id,
-                data.name.unwrap_or_else(|| "<unnamed>".to_owned()),
-            ))
-        }));
-        index.search(&self.inspector.search)
+        if self.is_state_workspace() {
+            let index = StateSearchIndex::new(edit.valid_state_ids().iter().filter_map(|state_id| {
+                let data = edit.state_data(*state_id)?;
+                Some(
+                    StateSearchEntry::new(
+                        *state_id,
+                        data.name.unwrap_or_else(|| "<unnamed>".to_owned()),
+                    )
+                    .with_context(
+                        data.history.owner,
+                        data.history.controller,
+                        data.provinces,
+                    ),
+                )
+            }));
+            return index
+                .search(&self.inspector.search)
+                .into_iter()
+                .map(InspectorSearchResult::State)
+                .collect();
+        }
+
+        let index = ProvinceSearchIndex::new(self.bundle.map.iter_province_data().filter_map(
+            |(rgb, province)| {
+                let province_id = province.preserved_id?;
+                let state_id = edit.province_state_id(province_id);
+                let state_name = state_id
+                    .and_then(|state_id| edit.state_data(state_id))
+                    .and_then(|data| data.name);
+                Some(ProvinceSearchEntry {
+                    province_id,
+                    rgb,
+                    kind: province.kind.to_str().to_owned(),
+                    terrain: province.terrain.clone(),
+                    coastal: province.coastal == Some(true),
+                    continent: province.continent,
+                    state_id,
+                    state_name,
+                })
+            },
+        ));
+        index
+            .search(&self.inspector.search)
+            .into_iter()
+            .map(InspectorSearchResult::Province)
+            .collect()
     }
 
     fn select_state_by_id(&mut self, interface: &Interface, state_id: u32, alerts: &mut Alerts) {
@@ -1869,14 +2068,20 @@ impl Canvas {
         };
         self.active_state_id = Some(state_id);
         self.active_province_id = data.provinces.first().copied();
-        if let Some(province_id) = self.active_province_id
-            && let Some((_color, province)) = self
-                .bundle
-                .map
-                .iter_province_data()
-                .find(|(_, province)| province.preserved_id == Some(province_id))
-        {
-            self.camera.center_on(interface, province.center_of_mass());
+        if self.state_province_extents.is_none() {
+            self.state_province_extents = Some(self.bundle.map.province_extents_by_id());
+        }
+        if let Some(extents) = self.state_province_extents.as_ref() {
+            let mut state_extents = data
+                .provinces
+                .iter()
+                .filter_map(|province_id| extents.get(province_id).copied());
+            if let Some(mut combined) = state_extents.next() {
+                for extents in state_extents {
+                    combined = combined.join(extents);
+                }
+                self.camera.focus_extents(interface, combined, 4.0);
+            }
         }
         self.state_selection = self
             .active_province_id
@@ -1908,7 +2113,65 @@ impl Canvas {
         }
         self.refresh_state_information();
         alerts.push(Ok(format!(
-            "Selected State {state_id} from Inspector search"
+            "Selected State {state_id} from map search"
+        )));
+    }
+
+    fn select_province_by_id(
+        &mut self,
+        interface: &Interface,
+        province_id: u32,
+        alerts: &mut Alerts,
+    ) {
+        if self.property_draft_is_modified() {
+            alerts.push(Err(
+                "Apply or discard the modified draft before changing province",
+            ));
+            return;
+        }
+        self.discard_unmodified_property_draft();
+        let Some((_rgb, province)) = self
+            .bundle
+            .map
+            .iter_province_data()
+            .find(|(_, province)| province.preserved_id == Some(province_id))
+        else {
+            alerts.push(Err(format!("Province {province_id} is unavailable")));
+            return;
+        };
+        let kind = province.kind;
+        let center = province.center_of_mass();
+        let state_id = self
+            .state_edit_session
+            .as_ref()
+            .and_then(|edit| edit.province_state_id(province_id));
+        self.active_province_id = Some(province_id);
+        self.active_state_id = state_id;
+        self.camera.ensure_scale(interface, 1.5);
+        self.camera.center_on(interface, center);
+        if let Some(edit) = self.state_edit_session.as_mut() {
+            let selected = BTreeSet::from([province_id]);
+            if edit
+                .apply_lasso_selection(&selected, LassoSelectionMode::Replace)
+                .is_err()
+            {
+                edit.clear_selected_provinces();
+            }
+        }
+        self.refresh_selected_province_boundaries();
+        self.state_selection = state_id
+            .map(|state_id| StateSelection::State {
+                state_id,
+                province_id,
+            })
+            .or_else(|| {
+                (kind == ProvinceKind::Land)
+                    .then_some(StateSelection::UnassignedProvince { province_id })
+            });
+        self.refresh_state_target_overlay();
+        self.refresh_state_information();
+        alerts.push(Ok(format!(
+            "Focused Province {province_id} from map search"
         )));
     }
 
@@ -1988,14 +2251,7 @@ impl Canvas {
                 }
                 for index in 0..=StatePropertyDraft::TEXT_FIELD_COUNT {
                     if point_in_rect(pos, layout.field(index)) {
-                        let picker = match index {
-                            3 => Some(InspectorPickTarget::StateCategory),
-                            6 => Some(InspectorPickTarget::Owner),
-                            7 => Some(InspectorPickTarget::Controller),
-                            8 => Some(InspectorPickTarget::Core),
-                            9 => Some(InspectorPickTarget::Claim),
-                            _ => None,
-                        };
+                        let picker = state_creation_picker(index);
                         if let Some(target) = picker {
                             self.open_inspector_picker(target, alerts);
                             return true;
@@ -2110,6 +2366,14 @@ impl Canvas {
             self.property_editor_replace_field = false;
             return true;
         }
+        if point_in_rect(pos, layout.previous_selected()) {
+            self.navigate_selected_province(interface, false, alerts);
+            return true;
+        }
+        if point_in_rect(pos, layout.next_selected()) {
+            self.navigate_selected_province(interface, true, alerts);
+            return true;
+        }
         for row in layout.visible_range() {
             if point_in_rect(pos, layout.building_name(row)) {
                 self.property_editor_field = 1 + row * 2;
@@ -2145,13 +2409,24 @@ impl Canvas {
             return true;
         }
         if point_in_rect(pos, layout.apply()) {
-            if draft.is_modified() && draft.validate().is_ok() {
+            if draft.is_modified() && self.validate_province_data_draft(draft).is_ok() {
                 self.apply_province_data_draft(alerts);
             }
             return true;
         }
         if point_in_rect(pos, layout.discard()) {
             self.discard_state_property_draft(alerts);
+            return true;
+        }
+        if point_in_rect(pos, layout.close()) {
+            if draft.is_modified() {
+                alerts.push(Err(
+                    "Apply Changes or Discard Province Changes before closing.",
+                ));
+            } else {
+                self.province_data_draft = None;
+                self.refresh_state_information();
+            }
             return true;
         }
         true
@@ -2168,6 +2443,7 @@ impl Canvas {
             self.inspector
                 .search
                 .extend(text.chars().filter(|character| !character.is_control()));
+            self.inspector_search_index = 0;
             return;
         }
         if let Some(draft) = self.state_lifecycle_draft.as_mut() {
@@ -3300,7 +3576,11 @@ impl Canvas {
             gl,
         );
         let search_text = if self.inspector.search.is_empty() {
-            "Search state by ID or name"
+            if self.is_state_workspace() {
+                "Find state, owner, controller, or province"
+            } else {
+                "Find province by ID, RGB, terrain, type, or state"
+            }
         } else {
             &self.inspector.search
         };
@@ -3316,7 +3596,37 @@ impl Canvas {
             [layout.search()[0] + 7.0, layout.search()[1] + 18.0],
             &fit_editor_text(search_text, layout.search()[2] - 14.0),
         );
-        if let Some(result) = self.inspector_search_results().first() {
+        let results = self.inspector_search_results();
+        if let Some(result) = results.get(
+            self.inspector_search_index
+                .min(results.len().saturating_sub(1)),
+        ) {
+            let summary = match result {
+                InspectorSearchResult::State(result) => {
+                    format!("{} — {}", result.state_id, result.name)
+                }
+                InspectorSearchResult::Province(result) => {
+                    let entry = &result.entry;
+                    let state = entry.state_id.map_or_else(
+                        || "Unassigned".to_owned(),
+                        |state_id| {
+                            format!(
+                                "State {state_id} — {}",
+                                entry.state_name.as_deref().unwrap_or("<unnamed>")
+                            )
+                        },
+                    );
+                    format!(
+                        "{} · {} · {} · RGB {},{},{} · {state}",
+                        entry.province_id,
+                        entry.kind,
+                        entry.terrain,
+                        entry.rgb[0],
+                        entry.rgb[1],
+                        entry.rgb[2],
+                    )
+                }
+            };
             draw_canvas_text(
                 ctx,
                 glyph_cache,
@@ -3324,7 +3634,11 @@ impl Canvas {
                 colors::WHITE_T,
                 [layout.panel[0] + 12.0, layout.panel[1] + 129.0],
                 &fit_editor_text(
-                    &format!("Result: {} - {}", result.state_id, result.name),
+                    &format!(
+                        "Result {}/{}: {summary}",
+                        self.inspector_search_index + 1,
+                        results.len()
+                    ),
                     layout.panel[2] - 24.0,
                 ),
             );
@@ -3982,16 +4296,27 @@ impl Canvas {
                     .map(|error| error.field)
                     .collect::<BTreeSet<_>>();
                 let state_id = id.trim().parse::<u32>().ok();
-                let id_valid = state_id.is_some_and(|state_id| {
-                    self.state_edit_session
-                        .as_ref()
-                        .is_some_and(|edit| edit.validate_new_state_id(state_id).is_ok())
-                });
+                let id_error = match (state_id, self.state_edit_session.as_ref()) {
+                    (None, _) => Some("State ID must be a positive integer.".to_owned()),
+                    (Some(state_id), Some(edit)) => edit
+                        .validate_new_state_id(state_id)
+                        .err()
+                        .map(|error| error.to_string()),
+                    (Some(_), None) => Some("State project is unavailable.".to_owned()),
+                };
+                let id_valid = id_error.is_none();
                 let selected = self
                     .state_edit_session
                     .as_ref()
                     .map_or(0, |edit| edit.selected_provinces().len());
 
+                let window = interface.get_window_size();
+                graphics::rectangle(
+                    [0.0, 0.0, 0.0, 0.62],
+                    [0.0, 0.0, window[0], window[1]],
+                    ctx.transform,
+                    gl,
+                );
                 graphics::rectangle([0.06, 0.07, 0.09, 0.97], layout.panel, ctx.transform, gl);
                 draw_canvas_text(
                     ctx,
@@ -4062,19 +4387,42 @@ impl Canvas {
                         [layout.panel[0] + 12.0, rect[1] + 17.0],
                         label,
                     );
+                    let raw = properties.field(index).unwrap_or_default();
+                    let value = match index {
+                        9 => properties
+                            .resource_values()
+                            .ok()
+                            .map(|values| {
+                                values
+                                    .iter()
+                                    .map(|(name, value)| format!("{name} {value}"))
+                                    .join(" · ")
+                            })
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_else(|| raw.to_owned()),
+                        10 => properties
+                            .state_building_values()
+                            .ok()
+                            .map(|values| {
+                                values
+                                    .iter()
+                                    .map(|(name, value)| format!("{name} {value}"))
+                                    .join(" · ")
+                            })
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_else(|| raw.to_owned()),
+                        _ => format_integer_input(
+                            raw,
+                            index == 1 && self.property_editor_field != field_index,
+                        ),
+                    };
                     draw_canvas_text(
                         ctx,
                         glyph_cache,
                         gl,
                         colors::WHITE,
                         [rect[0] + 6.0, rect[1] + 17.0],
-                        &fit_editor_text(
-                            &format_integer_input(
-                                properties.field(index).unwrap_or_default(),
-                                index == 1 && self.property_editor_field != field_index,
-                            ),
-                            rect[2] - 12.0,
-                        ),
+                        &fit_editor_text(&value, rect[2] - 12.0),
                     );
                 }
 
@@ -4132,8 +4480,8 @@ impl Canvas {
                 );
                 draw_editor_button(ctx, glyph_cache, gl, layout.cancel(), "Cancel", true);
 
-                let status = if !id_valid {
-                    "State ID is invalid, occupied, or reserved".to_owned()
+                let status = if let Some(error) = id_error {
+                    error
                 } else if !property_errors.is_empty() {
                     format!("New state validation errors: {}", property_errors.len())
                 } else if selected == 0 {
@@ -4423,13 +4771,34 @@ impl Canvas {
         };
         let layout =
             ProvinceEditorLayout::new(interface, draft.buildings.len(), self.province_editor_page);
-        let errors = draft.validate().err().unwrap_or_default();
+        let errors = self
+            .validate_province_data_draft(draft)
+            .err()
+            .unwrap_or_default();
         let can_apply = draft.is_modified() && errors.is_empty();
         let invalid_fields = errors
             .iter()
             .filter_map(|error| error.field_index)
             .collect::<BTreeSet<_>>();
+        let state_name = self
+            .state_edit_session
+            .as_ref()
+            .and_then(|edit| edit.state_data(draft.state_id))
+            .and_then(|data| data.name)
+            .unwrap_or_else(|| "<unnamed>".to_owned());
+        let selection_count = self
+            .state_edit_session
+            .as_ref()
+            .map_or(0, |edit| edit.selected_provinces().len());
+        let selected_position = self.selected_province_position(draft.province_id);
 
+        let window = interface.get_window_size();
+        graphics::rectangle(
+            [0.0, 0.0, 0.0, 0.62],
+            [0.0, 0.0, window[0], window[1]],
+            ctx.transform,
+            gl,
+        );
         graphics::rectangle([0.06, 0.07, 0.09, 0.97], layout.panel, ctx.transform, gl);
         draw_canvas_text(
             ctx,
@@ -4437,10 +4806,7 @@ impl Canvas {
             gl,
             colors::WHITE,
             [layout.panel[0] + 12.0, layout.panel[1] + 24.0],
-            &format!(
-                "PROVINCE {} â€” STATE {} â€” EDIT DATA",
-                draft.province_id, draft.state_id
-            ),
+            &format!("EDIT PROVINCE {}", draft.province_id),
         );
         draw_canvas_text(
             ctx,
@@ -4448,7 +4814,10 @@ impl Canvas {
             gl,
             colors::WARNING,
             [layout.panel[0] + 12.0, layout.panel[1] + 44.0],
-            "In-memory province draft â€” no files will be written",
+            &format!(
+                "State {} — {} · {selection_count} provinces selected · changes remain in memory",
+                draft.state_id, state_name
+            ),
         );
 
         draw_canvas_text(
@@ -4460,7 +4829,7 @@ impl Canvas {
                 layout.panel[0] + 12.0,
                 layout.victory_point_field()[1] + 17.0,
             ],
-            "Victory point value",
+            "Victory Point",
         );
         let vp_field = layout.victory_point_field();
         graphics::rectangle(
@@ -4498,6 +4867,33 @@ impl Canvas {
                 "Add victory point"
             },
             true,
+        );
+        draw_canvas_text(
+            ctx,
+            glyph_cache,
+            gl,
+            colors::WHITE_T,
+            [layout.panel[0] + 12.0, layout.panel[1] + 110.0],
+            &selected_position.map_or_else(
+                || "Active province is outside the current selection".to_owned(),
+                |(index, total)| format!("Province {} of {total}", index + 1),
+            ),
+        );
+        draw_editor_button(
+            ctx,
+            glyph_cache,
+            gl,
+            layout.previous_selected(),
+            "Previous Selected",
+            selected_position.is_some_and(|(_, total)| total > 1),
+        );
+        draw_editor_button(
+            ctx,
+            glyph_cache,
+            gl,
+            layout.next_selected(),
+            "Next Selected",
+            selected_position.is_some_and(|(_, total)| total > 1),
         );
 
         draw_canvas_text(
@@ -4575,7 +4971,7 @@ impl Canvas {
             glyph_cache,
             gl,
             layout.add_building(),
-            "Add provincial building",
+            "Add Province Building",
             true,
         );
         draw_editor_button(
@@ -4583,7 +4979,7 @@ impl Canvas {
             glyph_cache,
             gl,
             layout.previous_page(),
-            "Previous",
+            "Previous Buildings",
             self.province_editor_page > 0,
         );
         draw_editor_button(
@@ -4591,7 +4987,7 @@ impl Canvas {
             glyph_cache,
             gl,
             layout.next_page(),
-            "Next",
+            "Next Buildings",
             layout.has_next_page(self.province_editor_page),
         );
         draw_editor_button(
@@ -4599,7 +4995,7 @@ impl Canvas {
             glyph_cache,
             gl,
             layout.apply(),
-            "Apply to session",
+            "Apply Changes",
             can_apply,
         );
         draw_editor_button(
@@ -4607,14 +5003,15 @@ impl Canvas {
             glyph_cache,
             gl,
             layout.discard(),
-            "Discard province draft",
+            "Discard Province Changes",
             true,
         );
+        draw_editor_button(ctx, glyph_cache, gl, layout.close(), "Close", true);
 
         let status = if !draft.is_modified() {
             "No province draft changes".to_owned()
         } else if errors.is_empty() {
-            "Province draft modified â€” ready to apply".to_owned()
+            "Province draft modified — ready to apply".to_owned()
         } else {
             format!("Province draft validation errors: {}", errors.len())
         };
@@ -5140,7 +5537,7 @@ impl Canvas {
                 && self
                     .active_province_id
                     .is_some_and(|province_id| edit.editable_province_state(province_id).is_ok()),
-            can_create_state: !edits_blocked && !lasso_active && !brush_active && !fill_active,
+            can_create_state: !edits_blocked && !lasso_active,
             can_remove_state: !edits_blocked
                 && !lasso_active
                 && !brush_active
@@ -6665,7 +7062,6 @@ impl Canvas {
             self.clear_state_selection();
             return None;
         };
-        self.active_province_id = self.bundle.map.get_province_at(pos).preserved_id;
         let Some(project) = self.project.as_ref() else {
             return None;
         };
@@ -6673,6 +7069,7 @@ impl Canvas {
             self.toggle_edit_province_at(pos, alerts);
             return None;
         }
+        self.active_province_id = self.bundle.map.get_province_at(pos).preserved_id;
         let Some((state_by_province, unassigned_land_provinces)) = self.effective_state_maps()
         else {
             return None;
@@ -6910,11 +7307,6 @@ impl Canvas {
             alerts.push(Err("No province ID at cursor"));
             return;
         };
-        self.active_province_id = Some(province_id);
-        self.active_state_id = self
-            .state_edit_session
-            .as_ref()
-            .and_then(|edit| edit.province_state_id(province_id));
         let result = self
             .state_edit_session
             .as_mut()
@@ -7358,7 +7750,13 @@ impl Canvas {
 
     fn state_edit_status_text(&self) -> Option<String> {
         let edit = self.state_edit_session.as_ref()?;
-        Some(state_edit_status_message(edit))
+        let tool = ["Select", "Pan", "Lasso", "Brush", "Fill"][self.state_toolbar_tool()];
+        Some(state_edit_status_message(
+            edit,
+            self.active_province_id,
+            self.active_state_id,
+            tool,
+        ))
     }
 
     fn state_lasso_status_text(&self) -> Option<String> {
@@ -8216,9 +8614,9 @@ impl ProvinceEditorLayout {
         let width = (window[0] - x - 8.0).clamp(560.0, 760.0);
         let height = (window[1] - y - 8.0).clamp(390.0, 620.0);
         let row_height = 29.0;
-        let buildings_title_y = y + 122.0;
-        let buildings_y = y + 132.0;
-        let visible_rows = ((height - 285.0) / row_height).floor().max(1.0) as usize;
+        let buildings_title_y = y + 132.0;
+        let buildings_y = y + 142.0;
+        let visible_rows = ((height - 295.0) / row_height).floor().max(1.0) as usize;
         let max_page = total_rows.saturating_sub(1) / visible_rows;
         let page = requested_page.min(max_page);
         let actions_y = buildings_y + visible_rows as f64 * row_height + 8.0;
@@ -8244,6 +8642,14 @@ impl ProvinceEditorLayout {
 
     fn victory_point_toggle(self) -> [f64; 4] {
         [self.panel[0] + 372.0, self.panel[1] + 55.0, 180.0, 26.0]
+    }
+
+    fn previous_selected(self) -> [f64; 4] {
+        [self.panel[0] + 286.0, self.panel[1] + 92.0, 150.0, 26.0]
+    }
+
+    fn next_selected(self) -> [f64; 4] {
+        [self.panel[0] + 446.0, self.panel[1] + 92.0, 130.0, 26.0]
     }
 
     fn visible_range(self) -> std::ops::Range<usize> {
@@ -8295,11 +8701,15 @@ impl ProvinceEditorLayout {
     }
 
     fn apply(self) -> [f64; 4] {
-        [self.panel[0] + 12.0, self.actions_y + 36.0, 180.0, 28.0]
+        [self.panel[0] + 12.0, self.actions_y + 36.0, 160.0, 28.0]
     }
 
     fn discard(self) -> [f64; 4] {
-        [self.panel[0] + 202.0, self.actions_y + 36.0, 210.0, 28.0]
+        [self.panel[0] + 182.0, self.actions_y + 36.0, 210.0, 28.0]
+    }
+
+    fn close(self) -> [f64; 4] {
+        [self.panel[0] + 402.0, self.actions_y + 36.0, 90.0, 28.0]
     }
 
     fn has_next_page(self, page: usize) -> bool {
@@ -8532,6 +8942,34 @@ fn editor_field_color(active: bool, invalid: bool) -> DrawColor {
     } else {
         [0.14, 0.15, 0.18, 1.0]
     }
+}
+
+fn state_creation_picker(field: usize) -> Option<InspectorPickTarget> {
+    match field {
+        3 => Some(InspectorPickTarget::StateCategory),
+        6 => Some(InspectorPickTarget::Owner),
+        7 => Some(InspectorPickTarget::Controller),
+        8 => Some(InspectorPickTarget::Core),
+        9 => Some(InspectorPickTarget::Claim),
+        10 => Some(InspectorPickTarget::Resource),
+        11 => Some(InspectorPickTarget::StateBuilding),
+        _ => None,
+    }
+}
+
+fn is_coastal_only_building(name: &str) -> bool {
+    name.eq_ignore_ascii_case("naval_base")
+}
+
+fn building_matches_picker_scope(target: InspectorPickTarget, scope: BuildingScope) -> bool {
+    matches!(
+        (target, scope),
+        (InspectorPickTarget::StateBuilding, BuildingScope::State)
+            | (
+                InspectorPickTarget::ProvinceBuilding,
+                BuildingScope::Province
+            )
+    )
 }
 
 fn draw_canvas_text(
@@ -8784,7 +9222,12 @@ fn project_status_message_with_session(
     text
 }
 
-fn state_edit_status_message(edit: &StateEditSession) -> String {
+fn state_edit_status_message(
+    edit: &StateEditSession,
+    active_province_id: Option<u32>,
+    active_state_id: Option<u32>,
+    active_tool: &str,
+) -> String {
     let summary = edit.summary();
     let diagnostics = edit.diagnostics().len();
     let dirty_states = edit.dirty_state_ids().iter().map(u32::to_string).join(", ");
@@ -8797,10 +9240,13 @@ fn state_edit_status_message(edit: &StateEditSession) -> String {
         })
         .join(", ");
     format!(
-        "State edit session: active {} | created {} | removed {} | reserved IDs {}\n\
+        "Workspace: States | Tool: {active_tool} | Active province: {} | Active state: {}\n\
+     State edit session: active {} | created {} | removed {} | reserved IDs {}\n\
      {} selected [{}] | target {} | undo {} ({}) | redo {} ({}) | dirty states {} [{}] | diagnostics {}\n\
      Last command: {}\n\
      Actions: Ctrl+click select province | normal click active/target | Edit > New/Remove/State properties/Province data/Move/Unassign/Discard",
+        active_province_id.map_or_else(|| "None".to_owned(), |id| id.to_string()),
+        active_state_id.map_or_else(|| "None".to_owned(), |id| id.to_string()),
         summary.active_states,
         summary.created_states,
         summary.removed_states,
@@ -9135,7 +9581,7 @@ fn active_province_information(
                 })
                 .and_then(|data| data.name)
                 .unwrap_or_else(|| "<unnamed>".to_owned());
-            format!("State {state_id} â€” {name}")
+            format!("State {state_id} — {name}")
         })
         .unwrap_or_else(|| "Unassigned".to_owned());
     let edit_status = match edit.editable_province_state(province_id) {
@@ -9417,6 +9863,32 @@ impl Camera {
             .trans_pos(vecmath::vec2_sub(current, map_pos));
     }
 
+    pub fn ensure_scale(&mut self, interface: &Interface, minimum: f64) {
+        let current = self.scale_factor();
+        if current < minimum {
+            let dz = (minimum / current).log2() / ZOOM_SENSITIVITY;
+            self.on_mouse_zoom(interface, dz, interface.get_window_center());
+        }
+    }
+
+    pub fn focus_extents(&mut self, interface: &Interface, extents: Extents, maximum: f64) {
+        let width = (extents.upper[0] - extents.lower[0] + 1) as f64;
+        let height = (extents.upper[1] - extents.lower[1] + 1) as f64;
+        let viewport = interface.get_map_viewport();
+        let target = (viewport.width / (width * 1.2))
+            .min(viewport.height / (height * 1.2))
+            .clamp(0.2, maximum);
+        let dz = (target / self.scale_factor()).log2() / ZOOM_SENSITIVITY;
+        self.on_mouse_zoom(interface, dz, interface.get_window_center());
+        self.center_on(
+            interface,
+            [
+                (extents.lower[0] + extents.upper[0]) as f64 / 2.0,
+                (extents.lower[1] + extents.upper[1]) as f64 / 2.0,
+            ],
+        );
+    }
+
     pub fn set_panning(&mut self, panning: bool) {
         self.panning = panning;
     }
@@ -9657,5 +10129,51 @@ mod tests {
             assert!(control.draw.bottom() <= layout.body[1] + layout.body[3]);
             assert!(control.draw.width > layout.body[2] / 2.0);
         }
+    }
+
+    #[test]
+    fn new_state_uses_catalog_pickers_for_structured_values() {
+        assert_eq!(
+            state_creation_picker(3),
+            Some(InspectorPickTarget::StateCategory)
+        );
+        assert_eq!(
+            state_creation_picker(10),
+            Some(InspectorPickTarget::Resource)
+        );
+        assert_eq!(
+            state_creation_picker(11),
+            Some(InspectorPickTarget::StateBuilding)
+        );
+        assert_eq!(state_creation_picker(1), None);
+    }
+
+    #[test]
+    fn province_editor_distinguishes_selection_navigation_and_building_pages() {
+        let layout = ProvinceEditorLayout {
+            panel: [40.0, 40.0, 700.0, 600.0],
+            row_height: 29.0,
+            buildings_title_y: 172.0,
+            buildings_y: 182.0,
+            visible_rows: 8,
+            page: 0,
+            total_rows: 12,
+            actions_y: 422.0,
+            error_y: 500.0,
+            visible_error_lines: 4,
+        };
+
+        assert_ne!(layout.previous_selected(), layout.previous_page());
+        assert_ne!(layout.next_selected(), layout.next_page());
+        assert!(is_coastal_only_building("naval_base"));
+        assert!(!is_coastal_only_building("bunker"));
+        assert!(building_matches_picker_scope(
+            InspectorPickTarget::ProvinceBuilding,
+            BuildingScope::Province
+        ));
+        assert!(!building_matches_picker_scope(
+            InspectorPickTarget::ProvinceBuilding,
+            BuildingScope::State
+        ));
     }
 }

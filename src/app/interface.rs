@@ -1484,6 +1484,7 @@ pub enum ButtonId {
     WorkspaceApplyToMod,
     ToolbarEditUndo,
     ToolbarEditRedo,
+    ToolbarEditFindMap,
     ToolbarEditNewState,
     ToolbarEditRemoveState,
     ToolbarEditStateProperties,
@@ -1936,6 +1937,7 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
         &[
             ("Undo", "Ctrl+Z", ButtonId::ToolbarEditUndo),
             ("Redo", "Ctrl+Y", ButtonId::ToolbarEditRedo),
+            ("Find on Map", "Ctrl+F", ButtonId::ToolbarEditFindMap),
             ("New State", "", ButtonId::ToolbarEditNewState),
             (
                 "Remove state from session",

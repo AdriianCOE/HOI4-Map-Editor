@@ -253,6 +253,9 @@ pub enum InspectorHit {
 pub struct StateSearchEntry {
     pub state_id: u32,
     pub name: String,
+    pub owner: Option<String>,
+    pub controller: Option<String>,
+    pub province_ids: Vec<u32>,
 }
 
 impl StateSearchEntry {
@@ -260,13 +263,31 @@ impl StateSearchEntry {
         Self {
             state_id,
             name: name.into(),
+            owner: None,
+            controller: None,
+            province_ids: Vec::new(),
         }
+    }
+
+    pub fn with_context(
+        mut self,
+        owner: Option<String>,
+        controller: Option<String>,
+        province_ids: impl IntoIterator<Item = u32>,
+    ) -> Self {
+        self.owner = owner;
+        self.controller = controller;
+        self.province_ids = province_ids.into_iter().collect();
+        self
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateSearchMatch {
     ExactId,
+    ProvinceId,
+    Owner,
+    Controller,
     PartialId,
     NameSubstring,
 }
@@ -305,6 +326,20 @@ impl StateSearchIndex {
                 let id_text = entry.state_id.to_string();
                 let matched = if exact_id == Some(entry.state_id) {
                     StateSearchMatch::ExactId
+                } else if exact_id.is_some_and(|id| entry.province_ids.contains(&id)) {
+                    StateSearchMatch::ProvinceId
+                } else if entry
+                    .owner
+                    .as_deref()
+                    .is_some_and(|owner| owner.eq_ignore_ascii_case(query))
+                {
+                    StateSearchMatch::Owner
+                } else if entry
+                    .controller
+                    .as_deref()
+                    .is_some_and(|controller| controller.eq_ignore_ascii_case(query))
+                {
+                    StateSearchMatch::Controller
                 } else if id_text.contains(query) {
                     StateSearchMatch::PartialId
                 } else if entry.name.to_ascii_lowercase().contains(&query_lower) {
@@ -332,8 +367,96 @@ impl StateSearchIndex {
 fn search_rank(result: &StateSearchResult) -> u8 {
     match result.matched {
         StateSearchMatch::ExactId => 0,
-        StateSearchMatch::PartialId => 1,
-        StateSearchMatch::NameSubstring => 2,
+        StateSearchMatch::ProvinceId => 1,
+        StateSearchMatch::Owner | StateSearchMatch::Controller => 2,
+        StateSearchMatch::PartialId => 3,
+        StateSearchMatch::NameSubstring => 4,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvinceSearchEntry {
+    pub province_id: u32,
+    pub rgb: [u8; 3],
+    pub kind: String,
+    pub terrain: String,
+    pub coastal: bool,
+    pub continent: u16,
+    pub state_id: Option<u32>,
+    pub state_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvinceSearchMatch {
+    ExactId,
+    ExactRgb,
+    StateId,
+    Terrain,
+    Kind,
+    Coastal,
+    Continent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvinceSearchResult {
+    pub entry: ProvinceSearchEntry,
+    pub matched: ProvinceSearchMatch,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProvinceSearchIndex {
+    entries: Vec<ProvinceSearchEntry>,
+}
+
+impl ProvinceSearchIndex {
+    pub fn new(entries: impl IntoIterator<Item = ProvinceSearchEntry>) -> Self {
+        let mut entries = entries.into_iter().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.province_id);
+        Self { entries }
+    }
+
+    pub fn search(&self, query: &str) -> Vec<ProvinceSearchResult> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let lower = query.to_ascii_lowercase();
+        let compact = lower.replace(' ', "");
+        let exact_id = query.parse::<u32>().ok();
+        let state_id = lower
+            .strip_prefix("state:")
+            .and_then(|value| value.trim().parse::<u32>().ok());
+        let continent = lower
+            .strip_prefix("continent:")
+            .and_then(|value| value.trim().parse::<u16>().ok());
+
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let rgb = format!("{},{},{}", entry.rgb[0], entry.rgb[1], entry.rgb[2]);
+                let matched = if exact_id == Some(entry.province_id) {
+                    ProvinceSearchMatch::ExactId
+                } else if compact == rgb {
+                    ProvinceSearchMatch::ExactRgb
+                } else if state_id.is_some_and(|id| entry.state_id == Some(id)) {
+                    ProvinceSearchMatch::StateId
+                } else if entry.terrain.eq_ignore_ascii_case(query) {
+                    ProvinceSearchMatch::Terrain
+                } else if entry.kind.eq_ignore_ascii_case(query) {
+                    ProvinceSearchMatch::Kind
+                } else if lower == "coastal" && entry.coastal {
+                    ProvinceSearchMatch::Coastal
+                } else if continent == Some(entry.continent) {
+                    ProvinceSearchMatch::Continent
+                } else {
+                    return None;
+                };
+                Some(ProvinceSearchResult {
+                    entry: entry.clone(),
+                    matched,
+                })
+            })
+            .collect()
     }
 }
 
@@ -546,6 +669,60 @@ mod tests {
             vec![12, 301]
         );
         assert!(index.search("").is_empty());
+    }
+
+    #[test]
+    fn state_search_matches_owner_controller_and_contained_province() {
+        let index = StateSearchIndex::new([
+            StateSearchEntry::new(516, "Ilha3").with_context(
+                Some("BOM".to_owned()),
+                Some("CTR".to_owned()),
+                [16020, 16021],
+            ),
+            StateSearchEntry::new(517, "Other").with_context(
+                Some("OTH".to_owned()),
+                None,
+                [17000],
+            ),
+        ]);
+
+        assert_eq!(index.search("BOM")[0].matched, StateSearchMatch::Owner);
+        assert_eq!(
+            index.search("CTR")[0].matched,
+            StateSearchMatch::Controller
+        );
+        assert_eq!(
+            index.search("16020")[0].matched,
+            StateSearchMatch::ProvinceId
+        );
+    }
+
+    #[test]
+    fn province_search_matches_supported_context_fields() {
+        let index = ProvinceSearchIndex::new([ProvinceSearchEntry {
+            province_id: 16020,
+            rgb: [255, 129, 66],
+            kind: "land".to_owned(),
+            terrain: "forest".to_owned(),
+            coastal: true,
+            continent: 3,
+            state_id: Some(516),
+            state_name: Some("Ilha3".to_owned()),
+        }]);
+
+        for query in [
+            "16020",
+            "255,129,66",
+            "255, 129, 66",
+            "forest",
+            "land",
+            "coastal",
+            "continent:3",
+            "state:516",
+        ] {
+            assert_eq!(index.search(query).len(), 1, "{query}");
+        }
+        assert!(index.search("state:999").is_empty());
     }
 
     #[test]

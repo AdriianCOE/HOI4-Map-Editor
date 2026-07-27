@@ -208,11 +208,13 @@ impl EventHandler for App {
             match key {
                 Key::Escape => self.canvas.as_mut().unwrap().inspector_search_cancel(),
                 Key::Backspace => self.canvas.as_mut().unwrap().inspector_search_backspace(),
-                Key::Return => self
-                    .canvas
-                    .as_mut()
-                    .unwrap()
-                    .inspector_search_select_first(interface, &mut self.alerts),
+                Key::Up => self.canvas.as_mut().unwrap().inspector_search_move(false),
+                Key::Down => self.canvas.as_mut().unwrap().inspector_search_move(true),
+                Key::Return => self.canvas.as_mut().unwrap().inspector_search_select(
+                    interface,
+                    mods.ctrl,
+                    &mut self.alerts,
+                ),
                 _ => return,
             }
             return;
@@ -288,6 +290,12 @@ impl EventHandler for App {
                 self.alerts.push(Err(
                     "State editing is locked while Save or recovery is active",
                 ));
+            }
+            return;
+        }
+        if state && key == Key::F && mods.ctrl {
+            if let Some(canvas) = self.canvas.as_mut() {
+                canvas.focus_map_search();
             }
             return;
         }
@@ -846,6 +854,7 @@ impl App {
             (Some(_), ToolbarFileExportTerrainMap) => self.action_export_terrain_map(),
             (Some(canvas), ToolbarEditUndo) => canvas.undo(),
             (Some(canvas), ToolbarEditRedo) => canvas.redo(),
+            (Some(canvas), ToolbarEditFindMap) => canvas.focus_map_search(),
             (Some(canvas), ToolbarEditNewState) => {
                 canvas.open_new_state_editor(&mut self.alerts);
             }
@@ -1318,7 +1327,12 @@ impl App {
         }
         if let Some(canvas) = &self.canvas {
             let location = canvas.location().clone();
-            self.raw_save_map_at(location);
+            if msg_dialog_confirm_province_save() {
+                self.raw_save_map_at(location);
+            } else {
+                self.alerts
+                    .push(Ok("Province map Save cancelled before it started"));
+            }
         }
     }
 
@@ -1335,7 +1349,12 @@ impl App {
       ));
         } else if self.canvas.is_some() {
             if let Some(location) = file_dialog_save(archive) {
-                self.raw_save_map_at(location);
+                if msg_dialog_confirm_province_save() {
+                    self.raw_save_map_at(location);
+                } else {
+                    self.alerts
+                        .push(Ok("Province map Save cancelled before it started"));
+                }
             };
         };
     }
@@ -1365,7 +1384,7 @@ impl App {
     }
 
     fn raw_open_map_at(&mut self, location: impl IntoLocation) {
-        let result = crate::try_block! {
+        let result: Result<String, Error> = crate::try_block! {
           let location = location.into_location()?;
           let (canvas, success_message) = match location {
             Location::Directory(root) => match ProjectPaths::discover(&root) {
@@ -1400,7 +1419,9 @@ impl App {
     }
 
     fn raw_save_map_at(&mut self, location: impl IntoLocation) {
-        let result = crate::try_block! {
+        self.alerts
+            .push(Ok("Validating province map before Save..."));
+        let result: Result<String, Error> = crate::try_block! {
           let canvas = self.canvas.as_mut()
             .ok_or_else(|| Error::from("no canvas loaded"))?;
           let location = location.into_location()?;
@@ -1414,7 +1435,13 @@ impl App {
           Ok(success_message)
         };
 
-        self.handle_result(result);
+        match result {
+            Ok(message) => {
+                self.alerts.push(Ok(message));
+                msg_dialog_province_save_success();
+            }
+            Err(error) => self.alerts.push(Err(format!("Error: {error}"))),
+        }
     }
 
     fn handle_result_none(&mut self, result: Result<(), Error>) {
@@ -1617,6 +1644,14 @@ mod workspace_shortcut_tests {
         assert!(!saves_state_files(WorkspaceMode::Provinces, true));
         assert!(!saves_state_files(WorkspaceMode::Provinces, false));
     }
+
+    #[test]
+    fn province_save_confirmation_names_only_the_legacy_map_files() {
+        let message = province_save_confirmation_text();
+        assert!(message.contains("map/provinces.bmp"));
+        assert!(message.contains("map/definition.csv"));
+        assert!(!message.contains("history/states"));
+    }
 }
 
 fn msg_dialog_confirm_state_batch(description: &str) -> bool {
@@ -1641,6 +1676,38 @@ fn msg_dialog_confirm_state_save(description: &str) -> bool {
             .show(),
         MessageDialogResult::Yes
     )
+}
+
+fn msg_dialog_confirm_province_save() -> bool {
+    matches!(
+        MessageDialog::new()
+            .set_title("SAVE PROVINCE MAP")
+            .set_description(province_save_confirmation_text())
+            .set_level(MessageLevel::Warning)
+            .set_buttons(MessageButtons::YesNo)
+            .show(),
+        MessageDialogResult::Yes
+    )
+}
+
+fn province_save_confirmation_text() -> &'static str {
+    "Files to update:\n\
+     • map/provinces.bmp\n\
+     • map/definition.csv\n\n\
+     Validation runs before writing:\n\
+     • Image dimensions\n\
+     • Province colors\n\
+     • Definition catalog\n\
+     • Province IDs"
+}
+
+fn msg_dialog_province_save_success() {
+    MessageDialog::new()
+        .set_title("PROVINCE MAP SAVED")
+        .set_description("provinces.bmp updated\ndefinition.csv updated")
+        .set_level(MessageLevel::Info)
+        .set_buttons(MessageButtons::Ok)
+        .show();
 }
 
 fn msg_dialog_unsaved_changes() -> bool {
