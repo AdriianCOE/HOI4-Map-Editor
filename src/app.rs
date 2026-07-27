@@ -990,7 +990,7 @@ impl App {
             }
             (_, ToolbarHelpCopyVersion) => {
                 let summary = format!(
-                    "{}\n{}\n\nBased on HOI4 Province Editor by ScottyThePilot.\nDeveloped and extended by Adrian Costa.\n\nUnofficial community tool. Not affiliated with or endorsed by Paradox Interactive.\nRepository: https://github.com/AdriianCOE/hoi4_state_editor",
+                    "{}\n{}\n\nBased on ScottyThePilot's HOI4 Province Editor.\nDeveloped and extended by Adrian Costa.\n\nUnofficial community tool. Not affiliated with or endorsed by Paradox Interactive.\nRepository: https://github.com/AdriianCOE/hoi4_state_editor",
                     crate::diagnostic_summary().trim_end(),
                     crate::PRODUCT_SUBTITLE,
                 );
@@ -1372,7 +1372,7 @@ fn show_about_dialog() {
         .set_level(MessageLevel::Info)
         .set_title(crate::APPNAME)
         .set_description(format!(
-            "{}\n\nBased on HOI4 Province Editor by ScottyThePilot.\nDeveloped and extended by Adrian Costa.\n\nUnofficial community tool.\nNot affiliated with or endorsed by Paradox Interactive.\n\nMIT License\nhttps://github.com/AdriianCOE/hoi4_state_editor",
+            "{}\n\nBased on ScottyThePilot's HOI4 Province Editor.\nDeveloped and extended by Adrian Costa.\n\nUnofficial community tool.\nNot affiliated with or endorsed by Paradox Interactive.\n\nMIT License\nhttps://github.com/AdriianCOE/hoi4_state_editor",
             crate::PRODUCT_SUBTITLE,
         ))
         .set_buttons(MessageButtons::Ok)

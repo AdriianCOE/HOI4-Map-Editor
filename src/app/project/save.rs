@@ -3285,7 +3285,7 @@ mod tests {
             .join("phase4c-save-smoke");
         fs::create_dir_all(&base).unwrap();
         let root = base.join(format!(
-            "AzaryaCopy-{label}-{}-{}",
+            "RealModCopy-{label}-{}-{}",
             std::process::id(),
             TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
         ));
