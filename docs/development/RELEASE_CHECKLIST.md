@@ -19,7 +19,7 @@ applicable item is confirmed.
 
 - [ ] Test on a clean supported Windows machine from a writable extracted folder.
 - [ ] Test with at least two independently backed-up mods.
-- [ ] Review Changes, temporary validation, backup, Apply to Mod, reload, rollback, and recovery are exercised.
+- [ ] Review State Changes, temporary validation, backup, Apply State Changes, reload, rollback, and recovery are exercised.
 - [ ] Province editing legacy flow is tested separately from State Apply.
 - [ ] Logs are created under `%LOCALAPPDATA%\HOI4MapEditor\logs`.
 

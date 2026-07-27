@@ -23,6 +23,7 @@ use self::canvas::{
     Canvas, InspectorExternalRequest, StateApplyDialogAction, ToolMode, ViewMode,
 };
 use self::interface::{ButtonId, Interface, StateActionAvailability, get_interface};
+use self::map::ProvinceSaveMode;
 use self::map_layers::WorkspaceMode;
 use self::project::{
     Hoi4Project, LassoSelectionMode, MapViewMode, ProjectPaths, ProvinceInclusionMode,
@@ -273,7 +274,7 @@ impl EventHandler for App {
             && self
                 .canvas
                 .as_ref()
-                .is_some_and(Canvas::state_save_blocks_editing)
+                .is_some_and(Canvas::save_blocks_editing)
         {
             if key == Key::S && mods.ctrl && !mods.shift {
                 self.action_save_map();
@@ -281,14 +282,14 @@ impl EventHandler for App {
                 && self
                     .canvas
                     .as_ref()
-                    .is_some_and(Canvas::state_save_can_cancel)
+                    .is_some_and(Canvas::save_can_cancel)
             {
                 if let Some(canvas) = self.canvas.as_mut() {
-                    canvas.cancel_state_save(&mut self.alerts);
+                    canvas.cancel_active_save(&mut self.alerts);
                 }
             } else {
                 self.alerts.push(Err(
-                    "State editing is locked while Save or recovery is active",
+                    "Editing is locked while Save, export, or recovery is active",
                 ));
             }
             return;
@@ -309,7 +310,9 @@ impl EventHandler for App {
         match (&mut self.canvas, state, key) {
             (_, state, Key::Tab) => self.alerts.set_state(state),
             (_, true, Key::O) if mods.ctrl => self.action_open_map(mods.alt),
-            (Some(_), true, Key::S) if mods.ctrl && mods.shift => self.action_save_map_as(mods.alt),
+            (Some(_), true, Key::S) if mods.ctrl && mods.shift => {
+                self.action_export_province_map(mods.alt)
+            }
             (Some(_), true, Key::S) if mods.ctrl => self.action_save_map(),
             (Some(_), true, Key::R) if mods.ctrl && mods.alt => self.action_reveal_map(),
             (Some(canvas), true, Key::Z) if mods.ctrl => canvas.undo(),
@@ -545,6 +548,15 @@ impl EventHandler for App {
     }
 
     fn on_file_drop(&mut self, path: PathBuf) {
+        if self
+            .canvas
+            .as_ref()
+            .is_some_and(Canvas::save_blocks_editing)
+        {
+            self.alerts
+                .push(Err("Finish the active save before opening another project"));
+            return;
+        }
         if !self.resolve_property_draft() {
             return;
         }
@@ -577,20 +589,20 @@ impl EventHandler for App {
         if self
             .canvas
             .as_ref()
-            .is_some_and(Canvas::state_save_blocks_close)
+            .is_some_and(Canvas::save_blocks_close)
         {
             self.alerts.push(Err(
-                "Cannot close while State Save commit, rollback, or recovery is pending",
+                "Cannot close while a save commit, rollback, or recovery is pending",
             ));
             return false;
         }
         if self
             .canvas
             .as_ref()
-            .is_some_and(Canvas::state_save_is_running)
+            .is_some_and(Canvas::save_is_running)
         {
             if let Some(canvas) = self.canvas.as_mut() {
-                canvas.cancel_state_save(&mut self.alerts);
+                canvas.cancel_active_save(&mut self.alerts);
             }
             return false;
         }
@@ -748,7 +760,7 @@ impl App {
         if self
             .canvas
             .as_ref()
-            .is_some_and(Canvas::state_save_blocks_editing)
+            .is_some_and(Canvas::save_blocks_editing)
             && !matches!(
                 id,
                 ToolbarFileSave
@@ -758,7 +770,7 @@ impl App {
             )
         {
             self.alerts.push(Err(
-                "State editing is locked while Save or recovery is active",
+                "Editing is locked while Save, export, or recovery is active",
             ));
             return;
         }
@@ -847,8 +859,8 @@ impl App {
             (_, ToolbarFileOpenFileArchive) => self.action_open_map(true),
             (_, ToolbarFileOpenFolder) => self.action_open_map(false),
             (Some(_), ToolbarFileSave | ToolbarPatchSaveStateFiles) => self.action_save_map(),
-            (Some(_), ToolbarFileSaveAsArchive) => self.action_save_map_as(true),
-            (Some(_), ToolbarFileSaveAsFolder) => self.action_save_map_as(false),
+            (Some(_), ToolbarFileSaveAsArchive) => self.action_export_province_map(true),
+            (Some(_), ToolbarFileSaveAsFolder) => self.action_export_province_map(false),
             (Some(_), ToolbarFileReveal) => self.action_reveal_map(),
             (Some(_), ToolbarFileExportLandMap) => self.action_export_land_map(),
             (Some(_), ToolbarFileExportTerrainMap) => self.action_export_terrain_map(),
@@ -1150,10 +1162,10 @@ impl App {
         if self
             .canvas
             .as_ref()
-            .is_some_and(Canvas::state_save_blocks_editing)
+            .is_some_and(Canvas::save_blocks_editing)
         {
             self.alerts.push(Err(
-                "State editing is locked while Save or recovery is active",
+                "Editing is locked while Save, export, or recovery is active",
             ));
             return;
         }
@@ -1274,10 +1286,10 @@ impl App {
         if self
             .canvas
             .as_ref()
-            .is_some_and(Canvas::state_save_blocks_editing)
+            .is_some_and(Canvas::save_blocks_editing)
         {
             self.alerts.push(Err(
-                "Finish or recover the active State Save before opening another project",
+                "Finish or recover the active save before opening another project",
             ));
             return;
         }
@@ -1320,7 +1332,7 @@ impl App {
                 }
                 Ok(_) => self
                     .alerts
-                    .push(Ok("State Save cancelled before it started")),
+                    .push(Ok("Apply State Changes cancelled before it started")),
                 Err(message) => self.alerts.push(Err(message)),
             }
             return;
@@ -1328,7 +1340,13 @@ impl App {
         if let Some(canvas) = &self.canvas {
             let location = canvas.location().clone();
             if msg_dialog_confirm_province_save() {
-                self.raw_save_map_at(location);
+                if let Some(canvas) = self.canvas.as_mut() {
+                    canvas.start_province_save(
+                        location,
+                        ProvinceSaveMode::Save,
+                        &mut self.alerts,
+                    );
+                }
             } else {
                 self.alerts
                     .push(Ok("Province map Save cancelled before it started"));
@@ -1336,7 +1354,7 @@ impl App {
         }
     }
 
-    fn action_save_map_as(&mut self, archive: bool) {
+    fn action_export_province_map(&mut self, archive: bool) {
         if self
             .canvas
             .as_ref()
@@ -1345,17 +1363,19 @@ impl App {
             })
         {
             self.alerts.push(Err(
-        "Save As does not apply to state projects. Use Save State Files after a Passed validation."
+        "Province export is available in the Provinces workspace. Use Apply State Changes for state files."
       ));
-        } else if self.canvas.is_some() {
-            if let Some(location) = file_dialog_save(archive) {
-                if msg_dialog_confirm_province_save() {
-                    self.raw_save_map_at(location);
-                } else {
-                    self.alerts
-                        .push(Ok("Province map Save cancelled before it started"));
-                }
-            };
+            return;
+        }
+        let Some(location) = file_dialog_save(archive) else {
+            return;
+        };
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.start_province_save(
+                location,
+                ProvinceSaveMode::Export,
+                &mut self.alerts,
+            );
         };
     }
 
@@ -1416,32 +1436,6 @@ impl App {
         };
 
         self.handle_result(result);
-    }
-
-    fn raw_save_map_at(&mut self, location: impl IntoLocation) {
-        self.alerts
-            .push(Ok("Validating province map before Save..."));
-        let result: Result<String, Error> = crate::try_block! {
-          let canvas = self.canvas.as_mut()
-            .ok_or_else(|| Error::from("no canvas loaded"))?;
-          let location = location.into_location()?;
-          let mut success_message = format!("Saved map to {}", location);
-          let save_operation = canvas.save(&location)?;
-          if save_operation.had_id_changes {
-            success_message.push_str("\nThe most recent save included modified province IDs, see 'id_changes.txt' for more info");
-            success_message.push_str("\nIf you do not need province IDs to be preserved, you may disable it in the config")
-          };
-
-          Ok(success_message)
-        };
-
-        match result {
-            Ok(message) => {
-                self.alerts.push(Ok(message));
-                msg_dialog_province_save_success();
-            }
-            Err(error) => self.alerts.push(Err(format!("Error: {error}"))),
-        }
     }
 
     fn handle_result_none(&mut self, result: Result<(), Error>) {
@@ -1526,6 +1520,7 @@ fn file_dialog_save(archive: bool) -> Option<Location> {
     let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("./"));
     if archive {
         FileDialog::new()
+            .set_title("Export Province Map Archive")
             .set_directory(&root)
             .set_file_name("map.zip")
             .add_filter("ZIP Archive", &["zip"])
@@ -1533,6 +1528,7 @@ fn file_dialog_save(archive: bool) -> Option<Location> {
             .map(Location::ZipArchive)
     } else {
         FileDialog::new()
+            .set_title("Export Province Map As")
             .set_directory(&root)
             .pick_folder()
             .map(Location::Directory)
@@ -1681,7 +1677,7 @@ fn msg_dialog_confirm_state_save(description: &str) -> bool {
 fn msg_dialog_confirm_province_save() -> bool {
     matches!(
         MessageDialog::new()
-            .set_title("SAVE PROVINCE MAP")
+        .set_title("SAVE PROVINCE MAP")
             .set_description(province_save_confirmation_text())
             .set_level(MessageLevel::Warning)
             .set_buttons(MessageButtons::YesNo)
@@ -1693,21 +1689,13 @@ fn msg_dialog_confirm_province_save() -> bool {
 fn province_save_confirmation_text() -> &'static str {
     "Files to update:\n\
      • map/provinces.bmp\n\
-     • map/definition.csv\n\n\
+     • map/definition.csv\n\
+     • map/adjacencies.csv and id_changes.txt when generated by the legacy Province tools\n\n\
      Validation runs before writing:\n\
      • Image dimensions\n\
      • Province colors\n\
      • Definition catalog\n\
      • Province IDs"
-}
-
-fn msg_dialog_province_save_success() {
-    MessageDialog::new()
-        .set_title("PROVINCE MAP SAVED")
-        .set_description("provinces.bmp updated\ndefinition.csv updated")
-        .set_level(MessageLevel::Info)
-        .set_buttons(MessageButtons::Ok)
-        .show();
 }
 
 fn msg_dialog_unsaved_changes() -> bool {
@@ -1759,7 +1747,7 @@ fn msg_dialog_state_edits_exit(save_summary: &str) -> StateExitResolution {
         .set_title(crate::APPNAME)
         .set_description(format!(
             "This editing session contains unsaved state changes.\n\n\
-       Yes = Save state files\nNo = Discard and close\nCancel = Keep editing\n\n\
+       Yes = Apply State Changes\nNo = Discard and close\nCancel = Keep editing\n\n\
        {save_summary}"
         ))
         .set_level(MessageLevel::Warning)

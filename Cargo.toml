@@ -30,6 +30,7 @@ rayon = { version = "1.11" }
 rfd = { version = "0.15.4" }
 rusttype = { version = "0.9" }
 serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
 termcolor = { version = "1.4" }
 thiserror = { version = "1.0" }
 toml = { version = "0.5" }

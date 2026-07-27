@@ -18,6 +18,7 @@ backups and safer state file updates.
 - Terrain, coastal province and map diagnostics
 - Adjacency visualization and legacy editing tools
 - Support for map folders and the original Province Editor ZIP workflow
+- Atomic, validated province-map saves and non-destructive exports
 
 ### State workspace
 
@@ -96,14 +97,24 @@ and overlays.
 1. Open the mod root.
 2. Choose the **Provinces** or **States** workspace.
 3. Select a tool and make your changes.
-4. Use **Review Changes** to inspect pending state edits.
-5. Use **Apply to Mod** when the changes are ready.
+4. In Provinces, use **Save Province Map** through **Save Current Workspace**.
+5. In States, use **Review State Changes** and then **Apply State Changes**.
 
 State changes remain in memory until they are applied. Existing state files are
 updated without rewriting unrelated comments, formatting or unsupported
 content.
 
-Province editing keeps the original Province Editor save workflow.
+The save commands are intentionally separate:
+
+```text
+Save Province Map    → writes geographic province files
+Apply State Changes  → writes state history files
+Export Province Map  → creates a copy without modifying the current mod
+```
+
+Province saves encode and validate complete staged files before atomically
+replacing `provinces.bmp` and `definition.csv`. Province exports do not change
+the open project or clear its pending changes.
 
 ## Safety
 
@@ -114,6 +125,10 @@ Before state changes are written, the editor can:
 - create a backup;
 - reload and verify the saved files;
 - roll back a failed transaction.
+
+Province-map saves likewise stage and validate complete BMP/CSV candidates,
+verify a backup, then replace the destination files. The original geographic
+files remain unchanged during encoding and validation.
 
 State backups and recovery data are stored under:
 
@@ -128,6 +143,9 @@ The editor does not include or distribute Hearts of Iron IV game assets.
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl+O` | Open a mod |
+| `Ctrl+S` | Save the current workspace only |
+| `Ctrl+Shift+S` | Export Province Map As |
+| `Ctrl+Shift+Alt+S` | Export Province Map Archive |
 | `Ctrl+1` | Provinces workspace |
 | `Ctrl+2` | States workspace |
 | `Ctrl+Tab` | Switch workspace |
@@ -163,7 +181,8 @@ The package script creates the ZIP, SHA-256 checksum and release manifest in
 - Preview builds currently support Windows x64.
 - Transactional state saving currently covers direct files under
   `history/states/`.
-- Province editing still uses the legacy geographic save workflow.
+- Province-map save and State Apply are independent transactions; there is no
+  combined Save All command.
 - Country localization, flags and game icons are not loaded yet.
 - Adjacencies can be viewed, but the complete Adjacencies workspace is still
   planned.

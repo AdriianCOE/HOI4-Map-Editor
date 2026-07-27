@@ -30,7 +30,7 @@ pub(super) fn load_bundle(location: &Location, config: Config) -> Result<Bundle,
   construct_map_data(province_image, definition_table, adjacencies_table, rivers, config)
 }
 
-fn construct_map_data(
+pub(super) fn construct_map_data(
   province_image: RgbImage,
   definition_table: Vec<Definition>,
   adjacencies_table: Vec<Adjacency>,
@@ -180,7 +180,7 @@ pub(super) fn recolor_everything(
 }
 
 #[derive(Debug, Clone)]
-enum IdChange {
+pub(super) enum IdChange {
   DeletedRange(u32, u32),
   CreatedRange(u32, u32),
   Reassigned(u32, u32),
@@ -198,7 +198,7 @@ impl ToString for IdChange {
   }
 }
 
-type MapData = (Vec<Definition>, Vec<Adjacency>, Option<Vec<IdChange>>);
+pub(super) type MapData = (Vec<Definition>, Vec<Adjacency>, Option<Vec<IdChange>>);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SaveOperation {
@@ -206,27 +206,10 @@ pub struct SaveOperation {
 }
 
 pub fn save_bundle(location: &Location, bundle: &Bundle) -> Result<SaveOperation, Error> {
-  let (definition_table, adjacencies_table, id_changes) = deconstruct_map_data(bundle)?;
-  location.clone().manipulate_files(|files| {
-    write_rgb_bmp_image(files.create_file("provinces.bmp")?, &bundle.map.base.color_buffer)?;
-    write_definition_table(files.create_file("definition.csv")?, definition_table)?;
-
-    if !adjacencies_table.is_empty() {
-      write_adjacencies_table(files.create_file("adjacencies.csv")?, adjacencies_table)?;
-    };
-
-    let had_id_changes = id_changes.is_some();
-    if let Some(id_changes) = id_changes {
-      write_id_changes(files.create_file("id_changes.txt")?, id_changes)?;
-    };
-
-    Ok(SaveOperation {
-      had_id_changes
-    })
-  })
+  super::province_save::save_bundle_compat(location, bundle)
 }
 
-fn deconstruct_map_data(bundle: &Bundle) -> Result<MapData, Error> {
+pub(super) fn deconstruct_map_data(bundle: &Bundle) -> Result<MapData, Error> {
   if bundle.config.preserve_ids {
     deconstruct_map_data_preserve_ids(bundle)
   } else {
@@ -391,15 +374,15 @@ pub fn write_rgb_bmp_image<W: Write>(mut writer: W, province_image: &RgbImage) -
   encoder.encode(province_image.as_raw(), width, height, ColorType::Rgb8).map_err(From::from)
 }
 
-fn write_definition_table<W: Write>(writer: W, definition_table: Vec<Definition>) -> Result<(), Error> {
+pub(super) fn write_definition_table<W: Write>(writer: W, definition_table: Vec<Definition>) -> Result<(), Error> {
   Definition::write_records(&definition_table, writer).map_err(|err| Error::Csv(err, "definition.csv"))
 }
 
-fn write_adjacencies_table<W: Write>(writer: W, adjacencies_table: Vec<Adjacency>) -> Result<(), Error> {
+pub(super) fn write_adjacencies_table<W: Write>(writer: W, adjacencies_table: Vec<Adjacency>) -> Result<(), Error> {
   Adjacency::write_records(&adjacencies_table, writer).map_err(|err| Error::Csv(err, "adjacencies.csv"))
 }
 
-fn write_id_changes<W: Write>(mut writer: W, id_changes: Vec<IdChange>) -> Result<(), Error> {
+pub(super) fn write_id_changes<W: Write>(mut writer: W, id_changes: Vec<IdChange>) -> Result<(), Error> {
   writeln!(writer, "ID Changes {}", crate::util::now())
     .context("failed to write id changes to file")?;
   for id_change in id_changes {

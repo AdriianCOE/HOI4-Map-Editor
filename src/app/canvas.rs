@@ -133,6 +133,9 @@ pub struct Canvas {
     state_save_task: Option<StateSaveTask>,
     state_save_status: Option<String>,
     state_save_recovery: Option<RecoveryInfo>,
+    province_save_report: Option<ProvinceSaveReport>,
+    province_save_task: Option<ProvinceSaveTask>,
+    province_save_status: Option<String>,
     state_apply_dialog: Option<StateApplyDialog>,
     state_apply_after_validation: bool,
     state_apply_ready_for_confirmation: bool,
@@ -208,6 +211,17 @@ struct StateSaveTask {
     receiver: Receiver<StateSaveTaskMessage>,
     cancellation: StateSaveCancellation,
     state: SaveTransactionState,
+}
+
+enum ProvinceSaveTaskMessage {
+    Progress(ProvinceSaveProgress),
+    Finished(Result<Box<ProvinceSaveReport>, String>),
+}
+
+struct ProvinceSaveTask {
+    receiver: Receiver<ProvinceSaveTaskMessage>,
+    cancellation: ProvinceSaveCancellation,
+    stage: ProvinceSaveStage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,6 +496,9 @@ impl Canvas {
                 .as_ref()
                 .map(|recovery| recovery.message.clone()),
             state_save_recovery,
+            province_save_report: None,
+            province_save_task: None,
+            province_save_status: None,
             state_apply_dialog: None,
             state_apply_after_validation: false,
             state_apply_ready_for_confirmation: false,
@@ -516,22 +533,6 @@ impl Canvas {
             modified: false,
             camera,
         })
-    }
-
-    pub fn save(&mut self, location: &Location) -> Result<SaveOperation, Error> {
-        if self.map_access_mode == MapAccessMode::ReadOnly {
-            return Err("geographic map files are read-only in state projects".into());
-        };
-
-        if self.bundle.config.generate_coastal_on_save {
-            self.history.calculate_coastal_provinces(&mut self.bundle);
-        };
-
-        let save_operation = self.bundle.save(location)?;
-        self.location = location.clone();
-        self.modified = false;
-
-        Ok(save_operation)
     }
 
     pub fn location(&self) -> &Location {
@@ -624,7 +625,7 @@ impl Canvas {
         self.property_editor_is_open()
             || self.inspector_picker_is_open()
             || self.map_tag_picker.active_target().is_some()
-            || self.state_save_blocks_editing()
+            || self.save_blocks_editing()
             || self.state_apply_dialog.is_some()
     }
 
@@ -2648,6 +2649,7 @@ impl Canvas {
 
         self.poll_round_trip_validation();
         self.poll_state_save();
+        self.poll_province_save();
         let transform = ctx
             .transform
             .append_transform(self.camera.display_matrix(interface));
@@ -2823,12 +2825,12 @@ impl Canvas {
                 let primary = if plan.is_some_and(|plan| plan.files_len() == 0) {
                     "Done"
                 } else if validation_passed {
-                    "Apply to Mod"
+                    "Apply State Changes"
                 } else {
                     "Validate Changes"
                 };
                 (
-                    "REVIEW CHANGES",
+                    "REVIEW STATE CHANGES",
                     primary,
                     "View Details",
                     "Close",
@@ -2856,13 +2858,14 @@ impl Canvas {
             StateApplyDialog::AdditionalValidation => (
                 "ADDITIONAL VALIDATION REQUIRED",
                 "Validate and Continue",
-                "Review Changes",
+                "Review State Changes",
                 "Cancel",
                 vec![
                     "These changes require validation in an isolated temporary copy.".to_owned(),
                     "Your original mod will not be modified during validation.".to_owned(),
                     String::new(),
-                    "After validation passes, a final Save confirmation will be shown.".to_owned(),
+                    "After validation passes, a final Apply State Changes confirmation will be shown."
+                        .to_owned(),
                 ],
             ),
             StateApplyDialog::Blocked => (
@@ -5961,13 +5964,18 @@ impl Canvas {
     }
 
     pub fn state_save_confirmation_message(&self) -> Result<String, String> {
+        if self.province_save_task.is_some() {
+            return Err("Wait for the running Province Save or export to finish.".to_owned());
+        }
         if self.round_trip_task.is_some() {
             return Err("Wait for the running round-trip validation to finish.".to_owned());
         }
         let project = self
             .project
             .as_ref()
-            .ok_or_else(|| "State Save is available only for loaded state projects.".to_owned())?;
+            .ok_or_else(|| {
+                "Apply State Changes is available only for loaded state projects.".to_owned()
+            })?;
         let edit = self
             .state_edit_session
             .as_ref()
@@ -5992,7 +6000,7 @@ impl Canvas {
                 .reasons
                 .first()
                 .map(|reason| reason.message())
-                .unwrap_or("State Save is not eligible.")
+                .unwrap_or("Apply State Changes is not eligible.")
                 .to_owned());
         }
         Ok(save_confirmation_text(
@@ -6004,13 +6012,17 @@ impl Canvas {
     }
 
     pub fn start_state_save(&mut self, alerts: &mut Alerts) {
+        if self.province_save_task.is_some() {
+            alerts.push(Err("Wait for the running Province Save or export to finish"));
+            return;
+        }
         if self.round_trip_task.is_some() {
             alerts.push(Err("Wait for the running round-trip validation to finish"));
             return;
         }
         let Some(project) = self.project.as_ref().cloned() else {
             alerts.push(Err(
-                "State Save is available only for loaded state projects",
+                "Apply State Changes is available only for loaded state projects",
             ));
             return;
         };
@@ -6040,7 +6052,7 @@ impl Canvas {
                 .reasons
                 .first()
                 .map(|reason| reason.message())
-                .unwrap_or("State Save is not eligible.")));
+                .unwrap_or("Apply State Changes is not eligible.")));
             return;
         };
         let plan = plan.expect("eligible Save has a patch plan");
@@ -6072,46 +6084,55 @@ impl Canvas {
                     cancellation,
                     state: SaveTransactionState::Preparing,
                 });
-                self.state_save_status = Some("State Save: Preparing...".to_owned());
+                self.state_save_status = Some("Apply State Changes: Preparing...".to_owned());
                 self.state_apply_dialog = Some(StateApplyDialog::Progress);
                 self.refresh_state_information();
                 alerts.push(Ok(
-                    "State Save started; editing is locked until it finishes safely",
+                    "Apply State Changes started; editing is locked until it finishes safely",
                 ));
             }
-            Err(error) => alerts.push(Err(format!("Failed to start State Save worker: {error}"))),
+            Err(error) => alerts.push(Err(format!(
+                "Failed to start Apply State Changes worker: {error}"
+            ))),
         }
     }
 
     pub fn cancel_state_save(&mut self, alerts: &mut Alerts) {
         let Some(task) = self.state_save_task.as_ref() else {
-            alerts.push(Err("No State Save transaction is running"));
+            alerts.push(Err("No Apply State Changes transaction is running"));
             return;
         };
         if !task.state.cancellable() {
-            alerts.push(Err("State Save cannot be cancelled after commit begins"));
+            alerts.push(Err(
+                "Apply State Changes cannot be cancelled after commit begins",
+            ));
             return;
         }
         task.cancellation.cancel();
-        self.state_save_status = Some("State Save: cancellation requested...".to_owned());
+        self.state_save_status =
+            Some("Apply State Changes: cancellation requested...".to_owned());
         self.refresh_state_information();
         alerts.push(Ok("Cancellation requested before commit"));
     }
 
     pub fn view_state_save_report(&mut self, alerts: &mut Alerts) {
         let Some(report) = self.state_save_report.as_ref() else {
-            alerts.push(Err("No State Save report is available"));
+            alerts.push(Err("No Apply State Changes report is available"));
             return;
         };
         println!("{}", report.summary_text());
         self.state_save_status = Some(report.summary_text());
         self.refresh_state_information();
-        alerts.push(Ok("Printed the State Save report to the console"));
+        alerts.push(Ok(
+            "Printed the Apply State Changes report to the console",
+        ));
     }
 
     pub fn recover_state_save(&mut self, alerts: &mut Alerts) {
         if self.state_save_task.is_some() {
-            alerts.push(Err("A State Save or recovery task is already running"));
+            alerts.push(Err(
+                "An Apply State Changes or recovery task is already running",
+            ));
             return;
         }
         let Some(project) = self.project.as_ref() else {
@@ -6119,7 +6140,7 @@ impl Canvas {
             return;
         };
         if self.state_save_recovery.is_none() {
-            alerts.push(Err("No interrupted State Save was detected"));
+            alerts.push(Err("No interrupted Apply State Changes was detected"));
             return;
         }
         let root = project.paths.root.clone();
@@ -6142,7 +6163,8 @@ impl Canvas {
                     cancellation: StateSaveCancellation::default(),
                     state: SaveTransactionState::RollingBack,
                 });
-                self.state_save_status = Some("State Save recovery: Rolling back...".to_owned());
+                self.state_save_status =
+                    Some("Apply State Changes recovery: Rolling back...".to_owned());
                 self.refresh_state_information();
                 alerts.push(Ok("Verified recovery rollback started"));
             }
@@ -6169,6 +6191,125 @@ impl Canvas {
         self.state_save_task
             .as_ref()
             .is_some_and(|task| task.state.cancellable())
+    }
+
+    pub fn start_province_save(
+        &mut self,
+        location: Location,
+        mode: ProvinceSaveMode,
+        alerts: &mut Alerts,
+    ) {
+        if self.state_save_task.is_some()
+            || self.round_trip_task.is_some()
+            || self.province_save_task.is_some()
+        {
+            alerts.push(Err("Wait for the active save, export, or validation to finish"));
+            return;
+        }
+        if self.map_access_mode == MapAccessMode::ReadOnly {
+            alerts.push(Err("Province map files are read-only in this project"));
+            return;
+        }
+        if mode.clears_dirty() && self.bundle.config.generate_coastal_on_save {
+            self.history.calculate_coastal_provinces(&mut self.bundle);
+        }
+
+        let bundle = self.bundle.clone();
+        let (sender, receiver) = mpsc::channel();
+        let cancellation = ProvinceSaveCancellation::default();
+        let worker_cancellation = cancellation.clone();
+        let worker_location = location.clone();
+        let spawn = thread::Builder::new()
+            .name("hoi4-province-save".to_owned())
+            .spawn(move || {
+                let result = execute_province_save(
+                    &worker_location,
+                    &bundle,
+                    mode,
+                    &worker_cancellation,
+                    |progress| {
+                        let _ = sender.send(ProvinceSaveTaskMessage::Progress(progress));
+                    },
+                )
+                .map(Box::new);
+                let _ = sender.send(ProvinceSaveTaskMessage::Finished(result));
+            });
+        match spawn {
+            Ok(_) => {
+                self.province_save_report = None;
+                self.province_save_task = Some(ProvinceSaveTask {
+                    receiver,
+                    cancellation,
+                    stage: ProvinceSaveStage::Preparing,
+                });
+                self.province_save_status = Some(
+                    "SAVING PROVINCE MAP\nPreparing province data\nThe original mod files have not been changed yet."
+                        .to_owned(),
+                );
+                alerts.push(Ok(match mode {
+                    ProvinceSaveMode::Save => {
+                        "Province Save started; the original files remain unchanged until commit"
+                    }
+                    ProvinceSaveMode::Export => {
+                        "Province export started; the open project and dirty state will not change"
+                    }
+                }));
+            }
+            Err(error) => {
+                alerts.push(Err(format!("Failed to start Province Save worker: {error}")))
+            }
+        }
+    }
+
+    pub fn cancel_province_save(&mut self, alerts: &mut Alerts) {
+        let Some(task) = self.province_save_task.as_ref() else {
+            alerts.push(Err("No Province Save or export is running"));
+            return;
+        };
+        if !task.stage.cancellable() {
+            alerts.push(Err(
+                "Province Save cannot be cancelled after validated files start applying",
+            ));
+            return;
+        }
+        task.cancellation.cancel();
+        self.province_save_status =
+            Some("Province Save: cancellation requested before commit...".to_owned());
+        alerts.push(Ok("Cancellation requested; destination files remain unchanged"));
+    }
+
+    pub fn save_is_running(&self) -> bool {
+        self.state_save_task.is_some() || self.province_save_task.is_some()
+    }
+
+    pub fn save_blocks_editing(&self) -> bool {
+        self.province_save_task.is_some()
+            || self.state_save_task.is_some()
+            || self.state_save_recovery.is_some()
+    }
+
+    pub fn save_blocks_close(&self) -> bool {
+        self.state_save_blocks_close()
+            || self
+                .province_save_task
+                .as_ref()
+                .is_some_and(|task| !task.stage.cancellable())
+    }
+
+    pub fn save_can_cancel(&self) -> bool {
+        self.state_save_can_cancel()
+            || self
+                .province_save_task
+                .as_ref()
+                .is_some_and(|task| task.stage.cancellable())
+    }
+
+    pub fn cancel_active_save(&mut self, alerts: &mut Alerts) {
+        if self.province_save_task.is_some() {
+            self.cancel_province_save(alerts);
+        } else {
+            self.cancel_state_save(alerts);
+        }
     }
 
     fn poll_round_trip_validation(&mut self) {
@@ -6259,9 +6400,12 @@ impl Canvas {
                 task.state = state;
             }
             self.state_save_status = Some(if total == 0 {
-                format!("State Save: {}...", state.label())
+                format!("Apply State Changes: {}...", state.label())
             } else {
-                format!("State Save: {} {current}/{total}...", state.label())
+                format!(
+                    "Apply State Changes: {} {current}/{total}...",
+                    state.label()
+                )
             });
         }
         if let Some(mut report) = finished {
@@ -6295,7 +6439,8 @@ impl Canvas {
             self.refresh_state_information();
         } else if disconnected {
             self.state_save_status = Some(
-                "State Save worker ended without a report; recovery may be required.".to_owned(),
+                "Apply State Changes worker ended without a report; recovery may be required."
+                    .to_owned(),
             );
             self.state_save_task = None;
             self.state_save_recovery = self
@@ -6305,6 +6450,86 @@ impl Canvas {
             self.state_apply_dialog = Some(StateApplyDialog::Result);
             self.refresh_state_information();
         } else if !stages.is_empty() {
+            self.refresh_state_information();
+        }
+    }
+
+    fn poll_province_save(&mut self) {
+        let mut progress_updates = Vec::new();
+        let mut finished = None;
+        let mut disconnected = false;
+        if let Some(task) = self.province_save_task.as_ref() {
+            loop {
+                match task.receiver.try_recv() {
+                    Ok(ProvinceSaveTaskMessage::Progress(progress)) => {
+                        progress_updates.push(progress);
+                    }
+                    Ok(ProvinceSaveTaskMessage::Finished(result)) => {
+                        finished = Some(result);
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(progress) = progress_updates.last().copied() {
+            if let Some(task) = self.province_save_task.as_mut() {
+                task.stage = progress.stage;
+            }
+            let detail = progress
+                .percent()
+                .map_or_else(String::new, |percent| format!(" {percent}%"));
+            let safety = if progress.stage.cancellable() {
+                "\nThe original mod files have not been changed yet."
+            } else if progress.stage == ProvinceSaveStage::Committing {
+                "\nApplying validated files. Do not close the application."
+            } else {
+                ""
+            };
+            self.province_save_status = Some(format!(
+                "SAVING PROVINCE MAP\n{}{}{}",
+                progress.stage.label(),
+                detail,
+                safety
+            ));
+        }
+        if let Some(result) = finished {
+            match result {
+                Ok(report) => {
+                    println!("{}", report.summary_text());
+                    let states_pending =
+                        report.mode.clears_dirty() && self.has_unsaved_state_edits();
+                    if report.mode.clears_dirty() {
+                        self.modified = false;
+                    }
+                    let mut summary = report.summary_text();
+                    if states_pending {
+                        summary.push_str("\nProvince Map saved. State changes are still pending.");
+                    }
+                    self.province_save_status = Some(summary);
+                    self.province_save_report = Some(*report);
+                }
+                Err(error) => {
+                    eprintln!("Province Save failed: {error}");
+                    self.province_save_status = Some(format!(
+                        "Province Save failed\n{error}\nProvince changes remain pending."
+                    ));
+                }
+            }
+            self.province_save_task = None;
+            self.refresh_state_information();
+        } else if disconnected {
+            self.province_save_status = Some(
+                "Province Save worker ended without a report. Province changes remain pending."
+                    .to_owned(),
+            );
+            self.province_save_task = None;
+            self.refresh_state_information();
+        } else if !progress_updates.is_empty() {
             self.refresh_state_information();
         }
     }
@@ -7901,9 +8126,12 @@ impl Canvas {
         let patch = self.patch_preview_status_text();
         let validation = self.round_trip_status_text();
         let save = self.state_save_status.clone();
+        let province_save = self.province_save_status.clone();
+        let dirty = Some(self.workspace_dirty_status_text());
         self.selection_info = [
             province_details,
             details,
+            dirty,
             status,
             lasso,
             brush,
@@ -7911,11 +8139,21 @@ impl Canvas {
             patch,
             validation,
             save,
+            province_save,
         ]
         .into_iter()
         .flatten()
         .join("\n")
         .into();
+    }
+
+    fn workspace_dirty_status_text(&self) -> String {
+        let states = self
+            .state_edit_session
+            .as_ref()
+            .map(|edit| edit.summary().modified_states)
+            .unwrap_or_default();
+        workspace_dirty_status(self.modified, states)
     }
 
     fn patch_preview_status_text(&self) -> Option<String> {
@@ -9222,6 +9460,15 @@ fn project_status_message_with_session(
     text
 }
 
+fn workspace_dirty_status(province_modified: bool, pending_states: usize) -> String {
+    let province = if province_modified {
+        "Modified"
+    } else {
+        "Saved"
+    };
+    format!("Province Map: {province} | States: {pending_states} pending changes")
+}
+
 fn state_edit_status_message(
     edit: &StateEditSession,
     active_province_id: Option<u32>,
@@ -10175,5 +10422,17 @@ mod tests {
             InspectorPickTarget::ProvinceBuilding,
             BuildingScope::State
         ));
+    }
+
+    #[test]
+    fn workspace_dirty_labels_keep_province_and_state_domains_independent() {
+        assert_eq!(
+            workspace_dirty_status(true, 0),
+            "Province Map: Modified | States: 0 pending changes"
+        );
+        assert_eq!(
+            workspace_dirty_status(false, 4),
+            "Province Map: Saved | States: 4 pending changes"
+        );
     }
 }

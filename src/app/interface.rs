@@ -195,7 +195,11 @@ impl Interface {
             workspace_buttons.push(ButtonElement { base, id });
         }
 
-        let apply_label = "Apply to Mod";
+        let apply_label = if compact {
+            "Apply States"
+        } else {
+            "Apply State Changes"
+        };
         let apply_width = button_width(apply_label);
         let mut action_x = window_width.saturating_sub(apply_width);
         workspace_buttons.push(ButtonElement {
@@ -210,7 +214,7 @@ impl Interface {
             let review_label = if window_width < 980 {
                 "Review"
             } else {
-                "Review Changes"
+                "Review State Changes"
             };
             let review_width = button_width(review_label);
             action_x = action_x.saturating_sub(review_width);
@@ -896,12 +900,12 @@ impl ButtonElement {
             }
             WorkspaceReviewChanges => {
                 return Some(
-                    "Review Changes\nInspect the current lossless patch preview before applying it.",
+                    "Review State Changes\nInspect the current lossless patch preview before applying it.",
                 );
             }
             WorkspaceApplyToMod => {
                 return Some(
-                    "Apply to Mod\nValidate, back up and apply the current supported changes.",
+                    "Apply State Changes\nValidate, back up and apply state history changes.",
                 );
             }
             _ => {}
@@ -1904,18 +1908,22 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
             ),
             ("Open HOI4 Mod...", "Ctrl+O", ButtonId::ToolbarFileOpenFolder),
             (
-                "Review Changes",
+                "Review State Changes",
                 "",
                 ButtonId::WorkspaceReviewChanges,
             ),
-            ("Save", "Ctrl+S", ButtonId::ToolbarFileSave),
             (
-                "Save As Archive...",
+                "Save Current Workspace",
+                "Ctrl+S",
+                ButtonId::ToolbarFileSave,
+            ),
+            (
+                "Export Province Map Archive...",
                 "Ctrl+Shift+Alt+S",
                 ButtonId::ToolbarFileSaveAsArchive,
             ),
             (
-                "Save As...",
+                "Export Province Map As...",
                 "Ctrl+Shift+S",
                 ButtonId::ToolbarFileSaveAsFolder,
             ),
@@ -2605,10 +2613,32 @@ mod tests {
         assert!(!label.ends_with('v'));
         assert!(!label.contains('▾'));
         assert!(wrap_tooltip(
-            "Review Changes\nInspect the current lossless patch preview before applying it.",
+            "Review State Changes\nInspect the current lossless patch preview before applying it.",
             180.0
         )
         .len()
             >= 2);
+    }
+
+    #[test]
+    fn file_menu_distinguishes_workspace_save_from_province_exports() {
+        let file = TOOLBAR_PRIMITIVE
+            .iter()
+            .find(|(label, _)| *label == "File")
+            .map(|(_, entries)| *entries)
+            .unwrap();
+        assert!(file.iter().any(|(label, shortcut, id)| {
+            *label == "Save Current Workspace"
+                && *shortcut == "Ctrl+S"
+                && *id == ButtonId::ToolbarFileSave
+        }));
+        assert!(file.iter().any(|(label, _, id)| {
+            *label == "Export Province Map As..." && *id == ButtonId::ToolbarFileSaveAsFolder
+        }));
+        assert!(file.iter().any(|(label, _, id)| {
+            *label == "Export Province Map Archive..."
+                && *id == ButtonId::ToolbarFileSaveAsArchive
+        }));
+        assert!(!file.iter().any(|(label, _, _)| *label == "Save As..."));
     }
 }

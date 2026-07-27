@@ -18,8 +18,15 @@ adjacencies, and Image Overlay are read-only layers over the current view.
 ## Province workspace
 
 The legacy tools edit geographic province data. Brush, fill, lasso, coastal,
-adjacency, and diagnostic actions can affect map files. Review the result and
-use the legacy save flow only with a backup.
+adjacency, and diagnostic actions can affect map files.
+
+- **File → Save Current Workspace** runs **Save Province Map** and writes the
+  current mod's geographic files.
+- **Export Province Map As...** creates a folder copy.
+- **Export Province Map Archive...** creates a ZIP copy.
+
+Exports never change the open project or clear its modified indicator. Province
+saves prepare and validate complete files before replacing the originals.
 
 ## States workspace
 
@@ -47,13 +54,13 @@ Use this sequence:
 
 ```text
 Edit in memory
-→ Review Changes
+→ Review State Changes
 → Validate in Temporary Workspace
-→ Apply to Mod with Backup
+→ Apply State Changes with Backup
 → Reload and Verify
 ```
 
-Apply automatically regenerates a stale preview and runs the required temporary
+Apply State Changes automatically regenerates a stale preview and runs the required temporary
 validation. `ReviewRequired` changes need the explicit **Validate and Continue**
 action and a current `PassedWithReview` result. `Blocked` changes cannot be
 applied. State backups, journals, and recovery records are stored under

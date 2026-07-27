@@ -24,12 +24,20 @@ visible for inspection but unsafe edits and Apply remain blocked.
 
 ## Apply is disabled
 
-Open Review Changes. The editor regenerates a stale plan and offers temporary
+Open Review State Changes. The editor regenerates a stale plan and offers temporary
 validation directly. `ReviewRequired` needs **Validate and Continue**;
 `Blocked` diagnostics must be resolved. Editing after validation makes the
 report stale and requires another review.
 
-## Validation or Save failed
+## Save Province Map failed
+
+The editor keeps province changes pending when encoding, staging, validation,
+backup, or replacement fails. The original `provinces.bmp` and
+`definition.csv` remain unchanged before commit; a failure during commit
+triggers verified rollback. Do not delete the reported backup if recovery is
+required.
+
+## State validation or Apply State Changes failed
 
 Do not remove `<mod>/.hoi4-state-editor/`. Reload the same mod and let recovery
 finish. If recovery remains blocked, preserve that directory and the local log

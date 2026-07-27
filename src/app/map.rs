@@ -2,6 +2,7 @@
 mod history;
 mod bridge;
 mod problems;
+mod province_save;
 
 use ahash::{AHashMap, AHashSet};
 use graphics::types::Color as DrawColor;
@@ -22,6 +23,10 @@ use crate::error::Error;
 pub use self::bridge::{write_rgb_bmp_image, read_rgb_bmp_image, SaveOperation};
 pub use self::history::History;
 pub use self::problems::Problem;
+pub use self::province_save::{
+  ProvinceSaveCancellation, ProvinceSaveMode, ProvinceSaveProgress, ProvinceSaveReport,
+  ProvinceSaveStage, execute_province_save,
+};
 
 use std::convert::TryFrom;
 use std::collections::BTreeMap;
@@ -32,7 +37,7 @@ const CARDINAL: [Vector2<i32>; 4] = [[0, 1], [0, -1], [1, 0], [-1, 0]];
 
 pub type Color = [u8; 3];
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Bundle {
   pub map: Map,
   pub config: Config
@@ -180,7 +185,7 @@ impl std::fmt::Debug for MapBase {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Map {
   base: MapBase,
   boundaries: AHashMap<UOrd<Vector2<u32>>, bool>,

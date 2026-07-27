@@ -260,9 +260,9 @@ fornece os IDs reais ao carregador de estados.
   existem, mas o acabamento de UX ainda nao esta finalizado.
 - Lasso de selecao e State Brush operam por provincia; nao ha pintura de
   pixels, merge, split ou brush com raio para estados.
-- `Ctrl+S` executa State Save somente quando elegivel; `Save As`, autosave,
-  retencao avancada, integracao Git e execucao do HOI4 continuam fora do
-  contrato.
+- `Ctrl+S` salva somente o workspace atual: Province Save no workspace
+  Provinces e Apply State Changes no workspace States. Exports de Province
+  criam copias e nao limpam o dirty state.
 - Blocos datados sao detectados e preservados, nao interpretados.
 - Arquivos que nao sao UTF-8 recebem diagnostico e representacao lossy somente
   para inspecao; nunca sao reescritos.

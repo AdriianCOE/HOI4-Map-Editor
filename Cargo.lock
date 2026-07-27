@@ -1407,6 +1407,7 @@ dependencies = [
  "rfd",
  "rusttype",
  "serde",
+ "sha2",
  "termcolor",
  "thiserror",
  "toml",
