@@ -34,6 +34,7 @@ sha2 = "0.10"
 termcolor = { version = "1.4" }
 thiserror = { version = "1.0" }
 toml = { version = "0.5" }
+toml_edit = "0.22"
 unicase = { git = "https://github.com/ScottyThePilot/misc-crates" }
 uord = { git = "https://github.com/ScottyThePilot/uord" }
 vecmath = { version = "1.0" }

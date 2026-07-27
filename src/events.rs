@@ -23,6 +23,7 @@ pub trait EventHandler: Sized {
   fn on_file_drop(&mut self, _path: PathBuf) {}
   fn on_resize(&mut self, _viewport: Viewport) {}
   fn on_unfocus(&mut self) {}
+  fn on_window_state(&mut self, _position: Option<[i32; 2]>, _size: [u32; 2], _maximized: bool) {}
   fn on_close(&mut self) -> bool { true }
 
   fn get_cursor(&self) -> CursorIcon {
@@ -83,6 +84,17 @@ pub fn launch<H: EventHandler>(window: &mut GlutinWindow, gl: &mut GlGraphics) {
           event_handler.on_unfocus();
         },
         Input::Close(_) => {
+          let window_ref = window.ctx.window();
+          let position = window_ref.outer_position().ok().map(|position| [position.x, position.y]);
+          let size = window_ref.inner_size();
+          let maximized = window_ref.current_monitor().is_some_and(|monitor| {
+            let monitor_position = monitor.position();
+            let monitor_size = monitor.size();
+            position == Some([monitor_position.x, monitor_position.y])
+              && size.width >= monitor_size.width.saturating_sub(32)
+              && size.height >= monitor_size.height.saturating_sub(96)
+          });
+          event_handler.on_window_state(position, [size.width, size.height], maximized);
           if event_handler.on_close() {
             break;
           }

@@ -6,6 +6,10 @@ automatic update check, account system, cloud storage, or file-upload path.
 - Mod files are read and changed only through actions initiated by the user.
 - Logs and crash diagnostics remain local under
   `%LOCALAPPDATA%\HOI4MapEditor\logs`.
+- Optional application preferences remain local under
+  `%APPDATA%\HOI4MapEditor\config.toml`.
+- Optional project preferences remain in
+  `<mod>/.hoi4-map-editor/project.toml`.
 - State transaction data and backups remain under
   `<mod>/.hoi4-state-editor/`.
 - The application does not sell or share user data.

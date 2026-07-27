@@ -11,7 +11,7 @@ pub mod state;
 
 use defy::Contextualize;
 use glutin::window::CursorIcon;
-use graphics::Viewport;
+use graphics::{Transformed, Viewport};
 use graphics::context::Context;
 use graphics::glyph_cache::rusttype::GlyphCache;
 use opengl_graphics::{Filter, GlGraphics, Texture, TextureSettings};
@@ -31,12 +31,30 @@ use self::project::{
 };
 use crate::error::Error;
 use crate::events::{EventHandler, KeyMods};
-use crate::font;
+use crate::font::{self, FONT_SIZE};
+use crate::config::{ConfigIssue, FileFingerprint, GlobalConfig, ProjectConfig, SaveConfigError};
 use crate::util::files::{IntoLocation, Location};
 
 use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+enum PreferencesDialog {
+    Global {
+        original: GlobalConfig,
+        draft: GlobalConfig,
+        fingerprint: Option<FileFingerprint>,
+        selected: usize,
+    },
+    Project {
+        root: PathBuf,
+        draft: ProjectConfig,
+        fingerprint: Option<FileFingerprint>,
+        selected: usize,
+    },
+}
 
 pub mod colors {
     use graphics::types::Color as DrawColor;
@@ -84,6 +102,11 @@ pub struct App {
     pub interface: Option<Interface>,
     pub painting: bool,
     left_press_consumed: bool,
+    global_config: GlobalConfig,
+    global_config_fingerprint: Option<FileFingerprint>,
+    global_config_issue: Option<ConfigIssue>,
+    preferences_dialog: Option<PreferencesDialog>,
+    viewport: Option<Viewport>,
 }
 
 impl EventHandler for App {
@@ -94,6 +117,12 @@ impl EventHandler for App {
             .preload_printable_ascii(font::FONT_SIZE)
             .expect("unable to preload font glyphs");
 
+        let loaded = GlobalConfig::load().ok();
+        let global_config = loaded
+            .as_ref()
+            .map(|loaded| loaded.value.clone())
+            .unwrap_or_default();
+        crate::localization::set_language(&global_config.language);
         App {
             canvas: None,
             alerts: Alerts::new(5.0),
@@ -101,12 +130,34 @@ impl EventHandler for App {
             interface: None,
             painting: false,
             left_press_consumed: false,
+            global_config,
+            global_config_fingerprint: loaded
+                .as_ref()
+                .and_then(|loaded| loaded.fingerprint.clone()),
+            global_config_issue: loaded.and_then(|loaded| loaded.issue),
+            preferences_dialog: None,
+            viewport: None,
         }
     }
 
     fn on_init(&mut self) {
+        if let Some(issue) = self.global_config_issue.take() {
+            self.alerts.push(Err(format!(
+                "Global configuration could not be loaded. Defaults are being used for this session. The original file was not modified.\n{issue}"
+            )));
+        }
         if let Some(path) = std::env::args().nth(1) {
             self.raw_open_map_at(path);
+        } else if self.global_config.open_last_project
+            && let Some(path) = self.global_config.last_project.clone()
+        {
+            if path.exists() {
+                self.raw_open_map_at(path);
+            } else {
+                self.alerts.push(Err(
+                    "The last project no longer exists. Open another HOI4 mod to replace it.",
+                ));
+            }
         } else {
             #[cfg(any(debug_assertions, feature = "debug-mode"))]
             self.raw_open_map_at("./test_map.zip");
@@ -119,6 +170,7 @@ impl EventHandler for App {
 
     fn on_render(&mut self, ctx: Context, cursor_pos: Option<Vector2<f64>>, gl: &mut GlGraphics) {
         let Some(viewport) = ctx.viewport else { return };
+        self.viewport = Some(viewport);
         let ictx = self.get_interface_draw_context();
         let inspector_width = self
             .canvas
@@ -133,6 +185,7 @@ impl EventHandler for App {
             .flatten();
         let interface = get_interface(&mut self.interface, viewport);
         interface.set_inspector_width(inspector_width);
+        interface.set_tooltip_delay_ms(self.global_config.tooltip_delay_ms);
         graphics::clear(colors::NEUTRAL, gl);
 
         if let Some(canvas) = &mut self.canvas {
@@ -143,6 +196,9 @@ impl EventHandler for App {
         interface.draw(ctx, ictx, interactive_cursor, &mut self.glyph_cache, gl);
         if let Some(canvas) = self.canvas.as_ref() {
             canvas.draw_state_apply_dialog(ctx, interface, &mut self.glyph_cache, gl);
+        }
+        if let Some(dialog) = self.preferences_dialog.as_ref() {
+            draw_preferences_dialog(ctx, dialog, &mut self.glyph_cache, gl);
         }
     }
 
@@ -163,6 +219,10 @@ impl EventHandler for App {
     }
 
     fn on_key(&mut self, key: Key, state: bool, mods: KeyMods, cursor_pos: Option<Vector2<f64>>) {
+        if state && self.preferences_dialog.is_some() {
+            self.handle_preferences_key(key, mods);
+            return;
+        }
         let Some(interface) = self.interface.as_ref() else {
             return;
         };
@@ -420,6 +480,12 @@ impl EventHandler for App {
     }
 
     fn on_mouse(&mut self, button: MouseButton, state: bool, mods: KeyMods, pos: Vector2<f64>) {
+        if self.preferences_dialog.is_some() {
+            if button == MouseButton::Left && state {
+                self.handle_preferences_click(pos);
+            }
+            return;
+        }
         if button == MouseButton::Left && !state && self.left_press_consumed {
             self.left_press_consumed = false;
             return;
@@ -585,6 +651,21 @@ impl EventHandler for App {
         self.alerts.set_state(false);
     }
 
+    fn on_window_state(
+        &mut self,
+        position: Option<[i32; 2]>,
+        size: [u32; 2],
+        maximized: bool,
+    ) {
+        self.global_config.window.width = size[0].max(384);
+        self.global_config.window.height = size[1].max(256);
+        self.global_config.window.maximized = maximized;
+        if let Some([x, y]) = position {
+            self.global_config.window.x = Some(x);
+            self.global_config.window.y = Some(y);
+        }
+    }
+
     fn on_close(&mut self) -> bool {
         if self
             .canvas
@@ -606,6 +687,7 @@ impl EventHandler for App {
             }
             return false;
         }
+        self.save_existing_global_preferences_on_close();
         if self
             .canvas
             .as_ref()
@@ -661,6 +743,377 @@ impl EventHandler for App {
 }
 
 impl App {
+    fn save_existing_global_preferences_on_close(&mut self) {
+        if self.global_config_fingerprint.is_none() {
+            return;
+        }
+        if let Some(viewport) = self.viewport {
+            self.global_config.window.width = viewport.window_size[0]
+                .round()
+                .max(384.0) as u32;
+            self.global_config.window.height = viewport.window_size[1]
+                .round()
+                .max(256.0) as u32;
+        }
+        match self.global_config.save(
+            self.global_config_fingerprint.as_ref(),
+            false,
+            false,
+        ) {
+            Ok(fingerprint) => self.global_config_fingerprint = Some(fingerprint),
+            Err(error) => eprintln!("Could not persist global preferences on close: {error}"),
+        }
+    }
+
+    fn open_global_settings(&mut self) {
+        self.preferences_dialog = Some(PreferencesDialog::Global {
+            original: self.global_config.clone(),
+            draft: self.global_config.clone(),
+            fingerprint: self.global_config_fingerprint.clone(),
+            selected: 0,
+        });
+    }
+
+    fn open_project_settings(&mut self) {
+        let Some(root) = self
+            .canvas
+            .as_ref()
+            .and_then(Canvas::project)
+            .map(|project| project.paths.root.clone())
+        else {
+            self.alerts
+                .push(Err("Project Settings require a loaded HOI4 mod."));
+            return;
+        };
+        match ProjectConfig::load(&root) {
+            Ok(loaded) => {
+                if let Some(issue) = &loaded.issue {
+                    self.alerts.push(Err(format!(
+                        "{}\n{issue}",
+                        crate::localization::tr("config.invalid_project")
+                    )));
+                }
+                self.preferences_dialog = Some(PreferencesDialog::Project {
+                    root,
+                    draft: loaded.value,
+                    fingerprint: loaded.fingerprint,
+                    selected: 0,
+                });
+            }
+            Err(error) => self
+                .alerts
+                .push(Err(format!("Cannot open Project Settings: {error}"))),
+        }
+    }
+
+    fn handle_preferences_key(&mut self, key: Key, mods: KeyMods) {
+        let rows = preference_rows(&self.preferences_dialog);
+        match key {
+            Key::Escape => self.cancel_preferences_dialog(),
+            Key::Tab | Key::Down => {
+                if let Some(selected) = selected_preference_mut(&mut self.preferences_dialog) {
+                    *selected = if mods.shift {
+                        selected.checked_sub(1).unwrap_or(rows - 1)
+                    } else {
+                        (*selected + 1) % rows
+                    };
+                }
+            }
+            Key::Up => {
+                if let Some(selected) = selected_preference_mut(&mut self.preferences_dialog) {
+                    *selected = selected.checked_sub(1).unwrap_or(rows - 1);
+                }
+            }
+            Key::Left => self.adjust_preference(false),
+            Key::Right => self.adjust_preference(true),
+            Key::Return | Key::Space => self.activate_preference(),
+            _ => {}
+        }
+    }
+
+    fn handle_preferences_click(&mut self, position: Vector2<f64>) {
+        let Some(viewport) = self.viewport else {
+            return;
+        };
+        let [x, y, width, _] = preferences_rect(viewport.window_size);
+        if position[0] < x
+            || position[0] > x + width
+            || position[1] < y + 46.0
+            || position[1]
+                >= y + 46.0 + preference_rows(&self.preferences_dialog) as f64 * 30.0
+        {
+            return;
+        }
+        let row = ((position[1] - y - 46.0) / 30.0) as usize;
+        let rows = preference_rows(&self.preferences_dialog);
+        if let Some(selected) = selected_preference_mut(&mut self.preferences_dialog) {
+            *selected = row.min(rows.saturating_sub(1));
+        }
+        if matches!(row, 5 | 4) {
+            self.adjust_preference(position[0] >= x + width / 2.0);
+        } else {
+            self.activate_preference();
+        }
+    }
+
+    fn adjust_preference(&mut self, increase: bool) {
+        match self.preferences_dialog.as_mut() {
+            Some(PreferencesDialog::Global {
+                draft, selected, ..
+            }) => match *selected {
+                4 => {
+                    let values = [0, 400, 800];
+                    let current = values
+                        .iter()
+                        .position(|value| *value == draft.tooltip_delay_ms)
+                        .unwrap_or(1);
+                    let next = if increase {
+                        (current + 1).min(values.len() - 1)
+                    } else {
+                        current.saturating_sub(1)
+                    };
+                    draft.tooltip_delay_ms = values[next];
+                }
+                5 => {
+                    draft.max_undo_states = if increase {
+                        (draft.max_undo_states + 1).min(500)
+                    } else {
+                        draft.max_undo_states.saturating_sub(1).max(1)
+                    };
+                }
+                _ => self.activate_preference(),
+            },
+            Some(PreferencesDialog::Project {
+                draft, selected, ..
+            }) if *selected == 4 => {
+                draft.extra_warnings.few_shared_borders_threshold = if increase {
+                    draft
+                        .extra_warnings
+                        .few_shared_borders_threshold
+                        .saturating_add(1)
+                } else {
+                    draft
+                        .extra_warnings
+                        .few_shared_borders_threshold
+                        .saturating_sub(1)
+                        .max(1)
+                };
+            }
+            _ => self.activate_preference(),
+        }
+    }
+
+    fn activate_preference(&mut self) {
+        let selected = selected_preference_mut(&mut self.preferences_dialog)
+            .map(|selected| *selected)
+            .unwrap_or_default();
+        match self.preferences_dialog.as_mut() {
+            Some(PreferencesDialog::Global { draft, .. }) => match selected {
+                0 => {
+                    draft.language = if draft.language == "en-US" {
+                        "pt-BR".to_owned()
+                    } else {
+                        "en-US".to_owned()
+                    };
+                    crate::localization::set_language(&draft.language);
+                    self.interface = None;
+                }
+                1 => draft.open_last_project = !draft.open_last_project,
+                2 => {
+                    draft.remember_workspace = !draft.remember_workspace;
+                    draft.remember_map_views = draft.remember_workspace;
+                }
+                3 => draft.remember_overlays = !draft.remember_overlays,
+                4 | 5 => self.adjust_preference(true),
+                6 => draft.change_view_mode_on_undo = !draft.change_view_mode_on_undo,
+                7 => {
+                    draft.window = Default::default();
+                    draft.workspace.state_inspector_visible = true;
+                    self.interface = None;
+                }
+                8 => {
+                    *draft = GlobalConfig::default();
+                    crate::localization::set_language(&draft.language);
+                    self.interface = None;
+                }
+                9 => self.cancel_preferences_dialog(),
+                10 => self.save_global_preferences(),
+                _ => {}
+            },
+            Some(PreferencesDialog::Project { draft, root, .. }) => match selected {
+                0 => {
+                    if draft.preserve_ids
+                        && !confirm_dialog(
+                            "Disable Preserve IDs?",
+                            "Disabling Preserve IDs can break references in states, strategic regions, and other files. Changing this setting does not alter IDs until a Province Save.",
+                        )
+                    {
+                        return;
+                    }
+                    draft.preserve_ids = !draft.preserve_ids;
+                }
+                1 => draft.generate_coastal_on_save = !draft.generate_coastal_on_save,
+                2 => {
+                    draft.extra_warnings.lone_pixels =
+                        !draft.extra_warnings.lone_pixels;
+                    update_extra_warnings_enabled(draft);
+                }
+                3 => {
+                    draft.extra_warnings.few_shared_borders =
+                        !draft.extra_warnings.few_shared_borders;
+                    update_extra_warnings_enabled(draft);
+                }
+                4 => self.adjust_preference(true),
+                5 => *draft = ProjectConfig::default(),
+                6 => {
+                    let path = ProjectConfig::path(root);
+                    if path.exists() {
+                        self.handle_result_none(open_file_default(&path));
+                    } else {
+                        self.alerts.push(Err(
+                            "No project.toml exists yet. Choose Save to create it.",
+                        ));
+                    }
+                }
+                7 => match draft.validate() {
+                    Ok(()) => self.alerts.push(Ok(format!(
+                        "Project configuration is valid: {} effective terrains.",
+                        draft.terrains.len().saturating_sub(1)
+                    ))),
+                    Err(error) => self.alerts.push(Err(error.to_string())),
+                },
+                8 => self.cancel_preferences_dialog(),
+                9 => self.save_project_preferences(),
+                _ => {}
+            },
+            None => {}
+        }
+    }
+
+    fn cancel_preferences_dialog(&mut self) {
+        if let Some(PreferencesDialog::Global { original, .. }) =
+            self.preferences_dialog.take()
+        {
+            crate::localization::set_language(&original.language);
+            self.interface = None;
+        } else {
+            self.preferences_dialog = None;
+        }
+    }
+
+    fn save_global_preferences(&mut self) {
+        let Some(PreferencesDialog::Global {
+            draft,
+            fingerprint,
+            ..
+        }) = self.preferences_dialog.clone()
+        else {
+            return;
+        };
+        let saved = match draft.save(fingerprint.as_ref(), false, false) {
+            Err(SaveConfigError::ChangedExternally)
+                if confirm_dialog(
+                    "Configuration changed outside the editor",
+                    "Reload is safest. Choose Yes to Save Anyway using the current Settings draft, or No to cancel.",
+                ) =>
+            {
+                draft.save(None, true, false)
+            }
+            Err(SaveConfigError::FutureSchema(_))
+                if confirm_dialog(
+                    "Newer configuration schema",
+                    "This file was created by a newer editor. Choose Yes only to explicitly replace its known settings while preserving unknown keys.",
+                ) =>
+            {
+                draft.save(fingerprint.as_ref(), true, true)
+            }
+            Err(SaveConfigError::Invalid(_))
+                if confirm_dialog(
+                    "Invalid configuration file",
+                    "The existing file cannot be safely edited. Choose Yes to back it up as config.toml.bak and replace it with this validated Settings draft.",
+                ) =>
+            {
+                draft.replace_invalid_file()
+            }
+            result => result,
+        };
+        match saved {
+            Ok(fingerprint) => {
+                self.global_config = draft.clone();
+                self.global_config_fingerprint = Some(fingerprint);
+                crate::localization::set_language(&draft.language);
+                let project = self
+                    .canvas
+                    .as_ref()
+                    .and_then(Canvas::project)
+                    .and_then(|project| ProjectConfig::load(&project.paths.root).ok())
+                    .map(|loaded| loaded.value)
+                    .unwrap_or_default();
+                if let Some(canvas) = self.canvas.as_mut() {
+                    canvas.apply_config(crate::config::Config::from_parts(&draft, &project));
+                }
+                self.preferences_dialog = None;
+                self.interface = None;
+                self.alerts
+                    .push(Ok(crate::localization::tr("config.saved")));
+            }
+            Err(error) => self.alerts.push(Err(error.to_string())),
+        }
+    }
+
+    fn save_project_preferences(&mut self) {
+        let Some(PreferencesDialog::Project {
+            root,
+            draft,
+            fingerprint,
+            ..
+        }) = self.preferences_dialog.clone()
+        else {
+            return;
+        };
+        let saved = match draft.save(&root, fingerprint.as_ref(), false, false) {
+            Err(SaveConfigError::ChangedExternally)
+                if confirm_dialog(
+                    "Project configuration changed outside the editor",
+                    "Choose Yes to Save Anyway using this draft, or No to cancel and reopen Project Settings.",
+                ) =>
+            {
+                draft.save(&root, None, true, false)
+            }
+            Err(SaveConfigError::FutureSchema(_))
+                if confirm_dialog(
+                    "Newer project configuration schema",
+                    "Choose Yes only to explicitly replace its known project settings.",
+                ) =>
+            {
+                draft.save(&root, fingerprint.as_ref(), true, true)
+            }
+            Err(SaveConfigError::Invalid(_))
+                if confirm_dialog(
+                    "Invalid project configuration",
+                    "Choose Yes to back it up as project.toml.bak and replace it with this validated Project Settings draft.",
+                ) =>
+            {
+                draft.replace_invalid_file(&root)
+            }
+            result => result,
+        };
+        match saved {
+            Ok(_) => {
+                if let Some(canvas) = self.canvas.as_mut() {
+                    canvas.apply_config(crate::config::Config::from_parts(
+                        &self.global_config,
+                        &draft,
+                    ));
+                }
+                self.preferences_dialog = None;
+                self.alerts
+                    .push(Ok(crate::localization::tr("config.saved")));
+            }
+            Err(error) => self.alerts.push(Err(error.to_string())),
+        }
+    }
+
     fn resolve_property_draft(&mut self) -> bool {
         let province = self
             .canvas
@@ -730,6 +1183,14 @@ impl App {
 
     pub fn action_interface_button(&mut self, id: ButtonId) {
         use self::interface::ButtonId::*;
+        if id == ToolbarEditSettings {
+            self.open_global_settings();
+            return;
+        }
+        if id == ToolbarFileProjectSettings {
+            self.open_project_settings();
+            return;
+        }
         match id {
             WorkspaceProvinces => {
                 self.action_set_workspace(WorkspaceMode::Provinces);
@@ -858,6 +1319,7 @@ impl App {
             ) => unreachable!(),
             (_, ToolbarFileOpenFileArchive) => self.action_open_map(true),
             (_, ToolbarFileOpenFolder) => self.action_open_map(false),
+            (_, ToolbarFileProjectSettings | ToolbarEditSettings) => unreachable!(),
             (Some(_), ToolbarFileSave | ToolbarPatchSaveStateFiles) => self.action_save_map(),
             (Some(_), ToolbarFileSaveAsArchive) => self.action_export_province_map(true),
             (Some(_), ToolbarFileSaveAsFolder) => self.action_export_province_map(false),
@@ -1136,6 +1598,17 @@ impl App {
                 .alerts
                 .push(Err("You must have a map loaded to use this")),
         };
+        if self.global_config.remember_overlays
+            && let Some(canvas) = self.canvas.as_ref()
+        {
+            let enabled = canvas.enabled_options();
+            self.global_config.overlays.rivers = enabled[0];
+            self.global_config.overlays.adjacencies = enabled[1];
+            self.global_config.overlays.province_ids = enabled[2];
+            self.global_config.overlays.province_boundaries = enabled[3];
+            self.global_config.overlays.state_boundaries = enabled[4];
+            self.global_config.overlays.image = enabled[5];
+        }
     }
 
     fn action_set_workspace(&mut self, workspace: WorkspaceMode) {
@@ -1152,6 +1625,13 @@ impl App {
             .is_some_and(|canvas| canvas.set_workspace_mode(workspace, &mut self.alerts));
         if changed {
             self.painting = false;
+            if self.global_config.remember_workspace {
+                self.global_config.workspace.last_workspace = match workspace {
+                    WorkspaceMode::Provinces => "provinces",
+                    WorkspaceMode::States => "states",
+                }
+                .to_owned();
+            }
             if let Some(interface) = self.interface.as_mut() {
                 interface.clear_tooltip();
             }
@@ -1279,6 +1759,14 @@ impl App {
                 self.painting = false;
             }
             canvas.set_map_view_mode(&mut self.alerts, map_view_mode);
+            if self.global_config.remember_map_views {
+                let value = map_view_preference(map_view_mode).to_owned();
+                if canvas.is_state_workspace() {
+                    self.global_config.workspace.state_map_view = value;
+                } else {
+                    self.global_config.workspace.province_map_view = value;
+                }
+            }
         };
     }
 
@@ -1410,13 +1898,22 @@ impl App {
             Location::Directory(root) => match ProjectPaths::discover(&root) {
               Ok(paths) => {
                 let root = paths.root.clone();
+                let project_config_issue = ProjectConfig::load(&root)
+                    .ok()
+                    .and_then(|loaded| loaded.issue);
                 let project = Hoi4Project::new(paths);
                 let canvas = Canvas::load_project(project)?;
-                let success_message = format!(
+                let mut success_message = format!(
                   "Loaded HOI4 mod from {}\n{}",
                   root.display(),
                   canvas.detected_capabilities_message()
                 );
+                if let Some(issue) = project_config_issue {
+                    success_message.push_str(&format!(
+                        "\n{}\n{issue}",
+                        crate::localization::tr("config.invalid_project")
+                    ));
+                }
                 (canvas, success_message)
               },
               Err(err) if ProjectPaths::is_project_root_candidate(&root) => return Err(err.into()),
@@ -1432,6 +1929,10 @@ impl App {
             }
           };
           self.canvas = Some(canvas);
+          self.apply_remembered_ui_preferences();
+          if let Some(project) = self.canvas.as_ref().and_then(Canvas::project) {
+              self.global_config.last_project = Some(project.paths.root.clone());
+          }
           Ok(success_message)
         };
 
@@ -1442,6 +1943,54 @@ impl App {
         if let Err(err) = result {
             self.alerts.push(Err(format!("Error: {}", err)));
         };
+    }
+
+    fn apply_remembered_ui_preferences(&mut self) {
+        let Some(canvas) = self.canvas.as_mut() else {
+            return;
+        };
+        if self.global_config.remember_workspace {
+            let workspace = if self.global_config.workspace.last_workspace == "states"
+                && canvas.has_state_workspace()
+            {
+                WorkspaceMode::States
+            } else {
+                WorkspaceMode::Provinces
+            };
+            canvas.set_workspace_mode(workspace, &mut self.alerts);
+        }
+        if self.global_config.remember_map_views {
+            let preference = if canvas.is_state_workspace() {
+                &self.global_config.workspace.state_map_view
+            } else {
+                &self.global_config.workspace.province_map_view
+            };
+            if let Some(mode) = map_view_from_preference(preference) {
+                canvas.set_map_view_mode(&mut self.alerts, mode);
+            }
+        }
+        if self.global_config.remember_overlays {
+            let current = canvas.enabled_options();
+            let desired = &self.global_config.overlays;
+            if current[0] != desired.rivers {
+                canvas.toggle_river_overlay();
+            }
+            if current[1] != desired.adjacencies {
+                canvas.toggle_adjacencies_overlay();
+            }
+            if current[2] != desired.province_ids {
+                canvas.toggle_province_ids();
+            }
+            if current[3] != desired.province_boundaries {
+                canvas.toggle_province_boundaries();
+            }
+            if current[4] != desired.state_boundaries && canvas.has_state_workspace() {
+                canvas.toggle_state_boundaries(&mut self.alerts);
+            }
+            if current[5] != desired.image {
+                canvas.toggle_image_overlay(&mut self.alerts);
+            }
+        }
     }
 
     fn handle_result<T: fmt::Display>(&mut self, result: Result<T, Error>) {
@@ -1471,6 +2020,203 @@ impl fmt::Debug for App {
     }
 }
 
+fn selected_preference_mut(dialog: &mut Option<PreferencesDialog>) -> Option<&mut usize> {
+    match dialog.as_mut()? {
+        PreferencesDialog::Global { selected, .. }
+        | PreferencesDialog::Project { selected, .. } => Some(selected),
+    }
+}
+
+fn preference_rows(dialog: &Option<PreferencesDialog>) -> usize {
+    match dialog {
+        Some(PreferencesDialog::Global { .. }) => 11,
+        Some(PreferencesDialog::Project { .. }) => 10,
+        None => 0,
+    }
+}
+
+fn update_extra_warnings_enabled(config: &mut ProjectConfig) {
+    config.extra_warnings.enabled =
+        config.extra_warnings.lone_pixels || config.extra_warnings.few_shared_borders;
+}
+
+fn map_view_preference(mode: MapViewMode) -> &'static str {
+    match mode {
+        MapViewMode::ProvinceColors => "province-colors",
+        MapViewMode::ProvinceTypes => "province-types",
+        MapViewMode::Terrain => "terrain",
+        MapViewMode::Continents => "continents",
+        MapViewMode::Coastal => "coastal",
+        MapViewMode::States => "states",
+        MapViewMode::Political => "political",
+    }
+}
+
+fn map_view_from_preference(value: &str) -> Option<MapViewMode> {
+    match value {
+        "province-colors" => Some(MapViewMode::ProvinceColors),
+        "province-types" => Some(MapViewMode::ProvinceTypes),
+        "terrain" => Some(MapViewMode::Terrain),
+        "continents" => Some(MapViewMode::Continents),
+        "coastal" => Some(MapViewMode::Coastal),
+        "states" => Some(MapViewMode::States),
+        "political" => Some(MapViewMode::Political),
+        _ => None,
+    }
+}
+
+fn confirm_dialog(title: &str, description: &str) -> bool {
+    MessageDialog::new()
+        .set_level(MessageLevel::Warning)
+        .set_title(title)
+        .set_description(description)
+        .set_buttons(MessageButtons::YesNo)
+        .show()
+        == MessageDialogResult::Yes
+}
+
+fn preferences_rect(window_size: [f64; 2]) -> [f64; 4] {
+    let width = window_size[0].clamp(420.0, 720.0);
+    let height = 400.0;
+    [
+        ((window_size[0] - width) / 2.0).max(0.0),
+        ((window_size[1] - height) / 2.0).max(0.0),
+        width,
+        height,
+    ]
+}
+
+fn draw_preferences_dialog(
+    ctx: Context,
+    dialog: &PreferencesDialog,
+    glyph_cache: &mut FontGlyphCache,
+    gl: &mut GlGraphics,
+) {
+    let Some(viewport) = ctx.viewport else {
+        return;
+    };
+    let [x, y, width, height] = preferences_rect(viewport.window_size);
+    graphics::rectangle(colors::OVERLAY_T, [0.0, 0.0, viewport.window_size[0], viewport.window_size[1]], ctx.transform, gl);
+    graphics::rectangle(colors::BUTTON_TOOLBAR, [x, y, width, height], ctx.transform, gl);
+    let (title, selected, rows) = match dialog {
+        PreferencesDialog::Global {
+            draft, selected, ..
+        } => (
+            crate::localization::tr("settings.title"),
+            *selected,
+            vec![
+                format!("{}: {}", crate::localization::tr("settings.language"), draft.language),
+                setting_row(crate::localization::tr("settings.open_last"), draft.open_last_project),
+                setting_row(
+                    crate::localization::tr("settings.remember_workspace"),
+                    draft.remember_workspace,
+                ),
+                setting_row(
+                    crate::localization::tr("settings.remember_overlays"),
+                    draft.remember_overlays,
+                ),
+                format!(
+                    "{}: {} ms",
+                    crate::localization::tr("settings.tooltip_delay"),
+                    draft.tooltip_delay_ms
+                ),
+                format!(
+                    "{}: {}",
+                    crate::localization::tr("settings.max_undo"),
+                    draft.max_undo_states
+                ),
+                setting_row(
+                    crate::localization::tr("settings.change_view_undo"),
+                    draft.change_view_mode_on_undo,
+                ),
+                crate::localization::tr("settings.reset_layout").to_owned(),
+                crate::localization::tr("settings.restore").to_owned(),
+                crate::localization::tr("settings.cancel").to_owned(),
+                crate::localization::tr("settings.save").to_owned(),
+            ],
+        ),
+        PreferencesDialog::Project {
+            draft, selected, ..
+        } => (
+            crate::localization::tr("project_settings.title"),
+            *selected,
+            vec![
+                setting_row(
+                    crate::localization::tr("project_settings.preserve_ids"),
+                    draft.preserve_ids,
+                ),
+                setting_row(
+                    crate::localization::tr("project_settings.generate_coastal"),
+                    draft.generate_coastal_on_save,
+                ),
+                setting_row(
+                    crate::localization::tr("project_settings.lone_pixels"),
+                    draft.extra_warnings.lone_pixels,
+                ),
+                setting_row(
+                    crate::localization::tr("project_settings.few_borders"),
+                    draft.extra_warnings.few_shared_borders,
+                ),
+                format!(
+                    "{}: {}",
+                    crate::localization::tr("project_settings.threshold"),
+                    draft.extra_warnings.few_shared_borders_threshold
+                ),
+                crate::localization::tr("settings.restore").to_owned(),
+                crate::localization::tr("project_settings.open").to_owned(),
+                format!(
+                    "{} ({} effective)",
+                    crate::localization::tr("project_settings.validate"),
+                    draft.terrains.len().saturating_sub(1)
+                ),
+                crate::localization::tr("settings.cancel").to_owned(),
+                crate::localization::tr("settings.save").to_owned(),
+            ],
+        ),
+    };
+    draw_dialog_text(ctx, glyph_cache, gl, [x + 16.0, y + 26.0], title);
+    for (index, row) in rows.iter().enumerate() {
+        let row_y = y + 46.0 + index as f64 * 30.0;
+        if index == selected {
+            graphics::rectangle(
+                colors::BUTTON_HOVER_ACTIVE,
+                [x + 8.0, row_y, width - 16.0, 26.0],
+                ctx.transform,
+                gl,
+            );
+        }
+        draw_dialog_text(
+            ctx,
+            glyph_cache,
+            gl,
+            [x + 16.0, row_y + 18.0],
+            row,
+        );
+    }
+}
+
+fn setting_row(label: &str, enabled: bool) -> String {
+    format!("[{}] {label}", if enabled { "x" } else { " " })
+}
+
+fn draw_dialog_text(
+    ctx: Context,
+    glyph_cache: &mut FontGlyphCache,
+    gl: &mut GlGraphics,
+    position: Vector2<f64>,
+    text: &str,
+) {
+    graphics::text(
+        colors::WHITE,
+        FONT_SIZE,
+        text,
+        glyph_cache,
+        ctx.transform.trans_pos(position),
+        gl,
+    )
+    .expect("unable to draw preferences dialog text");
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct InterfaceDrawContext {
     pub map_view_mode: Option<MapViewMode>,
@@ -1489,10 +2235,13 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, Messag
 fn show_about_dialog() {
     MessageDialog::new()
         .set_level(MessageLevel::Info)
-        .set_title(crate::APPNAME)
+        .set_title(crate::localization::tr("about.title"))
         .set_description(format!(
-            "{}\n\nBased on ScottyThePilot's HOI4 Province Editor.\nDeveloped and extended by Adrian Costa.\n\nUnofficial community tool.\nNot affiliated with or endorsed by Paradox Interactive.\n\nMIT License\nhttps://github.com/AdriianCOE/hoi4_state_editor",
-            crate::PRODUCT_SUBTITLE,
+            "HOI4 Map Editor · Version {}\n{}\n\n{}\n\n{}\n\nMIT License\nhttps://github.com/AdriianCOE/hoi4_state_editor",
+            crate::APP_VERSION,
+            crate::localization::tr("about.subtitle"),
+            crate::localization::tr("about.credits"),
+            crate::localization::tr("about.disclaimer"),
         ))
         .set_buttons(MessageButtons::Ok)
         .show();
@@ -1918,7 +2667,11 @@ pub fn copy_text_to_clipboard(text: &str) -> Result<(), Error> {
 
 #[cfg(test)]
 mod source_open_tests {
-    use super::open_source_with;
+    use super::{
+        PreferencesDialog, map_view_from_preference, open_source_with, preference_rows,
+    };
+    use crate::config::{GlobalConfig, ProjectConfig};
+    use crate::app::project::MapViewMode;
     use std::cell::Cell;
     use std::path::Path;
 
@@ -1931,5 +2684,28 @@ mod source_open_tests {
         })
         .unwrap();
         assert!(called.get());
+    }
+
+    #[test]
+    fn settings_dialog_models_keep_global_and_project_drafts_separate() {
+        let global = Some(PreferencesDialog::Global {
+            original: GlobalConfig::default(),
+            draft: GlobalConfig::default(),
+            fingerprint: None,
+            selected: 0,
+        });
+        let project = Some(PreferencesDialog::Project {
+            root: "mod".into(),
+            draft: ProjectConfig::default(),
+            fingerprint: None,
+            selected: 0,
+        });
+        assert_eq!(preference_rows(&global), 11);
+        assert_eq!(preference_rows(&project), 10);
+        assert_eq!(
+            map_view_from_preference("political"),
+            Some(MapViewMode::Political)
+        );
+        assert_eq!(map_view_from_preference("unknown"), None);
     }
 }

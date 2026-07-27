@@ -329,8 +329,7 @@ impl Canvas {
 
     pub fn load_project(project: Hoi4Project) -> Result<Canvas, Error> {
         let location = Location::Directory(project.paths.map_directory.clone());
-        let mut config = Config::load()?;
-        config.preserve_ids = true;
+        let config = Config::load_for_project(&project.paths.root)?;
         Self::load_with_access(
             location,
             Some(project),
@@ -2635,6 +2634,16 @@ impl Canvas {
 
     pub fn config(&self) -> &Config {
         &self.bundle.config
+    }
+
+    pub fn apply_config(&mut self, config: Config) {
+        self.history.set_limit(config.max_undo_states);
+        self.bundle.config = config;
+        self.problems = self.bundle.generate_problems();
+        self.unknown_terrains = self.bundle.search_unknown_terrains();
+        if self.view_mode == ViewMode::Terrain {
+            self.refresh();
+        }
     }
 
     pub fn draw(
@@ -5248,7 +5257,12 @@ impl Canvas {
     }
 
     pub fn reload_config(&mut self, alerts: &mut Alerts) {
-        match Config::load() {
+        let loaded = self
+            .project
+            .as_ref()
+            .map(|project| Config::load_for_project(&project.paths.root))
+            .unwrap_or_else(Config::load);
+        match loaded {
             Ok(config) => {
                 self.bundle.config = config;
                 alerts.push(Ok("Reloaded config"));
@@ -5572,6 +5586,7 @@ impl Canvas {
                 .is_some_and(|task| task.state.cancellable()),
             recovery_required,
             has_save_report: self.state_save_report.is_some(),
+            project_loaded: self.project.is_some(),
         }
     }
 

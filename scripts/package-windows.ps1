@@ -102,8 +102,21 @@ foreach ($file in @("README.md", "LICENSE", "CHANGELOG.md", "THIRD_PARTY_NOTICES
 $binaryText = [System.Text.Encoding]::ASCII.GetString(
     [System.IO.File]::ReadAllBytes((Join-Path $stage "HOI4 Map Editor.exe"))
 )
+$binaryUtf8Text = [System.Text.Encoding]::UTF8.GetString(
+    [System.IO.File]::ReadAllBytes((Join-Path $stage "HOI4 Map Editor.exe"))
+)
 if ($binaryText -match "[A-Za-z]:[\\/]Users[\\/]") {
     throw "The packaged executable contains an absolute user path."
+}
+$legacyConfigName = "hoi4pe_" + "config.toml"
+if ($binaryText.Contains($legacyConfigName)) {
+    throw "The packaged executable still references the legacy configuration file."
+}
+$portugueseSettings = "Configura$([char]0x00E7)$([char]0x00F5)es"
+foreach ($embeddedText in @("Settings", $portugueseSettings, "Province and State Editing Toolkit")) {
+    if (-not $binaryUtf8Text.Contains($embeddedText)) {
+        throw "The packaged executable is missing embedded UI catalog text: $embeddedText"
+    }
 }
 foreach ($textFile in Get-ChildItem -LiteralPath $stage -File |
     Where-Object Extension -in ".md", ".txt") {

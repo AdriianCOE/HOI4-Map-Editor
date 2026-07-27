@@ -14,6 +14,7 @@ use super::inspector::{MapViewport, inspector_drawer_width};
 use super::project::MapViewMode;
 use super::{FontGlyphCache, InterfaceDrawContext};
 use crate::font::{self, FONT_SIZE};
+use crate::localization::{tr, ui_literal};
 
 use std::fmt;
 use std::sync::Arc;
@@ -78,6 +79,7 @@ pub struct Interface {
     inspector_width: f64,
     viewport: Viewport,
     tooltip: TooltipManager,
+    tooltip_delay_seconds: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,8 +126,8 @@ impl TooltipManager {
         self.elapsed = 0.0;
     }
 
-    fn visible(&self) -> Option<&TooltipCandidate> {
-        (self.elapsed >= TOOLTIP_DELAY_SECONDS)
+    fn visible(&self, delay_seconds: f32) -> Option<&TooltipCandidate> {
+        (self.elapsed >= delay_seconds)
             .then_some(self.candidate.as_ref())
             .flatten()
     }
@@ -144,12 +146,15 @@ impl Interface {
                 .find_map(|(label, entries)| (*label == toolbar_button_text).then_some(*entries))
                 .expect("main toolbar group must exist");
             let mut buttons = Vec::with_capacity(toolbar_primitive_buttons.len());
-            let base =
-                ButtonBase::new_fit_width(toolbar_button_text, [pos_x, 0], &PALETTE_BUTTON_TOOLBAR);
+            let base = ButtonBase::new_fit_width(
+                ui_literal(toolbar_button_text),
+                [pos_x, 0],
+                &PALETTE_BUTTON_TOOLBAR,
+            );
 
             let mut pos_y = base.height();
             for &(button_text_left, button_text_right, id) in toolbar_primitive_buttons {
-                let text = [button_text_left, button_text_right];
+                let text = [ui_literal(button_text_left), button_text_right];
                 let base = ButtonBase::new_double_text(
                     text,
                     [pos_x, pos_y],
@@ -180,13 +185,13 @@ impl Interface {
         let compact = window_width < 700;
         let workspace_labels = if compact {
             [
-                ("Provinces", ButtonId::WorkspaceProvinces),
-                ("States", ButtonId::WorkspaceStates),
+                (tr("workspace.provinces"), ButtonId::WorkspaceProvinces),
+                (tr("workspace.states"), ButtonId::WorkspaceStates),
             ]
         } else {
             [
-                ("Workspace: Provinces", ButtonId::WorkspaceProvinces),
-                ("States", ButtonId::WorkspaceStates),
+                (tr("workspace.provinces_long"), ButtonId::WorkspaceProvinces),
+                (tr("workspace.states"), ButtonId::WorkspaceStates),
             ]
         };
         for (label, id) in workspace_labels {
@@ -196,9 +201,9 @@ impl Interface {
         }
 
         let apply_label = if compact {
-            "Apply States"
+            tr("workspace.apply_short")
         } else {
-            "Apply State Changes"
+            tr("workspace.apply")
         };
         let apply_width = button_width(apply_label);
         let mut action_x = window_width.saturating_sub(apply_width);
@@ -212,9 +217,9 @@ impl Interface {
         });
         if window_width >= 720 {
             let review_label = if window_width < 980 {
-                "Review"
+                tr("workspace.review_short")
             } else {
-                "Review State Changes"
+                tr("workspace.review")
             };
             let review_width = button_width(review_label);
             action_x = action_x.saturating_sub(review_width);
@@ -253,7 +258,7 @@ impl Interface {
             let mut entry_y = bar_y + base.height();
             for &(left, right, id) in *entries {
                 let entry = ButtonBase::new_double_text(
-                    [left, right],
+                    [ui_literal(left), right],
                     [bar_x, entry_y],
                     TOOLBAR_DROPDOWN_WIDTH,
                     &PALETTE_BUTTON,
@@ -347,7 +352,12 @@ impl Interface {
             inspector_width: 0.0,
             viewport,
             tooltip: TooltipManager::default(),
+            tooltip_delay_seconds: TOOLTIP_DELAY_SECONDS,
         }
+    }
+
+    pub fn set_tooltip_delay_ms(&mut self, delay_ms: u32) {
+        self.tooltip_delay_seconds = delay_ms as f32 / 1000.0;
     }
 
     #[inline]
@@ -666,7 +676,7 @@ impl Interface {
         for toolbar_button in &self.toolbar_buttons {
             self.draw_toolbar_button(toolbar_button, ctx, ictx, pos, glyph_cache, gl);
         }
-        if let Some(tooltip) = self.tooltip.visible() {
+        if let Some(tooltip) = self.tooltip.visible(self.tooltip_delay_seconds) {
             draw_tooltip(
                 ctx,
                 &tooltip.text,
@@ -1482,6 +1492,7 @@ pub enum ButtonId {
     ToolbarFileReveal,
     ToolbarFileExportLandMap,
     ToolbarFileExportTerrainMap,
+    ToolbarFileProjectSettings,
     WorkspaceProvinces,
     WorkspaceStates,
     WorkspaceReviewChanges,
@@ -1489,6 +1500,7 @@ pub enum ButtonId {
     ToolbarEditUndo,
     ToolbarEditRedo,
     ToolbarEditFindMap,
+    ToolbarEditSettings,
     ToolbarEditNewState,
     ToolbarEditRemoveState,
     ToolbarEditStateProperties,
@@ -1751,12 +1763,14 @@ pub struct StateActionAvailability {
     pub save_cancellable: bool,
     pub recovery_required: bool,
     pub has_save_report: bool,
+    pub project_loaded: bool,
 }
 
 impl StateActionAvailability {
     fn button_enabled(self, id: ButtonId) -> bool {
         use ButtonId::*;
         match id {
+            ToolbarFileProjectSettings => self.project_loaded,
             WorkspaceReviewChanges | WorkspaceApplyToMod => self.state_view,
             ToolbarEditUndo => self.can_undo,
             ToolbarEditRedo => self.can_redo,
@@ -1908,6 +1922,11 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
             ),
             ("Open HOI4 Mod...", "Ctrl+O", ButtonId::ToolbarFileOpenFolder),
             (
+                "Project Settings...",
+                "",
+                ButtonId::ToolbarFileProjectSettings,
+            ),
+            (
                 "Review State Changes",
                 "",
                 ButtonId::WorkspaceReviewChanges,
@@ -1946,6 +1965,7 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
             ("Undo", "Ctrl+Z", ButtonId::ToolbarEditUndo),
             ("Redo", "Ctrl+Y", ButtonId::ToolbarEditRedo),
             ("Find on Map", "Ctrl+F", ButtonId::ToolbarEditFindMap),
+            ("Settings...", "", ButtonId::ToolbarEditSettings),
             ("New State", "", ButtonId::ToolbarEditNewState),
             (
                 "Remove state from session",
@@ -2421,6 +2441,7 @@ mod tests {
             inspector_width: 0.0,
             viewport,
             tooltip: TooltipManager::default(),
+            tooltip_delay_seconds: TOOLTIP_DELAY_SECONDS,
         }
     }
 
@@ -2596,14 +2617,16 @@ mod tests {
         let mut manager = TooltipManager::default();
         manager.update(Some(candidate));
         manager.tick(TOOLTIP_DELAY_SECONDS - 0.01);
-        assert!(manager.visible().is_none());
+        assert!(manager.visible(TOOLTIP_DELAY_SECONDS).is_none());
         manager.tick(0.02);
         assert_eq!(
-            manager.visible().map(|tooltip| tooltip.text.as_str()),
+            manager
+                .visible(TOOLTIP_DELAY_SECONDS)
+                .map(|tooltip| tooltip.text.as_str()),
             Some("Workspace: States")
         );
         manager.clear();
-        assert!(manager.visible().is_none());
+        assert!(manager.visible(TOOLTIP_DELAY_SECONDS).is_none());
     }
 
     #[test]
@@ -2640,5 +2663,32 @@ mod tests {
                 && *id == ButtonId::ToolbarFileSaveAsArchive
         }));
         assert!(!file.iter().any(|(label, _, _)| *label == "Save As..."));
+    }
+
+    #[test]
+    fn settings_commands_are_in_the_expected_menus_and_project_requires_a_mod() {
+        let file = TOOLBAR_PRIMITIVE
+            .iter()
+            .find(|(label, _)| *label == "File")
+            .unwrap()
+            .1;
+        let edit = TOOLBAR_PRIMITIVE
+            .iter()
+            .find(|(label, _)| *label == "Edit")
+            .unwrap()
+            .1;
+        assert!(file.iter().any(|(_, _, id)| {
+            *id == ButtonId::ToolbarFileProjectSettings
+        }));
+        assert!(edit.iter().any(|(_, _, id)| {
+            *id == ButtonId::ToolbarEditSettings
+        }));
+        assert!(!StateActionAvailability::default()
+            .button_enabled(ButtonId::ToolbarFileProjectSettings));
+        assert!(StateActionAvailability {
+            project_loaded: true,
+            ..Default::default()
+        }
+        .button_enabled(ButtonId::ToolbarFileProjectSettings));
     }
 }

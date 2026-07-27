@@ -7,9 +7,10 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod font;
+pub mod localization;
 
 use glutin_window::GlutinWindow;
-use glutin::dpi::LogicalSize;
+use glutin::dpi::{LogicalSize, PhysicalPosition};
 use opengl_graphics::{GlGraphics, OpenGL};
 use piston::window::WindowSettings;
 
@@ -19,9 +20,6 @@ use crate::events::launch;
 use std::path::PathBuf;
 use std::env;
 use std::io;
-
-const WINDOW_WIDTH_DEFAULT: u32 = 1280;
-const WINDOW_HEIGHT_DEFAULT: u32 = 720;
 
 const WINDOW_WIDTH_MIN: u32 = 384;
 const WINDOW_HEIGHT_MIN: u32 = 256;
@@ -36,12 +34,33 @@ fn main() {
 
   let root = root_dir().expect("unable to find root dir");
   env::set_current_dir(root).expect("unable to set root dir");
+  let global_config = crate::config::GlobalConfig::load()
+    .map(|loaded| loaded.value)
+    .unwrap_or_default();
+  crate::localization::set_language(&global_config.language);
 
   let opengl = OpenGL::V3_2;
-  let screen = [WINDOW_WIDTH_DEFAULT, WINDOW_HEIGHT_DEFAULT];
+  let screen = [
+    global_config.window.width.max(WINDOW_WIDTH_MIN),
+    global_config.window.height.max(WINDOW_HEIGHT_MIN),
+  ];
   let mut window: GlutinWindow = WindowSettings::new(APPNAME, screen)
     .graphics_api(opengl).resizable(true).vsync(true)
     .build().expect("unable to initialize window");
+  if let (Some(x), Some(y)) = (global_config.window.x, global_config.window.y) {
+    let visible = window.ctx.window().available_monitors().any(|monitor| {
+      let position = monitor.position();
+      let size = monitor.size();
+      x >= position.x - screen[0] as i32
+        && x < position.x + size.width as i32
+        && y >= position.y - screen[1] as i32
+        && y < position.y + size.height as i32
+    });
+    if visible {
+      window.ctx.window().set_outer_position(PhysicalPosition::new(x, y));
+    }
+  }
+  window.ctx.window().set_maximized(global_config.window.maximized);
   let screen_min = LogicalSize::new(WINDOW_WIDTH_MIN, WINDOW_HEIGHT_MIN);
   window.ctx.window().set_min_inner_size(Some(screen_min));
   let mut gl = GlGraphics::new(opengl);

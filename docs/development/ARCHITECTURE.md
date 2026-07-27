@@ -29,6 +29,18 @@ em acoes; `Canvas` reune sessao visual, camera, ferramentas e texturas;
 `map/provinces.bmp`, `map/definition.csv` e `history/states/`; adjacencias e
 rios sao opcionais.
 
+`config.rs` separa preferências globais opcionais em
+`%APPDATA%\HOI4MapEditor\config.toml` de preferências opcionais do mod em
+`<mod>/.hoi4-map-editor/project.toml`. Ambos usam schema versionado, staging no
+mesmo diretório, flush/sync, validação, backup simples e replace atômico. O
+parser lossless `toml_edit` preserva comentários, ordem e chaves desconhecidas.
+Ausência ou erro de configuração nunca impede a abertura do editor e nunca
+marca mapas ou states como modificados.
+
+`localization.rs` compila os catálogos UTF-8 `en-US` e `pt-BR` no binário.
+Chaves de UI são resolvidas por uma API central; dados técnicos do HOI4 não
+passam pela localização.
+
 `Canvas::MapAccessMode` separa dois fluxos:
 
 - `ReadOnly`: projeto de estado aberto pela raiz do mod. Os arquivos
@@ -252,12 +264,6 @@ fornece os IDs reais ao carregador de estados.
 
 ## Limites atuais
 
-- Fases 0 a 4C estao implementadas: parser, leitura, visualizacao, selecao,
-  reassociacao, preview lossless, validacao round-trip, backup e salvamento
-  transacional.
-- Fase 5A/5A.1 esta em andamento: Inspector, catalogos, pickers, toolbar de
-  states, State Fill, Political, heightmap, labels, diagnosticos e branding
-  existem, mas o acabamento de UX ainda nao esta finalizado.
 - Lasso de selecao e State Brush operam por provincia; nao ha pintura de
   pixels, merge, split ou brush com raio para estados.
 - `Ctrl+S` salva somente o workspace atual: Province Save no workspace
@@ -275,6 +281,5 @@ fornece os IDs reais ao carregador de estados.
 
 - O modo legado ainda contem invariantes internas com `expect`.
 - Mapas grandes e entradas ZIP ainda sao carregados integralmente em memoria.
-- O arquivo legado `hoi4pe_config.toml` mantem esse nome por compatibilidade.
 - Strings com escapes permanecem preservadas na arvore; a extracao tipada
   remove apenas as aspas externas e ainda nao interpreta todos os escapes.

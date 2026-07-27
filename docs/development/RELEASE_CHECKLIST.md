@@ -9,6 +9,8 @@ applicable item is confirmed.
 - [ ] The same gates pass in a clean clone made from committed history.
 - [ ] Portable ZIP was produced by `scripts/package-windows.ps1`.
 - [ ] ZIP contains only the executable, README, LICENSE, changelog, and notices.
+- [ ] Embedded `en-US` and `pt-BR` catalogs work without external locale files.
+- [ ] Package contains no personal, project, or legacy configuration file.
 - [ ] SHA-256 checksum matches the ZIP.
 - [ ] `RELEASE_MANIFEST.txt` matches the ZIP name, version, size, and SHA-256.
 - [ ] The ZIP was extracted outside the repository and its allowlist rechecked.
@@ -22,6 +24,8 @@ applicable item is confirmed.
 - [ ] Review State Changes, temporary validation, backup, Apply State Changes, reload, rollback, and recovery are exercised.
 - [ ] Province editing legacy flow is tested separately from State Apply.
 - [ ] Logs are created under `%LOCALAPPDATA%\HOI4MapEditor\logs`.
+- [ ] Global settings are created only after explicit Save and project settings
+      only after explicit Project Settings Save.
 
 ## Store and communication preparation
 
