@@ -275,6 +275,8 @@ enum Fault {
   #[cfg(test)]
   AfterCommit(usize),
   #[cfg(test)]
+  IncompleteRollback,
+  #[cfg(test)]
   Reload,
   #[cfg(test)]
   Verification,
@@ -557,6 +559,12 @@ fn execute_directory(
     );
     timings.commit = started.elapsed();
     if let Err(error) = commit_result {
+      #[cfg(test)]
+      if fault == Fault::IncompleteRollback
+        && let Some(committed) = prepared.iter().find(|file| file.rollback.exists())
+      {
+        remove_if_exists(&committed.rollback)?;
+      }
       let rollback = rollback_files(&prepared);
       return match rollback {
         Ok(()) => Err(format!("{error}. Original files were restored and verified.")),
@@ -688,7 +696,12 @@ fn execute_directory(
       }
     }
   }
-  if let Some(lock) = lock_path {
+  let recovery_required = result
+    .as_ref()
+    .is_err_and(|error| error.contains("CRITICAL"));
+  if let Some(lock) = lock_path
+    && !recovery_required
+  {
     let _ = fs::remove_file(lock);
   }
   result
@@ -1073,6 +1086,10 @@ fn commit_files(
     #[cfg(test)]
     if fault == Fault::AfterCommit(index + 1) {
       return Err(format!("Injected failure after {} committed file(s)", index + 1));
+    }
+    #[cfg(test)]
+    if fault == Fault::IncompleteRollback && index == 0 {
+      return Err("Injected commit failure before incomplete rollback".to_owned());
     }
   }
   Ok(())
@@ -1692,6 +1709,35 @@ mod tests {
         .exists());
       fs::remove_dir_all(root).unwrap();
     }
+  }
+
+  #[test]
+  fn incomplete_rollback_keeps_lock_and_marks_recovery_required() {
+    let root = root("recovery-required");
+    let map = root.join("map");
+    fs::create_dir_all(&map).unwrap();
+    fs::write(map.join("provinces.bmp"), b"old-bmp").unwrap();
+    fs::write(map.join("definition.csv"), b"old-csv").unwrap();
+
+    let result = execute_province_save_with_fault(
+      &Location::Directory(map),
+      &bundle(),
+      ProvinceSaveMode::Save,
+      &ProvinceSaveCancellation::default(),
+      Fault::IncompleteRollback,
+      &mut |_| {},
+    );
+
+    assert!(result.unwrap_err().contains("CRITICAL"));
+    assert!(root
+      .join(".hoi4-state-editor/province-save.lock")
+      .is_file());
+    let journal: ProvinceSaveJournal = toml::from_slice(
+      &fs::read(root.join(".hoi4-state-editor/province-save-journal.toml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(journal.state, ProvinceJournalState::RecoveryRequired);
+    fs::remove_dir_all(root).unwrap();
   }
 
   #[test]
