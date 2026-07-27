@@ -151,6 +151,29 @@ Fase 2A. Um lote, independentemente da origem da seleção, produz no máximo um
 entrada de undo e mantém preflight, rollback, victory points, construções
 provinciais e índices no mesmo ponto de autoridade.
 
+`app::project::brush` implementa o State Brush da Fase 3D como uma camada
+separada das ferramentas destrutivas de pintura geográfica. O fluxo é:
+
+```text
+mouse positions
+-> map coordinates
+-> segment sampling
+-> province IDs
+-> classification
+-> preview boundaries
+-> ReassignProvinces on release
+-> working state
+-> selective visual refresh
+```
+
+O brush guarda somente IDs de província visitados. Durante o arrasto ele
+classifica novos IDs como editáveis, no-op, ignorados ou bloqueados, atualiza
+apenas contornos de prévia e não altera o working set. O mouse release filtra
+os editáveis e chama `StateEditSession::reassign_provinces` uma vez, com
+`Some(target_state_id)` no modo Assign e `None` no modo Unassign. Assim, victory
+points, construções provinciais, conflitos, dirty state, Undo e Redo continuam
+centralizados no comando existente.
+
 Após um comando, o Canvas combina os bounds geográficos das províncias
 alteradas. Até 128 províncias cobrindo no máximo 25% do mapa usam atualização
 seletiva da textura e das bordas naquela região; lotes maiores usam o rebuild
@@ -185,12 +208,12 @@ relido e referências desconhecidas podem ser diagnosticadas com segurança.
 - controles herdados de edição geográfica poderão ser removidos após existir
   substituição funcional.
 
-## Limites das Fases 2A, 2B, 3A, 3B e 3C
+## Limites das Fases 2A, 2B, 3A, 3B, 3C e 3D
 
 - parser, leitura, visualização, seleção e reassociação em memória
   implementados, mas sem serializer, diff, backup ou salvamento;
-- lasso de seleção por província implementado, mas sem brush, pintura,
-  merge ou split de estados;
+- lasso de seleção e State Brush por província implementados, mas sem pintura
+  de pixels, merge, split ou brush com raio;
 - criação e remoção controladas existem somente no working set; nenhum arquivo
   é criado, removido, renomeado ou associado a um nome final;
 - propriedades gerais, owner/controller, cores, claims, recursos, construções

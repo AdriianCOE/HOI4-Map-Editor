@@ -1,4 +1,5 @@
 mod diagnostics;
+mod brush;
 mod edit;
 mod indexes;
 mod lasso;
@@ -7,6 +8,9 @@ mod properties;
 mod view;
 
 pub use diagnostics::{DiagnosticSeverity, ProjectDiagnostic, ProjectDiagnosticKind};
+pub use brush::{
+  BrushProvinceClassification, StateBrushMode, sample_segment
+};
 pub use edit::{
   StateEditError, StateEditSession, StateEditSummary, StateEditTimings, StateRemovalPolicy,
   WorkingStateLifecycle, WorkingStateOrigin

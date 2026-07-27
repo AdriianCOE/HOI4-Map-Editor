@@ -23,7 +23,8 @@ use self::alerts::Alerts;
 use self::canvas::{Canvas, ToolMode, ViewMode};
 use self::interface::{Interface, ButtonId, StateActionAvailability, get_interface};
 use self::project::{
-  Hoi4Project, LassoSelectionMode, MapViewMode, ProvinceInclusionMode, ProjectPaths
+  Hoi4Project, LassoSelectionMode, MapViewMode, ProvinceInclusionMode, ProjectPaths,
+  StateBrushMode,
 };
 
 use std::path::{Path, PathBuf};
@@ -221,7 +222,8 @@ impl EventHandler for App {
         }
       },
       (Some(canvas), true, Key::Space) => canvas.cycle_tool_brush(interface, cursor_pos, mods.shift, &mut self.alerts),
-      (Some(canvas), true, Key::Escape) => if !canvas.cancel_state_lasso()
+      (Some(canvas), true, Key::Escape) => if !canvas.cancel_state_brush()
+        && !canvas.cancel_state_lasso()
         && !canvas.clear_state_selection()
       {
         canvas.cancel_tool();
@@ -235,7 +237,11 @@ impl EventHandler for App {
       (Some(canvas), true, Key::M) if mods.shift => canvas.tool.cycle_brush_mask(),
       (Some(canvas), true, Key::H) => canvas.camera.reset(),
       (Some(canvas), true, Key::A) => canvas.set_tool_mode(ToolMode::PaintArea),
-      (Some(canvas), true, Key::B) => canvas.set_tool_mode(ToolMode::PaintBucket),
+      (Some(canvas), true, Key::B) => if canvas.map_view_mode() == MapViewMode::States {
+        canvas.activate_state_brush(StateBrushMode::AssignToTarget, &mut self.alerts);
+      } else {
+        canvas.set_tool_mode(ToolMode::PaintBucket);
+      },
       (Some(canvas), true, Key::L) => if canvas.map_view_mode() == MapViewMode::States {
         canvas.activate_state_lasso(lasso_mode_from_mods(mods), &mut self.alerts);
       } else {
@@ -280,7 +286,9 @@ impl EventHandler for App {
     let Some(interface) = self.interface.as_mut() else { return };
     interface.on_mouse_position(pos);
     if let Some(canvas) = &mut self.canvas {
-      if self.painting && canvas.tool.mode == ToolMode::PaintArea && canvas.view_mode() != ViewMode::Adjacencies {
+      if self.painting && canvas.state_brush_is_stroking() {
+        canvas.update_state_brush(interface, pos);
+      } else if self.painting && canvas.tool.mode == ToolMode::PaintArea && canvas.view_mode() != ViewMode::Adjacencies {
         // Mouse movement should not activate the tool for the paint bucket and lasso tools
         canvas.activate_tool(interface, pos, mods.shift);
       };
@@ -321,6 +329,11 @@ impl EventHandler for App {
   }
 
   fn on_unfocus(&mut self) {
+    self.painting = false;
+    if let Some(canvas) = self.canvas.as_mut() {
+      canvas.cancel_state_brush();
+      canvas.camera.set_panning(false);
+    }
     self.alerts.set_state(false);
   }
 
@@ -413,6 +426,22 @@ impl App {
       }
       return;
     }
+    if matches!(
+      id,
+      ToolbarEditActivateStateBrushAssign | ToolbarEditActivateStateBrushUnassign
+    ) {
+      if self.resolve_property_draft()
+        && let Some(canvas) = self.canvas.as_mut()
+      {
+        let mode = if id == ToolbarEditActivateStateBrushAssign {
+          StateBrushMode::AssignToTarget
+        } else {
+          StateBrushMode::Unassign
+        };
+        canvas.activate_state_brush(mode, &mut self.alerts);
+      }
+      return;
+    }
     if id == ToolbarEditClearStateSelection {
       if self.resolve_property_draft()
         && let Some(canvas) = self.canvas.as_mut()
@@ -484,6 +513,15 @@ impl App {
           self.alerts.push(Err("No active state lasso"));
         }
       },
+      (
+        Some(_),
+        ToolbarEditActivateStateBrushAssign | ToolbarEditActivateStateBrushUnassign
+      ) => unreachable!(),
+      (Some(canvas), ToolbarEditCancelStateBrush) => {
+        if !canvas.cancel_state_brush() {
+          self.alerts.push(Err("No active State Brush"));
+        }
+      },
       (Some(canvas), ToolbarEditMoveSelectedToTarget) => {
         if canvas.move_confirmation_message().as_deref().is_none_or(msg_dialog_confirm_state_batch) {
           canvas.move_selected_provinces_to_target(&mut self.alerts);
@@ -549,7 +587,9 @@ impl App {
     let Some(interface) = self.interface.as_ref() else { return };
     let Some(canvas) = &mut self.canvas else { return };
     if canvas.map_view_mode() == MapViewMode::States {
-      if canvas.state_lasso_is_active() {
+      if canvas.state_brush_is_active() {
+        self.painting = canvas.begin_state_brush(interface, pos, &mut self.alerts);
+      } else if canvas.state_lasso_is_active() {
         canvas.state_lasso_add_point(
           interface,
           pos,
@@ -570,7 +610,11 @@ impl App {
   fn action_deactivate_tool(&mut self) {
     self.painting = false;
     if let Some(canvas) = &mut self.canvas {
-      canvas.deactivate_tool();
+      if canvas.state_brush_is_stroking() {
+        canvas.finish_state_brush(&mut self.alerts);
+      } else {
+        canvas.deactivate_tool();
+      }
     };
   }
 

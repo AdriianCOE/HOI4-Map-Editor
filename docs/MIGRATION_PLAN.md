@@ -67,17 +67,21 @@ ou reservados são rejeitados, estados carregados removidos viram tombstones da
 sessão e snapshots completos tornam Undo/Redo reversíveis. Nenhum arquivo de
 estado é criado, apagado, renomeado ou escrito.
 
-## Fase 3D — State Brush em memória
+## Fase 3D — State Brush em memória (concluída)
 
-Atribuir províncias diretamente ao estado alvo com um brush que reutilize os
-mesmos preflights, deltas provinciais e histórico transacional, ainda sem
-serializer ou escrita em disco.
+Atribui ou desassocia províncias diretamente com um brush separado da pintura
+geográfica. O stroke amostra segmentos entre eventos do cursor, deduplica IDs,
+mostra prévia e aplica somente no mouse release, chamando uma única transação
+`ReassignProvinces`. Victory points e construções provinciais acompanham as
+províncias via o comando existente. Undo/Redo e Discard continuam em memória,
+sem serializer ou escrita em disco.
 
-## Fase 4 — salvamento lossless
+## Fase 4A — arquitetura e preview de patches lossless
 
-Usar os tokens e spans já preservados para editar somente intervalos afetados,
-mantendo comentários, formatação, ordem, chaves repetidas, blocos datados e
-campos desconhecidos. Salvar somente arquivos de estado modificados.
+Usar os tokens e spans já preservados para planejar e visualizar alterações
+textuais somente nos intervalos afetados, mantendo comentários, formatação,
+ordem, chaves repetidas, blocos datados e campos desconhecidos. Esta etapa
+prepara o mecanismo lossless sem gravar automaticamente no Azarya.
 
 ## Fase 5 — validações e diagnósticos avançados
 
@@ -91,8 +95,7 @@ publicação somente após o fluxo lossless estar comprovado.
 
 ## Próxima etapa
 
-Fase 3D: implementar State Brush para atribuição direta de províncias sobre o
-modelo transacional em memória. Depois dela, a Fase 4A preparará patches
-lossless sobre os tokens e spans preservados, ainda sem gravar automaticamente
-nos arquivos reais. O mapa geográfico e os arquivos de estado permanecem sem
-salvamento até esse mecanismo ser validado.
+Fase 4A: preparar arquitetura e preview de patches lossless sobre os tokens e
+spans preservados, ainda sem gravar automaticamente nos arquivos reais. O mapa
+geográfico e os arquivos de estado permanecem sem salvamento até esse mecanismo
+ser validado.

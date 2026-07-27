@@ -18,7 +18,7 @@ use super::project::{
   DiagnosticSeverity, Hoi4Project, LassoSelectionMode, MapViewMode,
   ProvinceInclusionMode, StateEditSession, StateLassoPhase, StateSelection,
   EditableStateProperties, ProvinceDataDraft, StatePropertyDraft, StateRemovalPolicy,
-  WorkingStateOrigin,
+  BrushProvinceClassification, StateBrushMode, WorkingStateOrigin, sample_segment,
   boundaries_for_state, classify_state_lasso, generate_state_view,
   generate_state_view_for, generate_state_view_region_for,
   select_state_at_for as resolve_state_at_for, selection_overlay_for
@@ -33,6 +33,7 @@ use std::path::Path;
 use std::io::BufWriter;
 use std::fmt;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 const ZOOM_SENSITIVITY: f64 = 0.125;
 const STATE_PROPERTY_LABELS: [&str; StatePropertyDraft::TEXT_FIELD_COUNT] = [
@@ -68,10 +69,13 @@ pub struct Canvas {
   texture: Texture,
   state_texture: Option<Texture>,
   state_boundaries: Vec<UOrd<Vector2<u32>>>,
+  province_boundaries: BTreeMap<u32, Vec<UOrd<Vector2<u32>>>>,
   selected_state_boundaries: Vec<UOrd<Vector2<u32>>>,
   selected_province_boundaries: Vec<UOrd<Vector2<u32>>>,
   lasso_preview_boundaries: Vec<UOrd<Vector2<u32>>>,
   lasso_blocked_boundaries: Vec<UOrd<Vector2<u32>>>,
+  brush_preview_boundaries: Vec<UOrd<Vector2<u32>>>,
+  brush_blocked_boundaries: Vec<UOrd<Vector2<u32>>>,
   selection_texture: Option<Texture>,
   texture_overlay: Option<Texture>,
   view_mode: ViewMode,
@@ -95,6 +99,9 @@ pub struct Canvas {
   state_lasso_phase: StateLassoPhase,
   state_lasso_mode: LassoSelectionMode,
   state_lasso_inclusion: ProvinceInclusionMode,
+  state_brush_phase: StateBrushPhase,
+  state_brush_mode: StateBrushMode,
+  last_state_brush_result: Option<String>,
   state_province_extents: Option<BTreeMap<u32, Extents>>,
   last_state_visual_update_ms: u128,
   last_state_visual_update_kind: &'static str,
@@ -119,6 +126,32 @@ enum StateLifecycleDraft {
     unassign: bool,
     province_count: usize,
   },
+}
+
+#[derive(Debug, Clone, Default)]
+enum StateBrushPhase {
+  #[default]
+  Inactive,
+  Ready,
+  Stroking(Box<StateBrushStroke>),
+}
+
+#[derive(Debug, Clone)]
+struct StateBrushStroke {
+  mode: StateBrushMode,
+  target_state_id: Option<u32>,
+  visited_provinces: BTreeSet<u32>,
+  selectable_provinces: BTreeSet<u32>,
+  no_op_provinces: BTreeSet<u32>,
+  blocked_ambiguous: BTreeSet<u32>,
+  blocked_invalid_state: BTreeSet<u32>,
+  ignored_non_land: BTreeSet<u32>,
+  encountered_unknown: bool,
+  previous_map_position: Vector2<f64>,
+  last_editable_province: Option<u32>,
+  input_events: usize,
+  sampled_points: usize,
+  started: Instant,
 }
 
 impl StateLifecycleDraft {
@@ -196,6 +229,16 @@ impl Canvas {
     let state_boundaries = state_view
       .map(|state_view| state_view.state_boundaries)
       .unwrap_or_default();
+    let mut province_boundaries = BTreeMap::<u32, Vec<_>>::new();
+    if project.is_some() {
+      for (boundary, _) in bundle.map.iter_boundaries() {
+        for position in boundary.into_array() {
+          if let Some(province_id) = bundle.map.get_province_at(position).preserved_id {
+            province_boundaries.entry(province_id).or_default().push(boundary);
+          }
+        }
+      }
+    }
     let map_view_mode = if state_texture.is_some() {
       MapViewMode::States
     } else {
@@ -228,10 +271,13 @@ impl Canvas {
       texture,
       state_texture,
       state_boundaries,
+      province_boundaries,
       selected_state_boundaries: Vec::new(),
       selected_province_boundaries: Vec::new(),
       lasso_preview_boundaries: Vec::new(),
       lasso_blocked_boundaries: Vec::new(),
+      brush_preview_boundaries: Vec::new(),
+      brush_blocked_boundaries: Vec::new(),
       selection_texture: None,
       texture_overlay: None,
       view_mode: ViewMode::default(),
@@ -256,6 +302,9 @@ impl Canvas {
       state_lasso_phase: StateLassoPhase::Inactive,
       state_lasso_mode: LassoSelectionMode::default(),
       state_lasso_inclusion: ProvinceInclusionMode::default(),
+      state_brush_phase: StateBrushPhase::Inactive,
+      state_brush_mode: StateBrushMode::AssignToTarget,
+      last_state_brush_result: None,
       state_province_extents: None,
       last_state_visual_update_ms: 0,
       last_state_visual_update_kind: "initial",
@@ -621,6 +670,7 @@ impl Canvas {
             self.state_selection = None;
           }
         } else {
+          self.deactivate_state_brush();
           self.state_selection = None;
           self.selection_texture = None;
           self.selected_state_boundaries.clear();
@@ -1137,6 +1187,7 @@ impl Canvas {
     if showing_states {
       self.draw_selected_province_boundaries(ctx, interface, gl);
       self.draw_state_lasso(ctx, interface, cursor_pos, gl);
+      self.draw_state_brush(ctx, interface, gl);
     }
 
     let texture_overlay = self.bundle.map.get_rivers_overlay()
@@ -1338,6 +1389,33 @@ impl Canvas {
     {
       graphics::line_from_to(POLYGON, 2.0, a, b, ctx.transform, gl);
     }
+  }
+
+  fn draw_state_brush(
+    &self,
+    ctx: Context,
+    interface: &Interface,
+    gl: &mut GlGraphics,
+  ) {
+    const PREVIEW: DrawColor = [0.1, 1.0, 0.45, 1.0];
+    const BLOCKED: DrawColor = [1.0, 0.0, 0.75, 1.0];
+
+    self.draw_boundary_set(
+      ctx,
+      interface,
+      &self.brush_preview_boundaries,
+      PREVIEW,
+      3.5,
+      gl,
+    );
+    self.draw_boundary_set(
+      ctx,
+      interface,
+      &self.brush_blocked_boundaries,
+      BLOCKED,
+      4.0,
+      gl,
+    );
   }
 
   fn draw_boundary_set(
@@ -2154,6 +2232,7 @@ impl Canvas {
       }
       self.discard_unmodified_property_draft();
       self.cancel_state_lasso();
+      self.cancel_state_brush();
       if let Some(edit) = self.state_edit_session.as_mut()
         && edit.undo()
       {
@@ -2180,6 +2259,7 @@ impl Canvas {
       }
       self.discard_unmodified_property_draft();
       self.cancel_state_lasso();
+      self.cancel_state_brush();
       if let Some(edit) = self.state_edit_session.as_mut()
         && edit.redo()
       {
@@ -2251,6 +2331,7 @@ impl Canvas {
       alerts.push(Err("State view is available only for loaded state projects"));
     } else if map_view_mode != self.map_view_mode {
       self.cancel_state_lasso();
+      self.deactivate_state_brush();
       self.map_view_mode = map_view_mode;
       let message = match map_view_mode {
         MapViewMode::Provinces => "Province map view",
@@ -2264,10 +2345,19 @@ impl Canvas {
     !matches!(self.state_lasso_phase, StateLassoPhase::Inactive)
   }
 
+  pub fn state_brush_is_active(&self) -> bool {
+    !matches!(self.state_brush_phase, StateBrushPhase::Inactive)
+  }
+
+  pub fn state_brush_is_stroking(&self) -> bool {
+    matches!(self.state_brush_phase, StateBrushPhase::Stroking(_))
+  }
+
   pub fn state_action_availability(&self) -> StateActionAvailability {
     let state_view = self.map_view_mode == MapViewMode::States;
     let lasso_active = self.state_lasso_is_active();
     let lasso_preview = matches!(self.state_lasso_phase, StateLassoPhase::Preview { .. });
+    let brush_active = self.state_brush_is_active();
     let Some(edit) = self.state_edit_session.as_ref() else {
       return StateActionAvailability::default();
     };
@@ -2276,17 +2366,18 @@ impl Canvas {
       state_view,
       lasso_active,
       lasso_preview,
+      brush_active,
       has_selection: !edit.selected_provinces().is_empty(),
-      has_target: edit.target_state_id().is_some(),
-      can_move: !lasso_active && edit.can_move_selection_to_target(),
-      can_unassign: !lasso_active && edit.can_unassign_selection(),
-      can_edit_properties: !lasso_active
+      has_target: edit.target_state_id().is_some_and(|state_id| edit.is_state_active(state_id)),
+      can_move: !lasso_active && !brush_active && edit.can_move_selection_to_target(),
+      can_unassign: !lasso_active && !brush_active && edit.can_unassign_selection(),
+      can_edit_properties: !lasso_active && !brush_active
         && self.active_state_id.is_some_and(|state_id| edit.is_state_active(state_id)),
-      can_edit_province_data: !lasso_active
+      can_edit_province_data: !lasso_active && !brush_active
         && self.active_province_id
           .is_some_and(|province_id| edit.editable_province_state(province_id).is_ok()),
-      can_create_state: !lasso_active,
-      can_remove_state: !lasso_active
+      can_create_state: !lasso_active && !brush_active,
+      can_remove_state: !lasso_active && !brush_active
         && self.active_state_id
           .is_some_and(|state_id| edit.validate_removable_state(state_id).is_ok()),
       property_editor_open: self.property_editor_is_open(),
@@ -2307,6 +2398,7 @@ impl Canvas {
       alerts.push(Err("State lasso is available only in the state map view"));
       return;
     }
+    self.deactivate_state_brush();
     if let Some(mode) = mode_override {
       self.state_lasso_mode = mode;
     }
@@ -2508,6 +2600,256 @@ impl Canvas {
     self.lasso_blocked_boundaries.clear();
   }
 
+  pub fn activate_state_brush(&mut self, mode: StateBrushMode, alerts: &mut Alerts) {
+    if self.property_draft_is_modified() {
+      alerts.push(Err("Apply or discard the modified draft before starting the State Brush"));
+      return;
+    }
+    self.discard_unmodified_property_draft();
+    let Some(edit) = self.state_edit_session.as_ref() else {
+      alerts.push(Err("State Brush is available only for loaded state projects"));
+      return;
+    };
+    if self.map_view_mode != MapViewMode::States {
+      alerts.push(Err("State Brush is available only in the state map view"));
+      return;
+    }
+    if edit.validate_brush_target(mode, edit.target_state_id()).is_err() {
+      alerts.push(Err("Select a valid target state before using the State Brush"));
+      return;
+    }
+    self.cancel_state_lasso();
+    self.clear_state_brush_preview();
+    self.state_brush_mode = mode;
+    self.state_brush_phase = StateBrushPhase::Ready;
+    self.refresh_state_information();
+    alerts.push(Ok(format!("State Brush ready: {}", mode.label())));
+  }
+
+  pub fn begin_state_brush(
+    &mut self,
+    interface: &Interface,
+    cursor_pos: Vector2<f64>,
+    alerts: &mut Alerts,
+  ) -> bool {
+    if !matches!(self.state_brush_phase, StateBrushPhase::Ready) {
+      return false;
+    }
+    if self.property_draft_is_modified() || self.state_lasso_is_active() {
+      alerts.push(Err("Resolve the active draft or lasso before using the State Brush"));
+      return false;
+    }
+    let Some(edit) = self.state_edit_session.as_ref() else { return false };
+    let target_state_id = match edit.validate_brush_target(
+      self.state_brush_mode,
+      edit.target_state_id(),
+    ) {
+      Ok(target_state_id) => target_state_id,
+      Err(_) => {
+        alerts.push(Err("Select a valid target state before using the State Brush"));
+        return false;
+      },
+    };
+    let map_position = self.camera.relative_position(interface, cursor_pos);
+    if !self.camera.within_dimensions(map_position) {
+      return false;
+    }
+    let mut stroke = StateBrushStroke {
+      mode: self.state_brush_mode,
+      target_state_id,
+      visited_provinces: BTreeSet::new(),
+      selectable_provinces: BTreeSet::new(),
+      no_op_provinces: BTreeSet::new(),
+      blocked_ambiguous: BTreeSet::new(),
+      blocked_invalid_state: BTreeSet::new(),
+      ignored_non_land: BTreeSet::new(),
+      encountered_unknown: false,
+      previous_map_position: map_position,
+      last_editable_province: None,
+      input_events: 1,
+      sampled_points: 0,
+      started: Instant::now(),
+    };
+    self.collect_state_brush_segment(&mut stroke, map_position);
+    self.state_brush_phase = StateBrushPhase::Stroking(Box::new(stroke));
+    self.refresh_state_brush_preview();
+    true
+  }
+
+  pub fn update_state_brush(&mut self, interface: &Interface, cursor_pos: Vector2<f64>) {
+    let map_position = self.camera.relative_position(interface, cursor_pos);
+    if !self.camera.within_dimensions(map_position) {
+      return;
+    }
+    let StateBrushPhase::Stroking(mut stroke) =
+      std::mem::take(&mut self.state_brush_phase)
+    else {
+      return;
+    };
+    stroke.input_events += 1;
+    let changed = self.collect_state_brush_segment(&mut stroke, map_position);
+    stroke.previous_map_position = map_position;
+    self.state_brush_phase = StateBrushPhase::Stroking(stroke);
+    if changed {
+      self.refresh_state_brush_preview();
+    }
+  }
+
+  pub fn finish_state_brush(&mut self, alerts: &mut Alerts) {
+    let StateBrushPhase::Stroking(stroke) =
+      std::mem::take(&mut self.state_brush_phase)
+    else {
+      return;
+    };
+    self.state_brush_phase = StateBrushPhase::Ready;
+    self.clear_state_brush_preview();
+
+    let changed = stroke.selectable_provinces.len();
+    let blocked = stroke.blocked_ambiguous.len() + stroke.blocked_invalid_state.len();
+    let ignored = stroke.ignored_non_land.len() + usize::from(stroke.encountered_unknown);
+    let collection_ms = stroke.started.elapsed().as_millis();
+    let province_ids = stroke.selectable_provinces.iter().copied().collect::<Vec<_>>();
+    if province_ids.is_empty() {
+      let message = format!(
+        "Stroke contained no editable provinces (no-op {}, blocked {}, ignored {}).",
+        stroke.no_op_provinces.len(),
+        blocked,
+        ignored,
+      );
+      self.last_state_brush_result = Some(message.clone());
+      self.refresh_state_information();
+      alerts.push(Err(message));
+      return;
+    }
+
+    let result = self.state_edit_session
+      .as_mut()
+      .ok_or_else(|| "State editing is available only for loaded state projects".to_owned())
+      .and_then(|edit| {
+        edit.reassign_provinces(&province_ids, stroke.target_state_id)
+          .map_err(|error| error.to_string())
+      });
+    match result {
+      Ok(()) => {
+        self.active_province_id = stroke.last_editable_province;
+        self.refresh_state_visuals();
+        let action = match stroke.mode {
+          StateBrushMode::AssignToTarget => format!(
+            "assigned {changed} provinces to State {}",
+            stroke.target_state_id.unwrap_or_default(),
+          ),
+          StateBrushMode::Unassign => format!("unassigned {changed} provinces"),
+        };
+        let timings = self.state_edit_session
+          .as_ref()
+          .map(StateEditSession::last_timings)
+          .unwrap_or_default();
+        let message = format!(
+          "State Brush {action}; {} events, {} samples, {} no-op, {blocked} blocked, \
+           {ignored} ignored; collection {collection_ms} ms, preflight {} us, apply {} us, \
+           visual {} {} ms.",
+          stroke.input_events,
+          stroke.sampled_points,
+          stroke.no_op_provinces.len(),
+          timings.command_preflight.as_micros(),
+          timings.command_apply.as_micros(),
+          self.last_state_visual_update_kind,
+          self.last_state_visual_update_ms,
+        );
+        println!("{message}");
+        self.last_state_brush_result = Some(message.clone());
+        self.refresh_state_information();
+        alerts.push(Ok(message));
+      },
+      Err(error) => {
+        let message = format!("Cannot apply State Brush: {error}");
+        self.last_state_brush_result = Some(message.clone());
+        self.refresh_state_information();
+        alerts.push(Err(message));
+      },
+    }
+  }
+
+  pub fn cancel_state_brush(&mut self) -> bool {
+    match std::mem::take(&mut self.state_brush_phase) {
+      StateBrushPhase::Inactive => return false,
+      StateBrushPhase::Ready => self.state_brush_phase = StateBrushPhase::Inactive,
+      StateBrushPhase::Stroking(_) => self.state_brush_phase = StateBrushPhase::Ready,
+    }
+    self.clear_state_brush_preview();
+    self.refresh_state_information();
+    true
+  }
+
+  fn deactivate_state_brush(&mut self) {
+    self.state_brush_phase = StateBrushPhase::Inactive;
+    self.clear_state_brush_preview();
+  }
+
+  fn collect_state_brush_segment(
+    &self,
+    stroke: &mut StateBrushStroke,
+    current_map_position: Vector2<f64>,
+  ) -> bool {
+    let Some(edit) = self.state_edit_session.as_ref() else { return false };
+    let mut changed = false;
+    for position in sample_segment(
+      stroke.previous_map_position,
+      current_map_position,
+      1.0,
+      self.bundle.map.dimensions(),
+    ) {
+      stroke.sampled_points += 1;
+      let province = self.bundle.map.get_province_at(position);
+      let Some(province_id) = province.preserved_id else {
+        stroke.encountered_unknown = true;
+        continue;
+      };
+      if !stroke.visited_provinces.insert(province_id) {
+        continue;
+      }
+      changed = true;
+      match edit.classify_brush_province(province_id, stroke.mode, stroke.target_state_id) {
+        BrushProvinceClassification::Selectable => {
+          stroke.selectable_provinces.insert(province_id);
+          stroke.last_editable_province = Some(province_id);
+        },
+        BrushProvinceClassification::NoOp => {
+          stroke.no_op_provinces.insert(province_id);
+          stroke.last_editable_province = Some(province_id);
+        },
+        BrushProvinceClassification::IgnoredNonLand => {
+          stroke.ignored_non_land.insert(province_id);
+        },
+        BrushProvinceClassification::BlockedAmbiguous => {
+          stroke.blocked_ambiguous.insert(province_id);
+        },
+        BrushProvinceClassification::BlockedInvalidState => {
+          stroke.blocked_invalid_state.insert(province_id);
+        },
+        BrushProvinceClassification::Unknown => stroke.encountered_unknown = true,
+      }
+    }
+    changed
+  }
+
+  fn refresh_state_brush_preview(&mut self) {
+    let StateBrushPhase::Stroking(stroke) = &self.state_brush_phase else { return };
+    let selectable = stroke.selectable_provinces.clone();
+    let blocked = stroke.blocked_ambiguous
+      .union(&stroke.blocked_invalid_state)
+      .copied()
+      .collect();
+    self.brush_preview_boundaries = self.boundaries_for_provinces(&selectable);
+    self.brush_blocked_boundaries = self.boundaries_for_provinces(&blocked);
+    self.refresh_state_information();
+  }
+
+  fn clear_state_brush_preview(&mut self) {
+    self.brush_preview_boundaries.clear();
+    self.brush_blocked_boundaries.clear();
+  }
+
   pub fn select_state_at(
     &mut self,
     interface: &Interface,
@@ -2594,6 +2936,7 @@ impl Canvas {
     if self.property_draft_is_modified() {
       return false;
     }
+    self.deactivate_state_brush();
     self.discard_unmodified_property_draft();
     if let Some(edit) = self.state_edit_session.as_mut()
       && edit.clear_selected_provinces()
@@ -2698,6 +3041,8 @@ impl Canvas {
       edit.discard();
       self.state_lasso_phase = StateLassoPhase::Inactive;
       self.clear_state_lasso_preview_visuals();
+      self.deactivate_state_brush();
+      self.last_state_brush_result = None;
       self.state_selection = None;
       self.active_state_id = None;
       self.active_province_id = None;
@@ -2775,6 +3120,9 @@ impl Canvas {
 
   fn repair_active_state_after_history(&mut self) {
     let Some(edit) = self.state_edit_session.as_ref() else { return };
+    let brush_target_is_invalid = self.state_brush_mode == StateBrushMode::AssignToTarget
+      && self.state_brush_is_active()
+      && !edit.target_state_id().is_some_and(|state_id| edit.is_state_active(state_id));
     if self.active_state_id.is_some_and(|state_id| !edit.is_state_active(state_id)) {
       self.active_state_id = edit.target_state_id();
     }
@@ -2785,6 +3133,9 @@ impl Canvas {
       self.state_selection = None;
       self.selection_texture = None;
       self.selected_state_boundaries.clear();
+    }
+    if brush_target_is_invalid {
+      self.deactivate_state_brush();
     }
   }
 
@@ -2911,20 +3262,21 @@ impl Canvas {
     &self,
     province_ids: &BTreeSet<u32>
   ) -> Vec<UOrd<Vector2<u32>>> {
-    if province_ids.is_empty() {
-      Vec::new()
-    } else {
-      self.bundle.map.iter_boundaries()
-        .filter_map(|(boundary, _)| {
-          let [a, b] = boundary.into_array();
-          let a_selected = self.bundle.map.get_province_at(a).preserved_id
-            .is_some_and(|id| province_ids.contains(&id));
-          let b_selected = self.bundle.map.get_province_at(b).preserved_id
-            .is_some_and(|id| province_ids.contains(&id));
-          (a_selected != b_selected).then_some(boundary)
-        })
-        .collect()
-    }
+    province_ids.iter()
+      .filter_map(|province_id| self.province_boundaries.get(province_id))
+      .flatten()
+      .copied()
+      .collect::<BTreeSet<_>>()
+      .into_iter()
+      .filter(|boundary| {
+        let [a, b] = boundary.into_array();
+        let a_selected = self.bundle.map.get_province_at(a).preserved_id
+          .is_some_and(|id| province_ids.contains(&id));
+        let b_selected = self.bundle.map.get_province_at(b).preserved_id
+          .is_some_and(|id| province_ids.contains(&id));
+        a_selected != b_selected
+      })
+      .collect()
   }
 
   fn refresh_state_target_overlay(&mut self) {
@@ -3008,6 +3360,48 @@ impl Canvas {
     Some(text)
   }
 
+  fn state_brush_status_text(&self) -> Option<String> {
+    let edit = self.state_edit_session.as_ref()?;
+    let target = match self.state_brush_mode {
+      StateBrushMode::AssignToTarget => edit.target_state_id()
+        .and_then(|state_id| {
+          let name = edit.state_data(state_id)?.name
+            .unwrap_or_else(|| "<unnamed>".to_owned());
+          Some(format!("State {state_id} — {name}"))
+        })
+        .unwrap_or_else(|| "No valid target".to_owned()),
+      StateBrushMode::Unassign => "Unassigned land".to_owned(),
+    };
+    let text = match &self.state_brush_phase {
+      StateBrushPhase::Inactive => format!(
+        "State Brush: Inactive | Mode: {} | Target: {target}\n\
+         Controls: B activate Assign | State Brush menu selects Unassign",
+        self.state_brush_mode.label(),
+      ),
+      StateBrushPhase::Ready => format!(
+        "State Brush: Ready | Mode: {} | Target: {target}\n\
+         Left click/drag previews; release applies one command; Esc deactivates",
+        self.state_brush_mode.label(),
+      ),
+      StateBrushPhase::Stroking(stroke) => format!(
+        "State Brush: Stroking | Mode: {} | Target: {target}\n\
+         Will change: {} | No-op: {} | Blocked: {} | Ignored: {} | Events: {} | Samples: {}\n\
+         Release applies once; Esc cancels without changing the session",
+        stroke.mode.label(),
+        stroke.selectable_provinces.len(),
+        stroke.no_op_provinces.len(),
+        stroke.blocked_ambiguous.len() + stroke.blocked_invalid_state.len(),
+        stroke.ignored_non_land.len() + usize::from(stroke.encountered_unknown),
+        stroke.input_events,
+        stroke.sampled_points,
+      ),
+    };
+    Some(match self.last_state_brush_result.as_deref() {
+      Some(result) => format!("{text}\nLast stroke: {result}"),
+      None => text,
+    })
+  }
+
   fn refresh_state_information(&mut self) {
     self.project_status = self.project.as_ref().map(|project| {
       project_status_message_with_session(
@@ -3044,7 +3438,8 @@ impl Canvas {
     });
     let status = self.state_edit_status_text();
     let lasso = self.state_lasso_status_text();
-    self.selection_info = [province_details, details, status, lasso]
+    let brush = self.state_brush_status_text();
+    self.selection_info = [province_details, details, status, lasso, brush]
       .into_iter()
       .flatten()
       .join("\n")
@@ -3052,6 +3447,7 @@ impl Canvas {
   }
 
   pub fn set_tool_mode(&mut self, mode: ToolMode) {
+    self.deactivate_state_brush();
     self.tool.mode = mode;
   }
 

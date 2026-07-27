@@ -70,6 +70,16 @@ created, deleted, renamed, or written.
   history. A later Move or Unassign passes the confirmed province IDs to the
   same transactional command used by Ctrl+click selection, producing one
   undo entry for the whole batch.
+- The State Brush is separate from geographic painting. In state view, `B`
+  activates Assign mode for the current target state, and the State Brush menu can
+  activate Assign or Unassign. The brush samples cursor movement in map
+  coordinates, previews whole province IDs, and applies only on mouse release.
+  Each stroke produces at most one `ReassignProvinces` command; no-op provinces
+  are skipped, sea/lake/ID-zero provinces are ignored, and ambiguous or invalid
+  states are blocked.
+- State Brush assignment and unassignment reuse the same province reassignment
+  command as Move/Unassign, so victory points and province buildings follow the
+  province and Undo/Redo restore the full stroke atomically.
 - The Edit menu opens an explicit temporary property draft for a valid selected
   state. General values, owner/controller, cores, claims, resources, and
   state-level buildings are validated and enter the working session only after

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use crate::app::map::{Map, ProvinceKind};
 use crate::app::project::{DiagnosticSeverity, Hoi4Project, ProjectDiagnostic, ProjectDiagnosticKind};
 use crate::app::state::{StateData, VictoryPoint};
+use super::brush::{BrushProvinceClassification, StateBrushMode};
 use super::lasso::LassoSelectionMode;
 use super::properties::{EditableProvinceData, EditableStateProperties};
 
@@ -441,6 +442,54 @@ impl StateEditSession {
     }
     self.target_state_id = state_id;
     Ok(())
+  }
+
+  pub fn validate_brush_target(
+    &self,
+    mode: StateBrushMode,
+    target_state_id: Option<u32>,
+  ) -> Result<Option<u32>, StateEditError> {
+    match mode {
+      StateBrushMode::AssignToTarget => {
+        let state_id = target_state_id.ok_or(StateEditError::TargetStateInvalid(0))?;
+        self.validate_target_state(state_id)?;
+        Ok(Some(state_id))
+      },
+      StateBrushMode::Unassign => Ok(None),
+    }
+  }
+
+  pub fn classify_brush_province(
+    &self,
+    province_id: u32,
+    mode: StateBrushMode,
+    target_state_id: Option<u32>,
+  ) -> BrushProvinceClassification {
+    if province_id == 0 {
+      return BrushProvinceClassification::IgnoredNonLand;
+    }
+    match self.province_kinds.get(&province_id) {
+      Some(ProvinceKind::Land) => {},
+      Some(_) => return BrushProvinceClassification::IgnoredNonLand,
+      None => return BrushProvinceClassification::Unknown,
+    }
+    if self.ambiguous_provinces.contains(&province_id) {
+      return BrushProvinceClassification::BlockedAmbiguous;
+    }
+    if let Some(state_id) = self.working.state_by_province.get(&province_id)
+      && !self.valid_state_ids.contains(state_id)
+    {
+      return BrushProvinceClassification::BlockedInvalidState;
+    }
+    let destination = match mode {
+      StateBrushMode::AssignToTarget => target_state_id,
+      StateBrushMode::Unassign => None,
+    };
+    if self.working.state_by_province.get(&province_id).copied() == destination {
+      BrushProvinceClassification::NoOp
+    } else {
+      BrushProvinceClassification::Selectable
+    }
   }
 
   pub fn set_visual_timings(&mut self, texture: Duration, boundaries: Duration) {
@@ -1920,6 +1969,125 @@ mod tests {
     edit.discard();
     assert!(!edit.is_dirty());
 
+    let brush_state_id = edit.suggest_next_state_id();
+    edit.create_state(
+      brush_state_id,
+      EditableStateProperties {
+        name: Some("Phase 3D Brush Smoke".into()),
+        buildings_max_level_factor: Some(1.0),
+        local_supplies: Some(0.0),
+        ..Default::default()
+      },
+      false,
+    ).unwrap();
+    assert_eq!(
+      edit.validate_brush_target(StateBrushMode::AssignToTarget, Some(brush_state_id)),
+      Ok(Some(brush_state_id))
+    );
+    assert_eq!(
+      edit.classify_brush_province(5144, StateBrushMode::AssignToTarget, Some(brush_state_id)),
+      BrushProvinceClassification::Selectable
+    );
+    edit.reassign_provinces(&[5144], Some(brush_state_id)).unwrap();
+    assert_eq!(edit.province_state_id(5144), Some(brush_state_id));
+    assert_eq!(edit.province_data(5144).unwrap().victory_point, Some(5));
+    assert_eq!(edit.summary().commands, 2);
+    assert!(edit.undo());
+    assert_eq!(edit.province_state_id(5144), Some(1));
+    assert!(edit.undo());
+    assert!(!edit.is_state_active(brush_state_id));
+    assert!(edit.redo());
+    assert!(edit.redo());
+    assert_eq!(edit.province_state_id(5144), Some(brush_state_id));
+    assert_eq!(
+      edit.classify_brush_province(5144, StateBrushMode::AssignToTarget, Some(brush_state_id)),
+      BrushProvinceClassification::NoOp
+    );
+
+    let dimensions = bundle.map.dimensions();
+    let mut drag = (
+      Vec::new(),
+      Vec::new(),
+      BTreeSet::new(),
+      [0_usize; 4],
+      0_usize,
+      Duration::default(),
+    );
+    for row in 0..=16 {
+      let y = dimensions[1].saturating_sub(1) * row / 16;
+      let collection_started = Instant::now();
+      let samples = crate::app::project::sample_segment(
+        [0.0, y as f64],
+        [dimensions[0].saturating_sub(1) as f64, y as f64],
+        1.0,
+        dimensions,
+      );
+      assert!(samples.windows(2).all(|pair| {
+        pair[0][0].abs_diff(pair[1][0]) <= 1 && pair[0][1].abs_diff(pair[1][1]) <= 1
+      }));
+      let mut selectable = BTreeSet::new();
+      let mut visited = BTreeSet::new();
+      let mut counts = [0_usize; 4];
+      for &position in &samples {
+        let Some(province_id) = bundle.map.get_province_at(position).preserved_id else {
+          counts[3] += 1;
+          continue;
+        };
+        if !visited.insert(province_id) {
+          continue;
+        }
+        match edit.classify_brush_province(
+          province_id,
+          StateBrushMode::AssignToTarget,
+          Some(brush_state_id),
+        ) {
+          BrushProvinceClassification::Selectable => {
+            selectable.insert(province_id);
+          },
+          BrushProvinceClassification::NoOp => counts[0] += 1,
+          BrushProvinceClassification::IgnoredNonLand => counts[1] += 1,
+          BrushProvinceClassification::BlockedAmbiguous
+          | BrushProvinceClassification::BlockedInvalidState => counts[2] += 1,
+          BrushProvinceClassification::Unknown => counts[3] += 1,
+        }
+      }
+      if selectable.len() > drag.2.len() {
+        let collection_elapsed = collection_started.elapsed();
+        let visited_count = visited.len();
+        drag = (
+          samples,
+          selectable.iter().copied().take(64).collect(),
+          selectable,
+          counts,
+          visited_count,
+          collection_elapsed,
+        );
+      }
+    }
+    assert!(drag.1.len() >= 2, "expected a sampled path through multiple editable provinces");
+    let drag_commands_before = edit.summary().commands;
+    let drag_started = Instant::now();
+    edit.reassign_provinces(&drag.1, Some(brush_state_id)).unwrap();
+    let drag_elapsed = drag_started.elapsed();
+    let drag_timings = edit.last_timings();
+    assert_eq!(edit.summary().commands, drag_commands_before + 1);
+    assert!(drag.1.iter().all(|province_id| edit.province_state_id(*province_id) == Some(brush_state_id)));
+    assert!(edit.undo());
+    assert!(edit.redo());
+
+    let mut unassign_ids = drag.1.clone();
+    unassign_ids.push(5144);
+    let unassign_commands_before = edit.summary().commands;
+    edit.reassign_provinces(&unassign_ids, None).unwrap();
+    assert_eq!(edit.summary().commands, unassign_commands_before + 1);
+    assert!(unassign_ids.iter().all(|province_id| edit.province_state_id(*province_id).is_none()));
+    assert_eq!(edit.province_data(5144).unwrap().victory_point, Some(5));
+    assert!(edit.undo());
+    assert_eq!(edit.province_state_id(5144), Some(brush_state_id));
+    edit.discard();
+    assert_eq!(edit.province_state_id(5144), Some(1));
+    assert!(!edit.is_dirty());
+
     let ambiguous_provinces = project.ambiguous_provinces.keys().copied().collect::<BTreeSet<_>>();
     let measure_visual = |edit: &StateEditSession| {
       let view = generate_state_view_for(
@@ -1986,12 +2154,30 @@ mod tests {
        custom_test_building=2, move target State {valverde_target}, unassign/undo/discard passed.\n\
        Real-mod Phase 3C smoke: suggested/created State {suggested_state_id}, Province 5144 \
        followed create/remove, loaded State 1 unassign/undo returned to baseline.\n\
+       Real-mod Phase 3D brush smoke: empty State {brush_state_id} accepted Province 5144, \
+       no-op classification, drag with {} input events / {} samples / {} unique editable \
+       provinces ({} applied) / {} visited / {} no-op / {} ignored / {} blocked / {} unknown, \
+       one command, Unassign, Undo/Redo and Discard returned to baseline; \
+       collection {:?}, transaction {:?}, preflight {:?}, apply {:?}.\n\
        Real-mod smoke candidate: province {source_id} at {source_pos:?} \
        (state {source_state}) -> adjacent province {target_id} at {target_pos:?} \
        (state {target_state}); timings: {:?}; visual refreshes: \
        move={move_visual:?}, undo={undo_visual:?}, redo={redo_visual:?}, \
        discard={discard_visual:?}, unassign={unassign_visual:?}, \
        unassign-undo={unassign_undo_visual:?}",
+      2,
+      drag.0.len(),
+      drag.2.len(),
+      drag.1.len(),
+      drag.4,
+      drag.3[0],
+      drag.3[1],
+      drag.3[2],
+      drag.3[3],
+      drag.5,
+      drag_elapsed,
+      drag_timings.command_preflight,
+      drag_timings.command_apply,
       edit.last_timings(),
     );
   }
@@ -2027,6 +2213,78 @@ mod tests {
     );
     assert_eq!(edit.working, before);
     assert!(edit.undo_stack.is_empty());
+  }
+
+  #[test]
+  fn state_brush_classifies_samples_and_reuses_atomic_reassign() {
+    let samples = crate::app::project::sample_segment([0.0, 0.0], [3.0, 0.0], 1.0, [10, 10]);
+    assert_eq!(samples, vec![[0, 0], [1, 0], [2, 0], [3, 0]]);
+
+    let mut edit = session();
+    edit.ambiguous_provinces.insert(12);
+    edit.working.state_by_province.insert(20, 99);
+    let preview_working = edit.working.clone();
+    let preview_commands = edit.summary().commands;
+    assert_eq!(
+      edit.classify_brush_province(10, StateBrushMode::AssignToTarget, Some(2)),
+      BrushProvinceClassification::Selectable
+    );
+    assert_eq!(
+      edit.classify_brush_province(30, StateBrushMode::AssignToTarget, Some(2)),
+      BrushProvinceClassification::NoOp
+    );
+    assert_eq!(
+      edit.classify_brush_province(40, StateBrushMode::AssignToTarget, Some(2)),
+      BrushProvinceClassification::IgnoredNonLand
+    );
+    assert_eq!(
+      edit.classify_brush_province(0, StateBrushMode::AssignToTarget, Some(2)),
+      BrushProvinceClassification::IgnoredNonLand
+    );
+    assert_eq!(
+      edit.classify_brush_province(12, StateBrushMode::AssignToTarget, Some(2)),
+      BrushProvinceClassification::BlockedAmbiguous
+    );
+    assert_eq!(
+      edit.classify_brush_province(20, StateBrushMode::AssignToTarget, Some(2)),
+      BrushProvinceClassification::BlockedInvalidState
+    );
+    assert_eq!(
+      edit.classify_brush_province(999, StateBrushMode::AssignToTarget, Some(2)),
+      BrushProvinceClassification::Unknown
+    );
+    assert_eq!(
+      edit.classify_brush_province(10, StateBrushMode::Unassign, None),
+      BrushProvinceClassification::Selectable
+    );
+    assert!(edit.validate_brush_target(StateBrushMode::AssignToTarget, None).is_err());
+    assert_eq!(edit.validate_brush_target(StateBrushMode::Unassign, None), Ok(None));
+    assert_eq!(edit.working, preview_working);
+    assert_eq!(edit.summary().commands, preview_commands);
+
+    edit.working.state_by_province.remove(&20);
+    edit.ambiguous_provinces.remove(&12);
+    edit.create_state(3, EditableStateProperties::default(), false).unwrap();
+    assert_eq!(edit.validate_brush_target(StateBrushMode::AssignToTarget, Some(3)), Ok(Some(3)));
+    edit.working.province_buildings_by_state.entry(3).or_default()
+      .insert(11, BTreeMap::from([("dockyard".into(), 1)]));
+    let before = edit.working.clone();
+    assert_eq!(
+      edit.reassign_provinces(&[10, 11], Some(3)).unwrap_err(),
+      StateEditError::ProvincialDataConflict { province_id: 11, target_state_id: 3 }
+    );
+    assert_eq!(edit.working, before);
+
+    edit.working.province_buildings_by_state.get_mut(&3).unwrap().remove(&11);
+    edit.reassign_provinces(&[10, 11, 30], Some(3)).unwrap();
+    assert_eq!(edit.undo_stack.len(), 2);
+    assert_eq!(edit.province_state_id(10), Some(3));
+    assert_eq!(edit.province_data(10).unwrap().victory_point, Some(5));
+    assert_eq!(edit.province_data(11).unwrap().buildings["bunker"], 2);
+    assert!(edit.undo());
+    assert_eq!(edit.province_state_id(10), Some(1));
+    assert!(edit.redo());
+    assert_eq!(edit.province_state_id(10), Some(3));
   }
 
   #[test]

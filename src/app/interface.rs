@@ -650,6 +650,9 @@ pub enum ButtonId {
   ToolbarEditStateLassoMajority,
   ToolbarEditConfirmStateLasso,
   ToolbarEditCancelStateLasso,
+  ToolbarEditActivateStateBrushAssign,
+  ToolbarEditActivateStateBrushUnassign,
+  ToolbarEditCancelStateBrush,
   ToolbarEditMoveSelectedToTarget,
   ToolbarEditUnassignSelected,
   ToolbarEditClearStateSelection,
@@ -689,6 +692,7 @@ pub struct StateActionAvailability {
   pub state_view: bool,
   pub lasso_active: bool,
   pub lasso_preview: bool,
+  pub brush_active: bool,
   pub has_selection: bool,
   pub has_target: bool,
   pub can_move: bool,
@@ -732,6 +736,13 @@ impl StateActionAvailability {
       | ToolbarEditStateLassoMajority => self.state_view,
       ToolbarEditConfirmStateLasso => self.lasso_preview,
       ToolbarEditCancelStateLasso => self.lasso_active,
+      ToolbarEditActivateStateBrushAssign => {
+        self.state_view && self.has_target && !self.property_editor_open
+      },
+      ToolbarEditActivateStateBrushUnassign => {
+        self.state_view && !self.property_editor_open
+      },
+      ToolbarEditCancelStateBrush => self.brush_active,
       ToolbarEditMoveSelectedToTarget => self.state_view && self.can_move,
       ToolbarEditUnassignSelected => self.state_view && self.can_unassign,
       ToolbarEditClearStateSelection => self.state_view && self.has_selection,
@@ -790,6 +801,11 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
     ("Inclusion: Majority", "", ButtonId::ToolbarEditStateLassoMajority),
     ("Confirm Selection", "Enter", ButtonId::ToolbarEditConfirmStateLasso),
     ("Cancel", "Esc", ButtonId::ToolbarEditCancelStateLasso)
+  ]),
+  ("State Brush", &[
+    ("Activate: Assign to target", "B", ButtonId::ToolbarEditActivateStateBrushAssign),
+    ("Activate: Unassign", "", ButtonId::ToolbarEditActivateStateBrushUnassign),
+    ("Cancel stroke / deactivate", "Esc", ButtonId::ToolbarEditCancelStateBrush)
   ]),
   ("View", &[
     ("Color/Province Map View Mode", "1", ButtonId::ToolbarViewMode1),
