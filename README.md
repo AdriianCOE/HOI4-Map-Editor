@@ -1,4 +1,5 @@
 # HOI4 Map Editor
+[Latest Release](https://github.com/AdriianCOE/hoi4_state_editor/releases/latest)
 
 An unofficial visual editor for Hearts of Iron IV province maps and state
 history files.
@@ -9,6 +10,9 @@ and extends it with state editing, political views, validation, backups, and
 transactional file updates.
 
 > Preview software: keep an independent backup of every mod you edit.
+
+![Province Map Mode](images/hoi4me_color.png)
+![Terrain Map Mode](images/hoi4me_state.png)
 
 ## Features
 
