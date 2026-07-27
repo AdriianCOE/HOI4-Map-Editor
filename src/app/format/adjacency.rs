@@ -186,12 +186,19 @@ fn stringify_maybe_pos(pos: Option<[u32; 2]>) -> [String; 2] {
 
 #[cfg(test)]
 mod tests {
-  use super::{Adjacency, ParseCsv};
+  use super::{Adjacency, AdjacencyKind, ParseCsv};
 
   #[test]
   fn test_adjacency() {
     const SAMPLE: &str = include_str!("./samples/adjacencies.csv");
     let adjacencies = Adjacency::read_records(SAMPLE.as_bytes()).unwrap();
-    assert_eq!(adjacencies.len(), 233);
+    assert_eq!(adjacencies.len(), 2);
+    assert_eq!(adjacencies[0].kind, AdjacencyKind::Sea);
+    assert_eq!(adjacencies[0].through, Some(3));
+    assert_eq!(adjacencies[0].start, None);
+    assert_eq!(adjacencies[1].kind, AdjacencyKind::Impassable);
+    assert_eq!(adjacencies[1].start, Some([10, 20]));
+    assert_eq!(adjacencies[1].stop, Some([30, 40]));
+    assert_eq!(adjacencies[1].rule_name, "SYNTHETIC_RULE");
   }
 }

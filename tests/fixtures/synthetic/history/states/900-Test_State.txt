@@ -1,0 +1,33 @@
+state = {
+    id = 900
+    name = "TEST_STATE"
+    manpower = 12000
+    state_category = synthetic_category
+
+    resources = {
+        test_metal = 3
+        test_fuel = 2
+    }
+
+    provinces = {
+        101 102 103 104
+    }
+
+    history = {
+        owner = TST
+        add_core_of = TST
+
+        victory_points = {
+            101 5
+            103 10
+        }
+
+        buildings = {
+            infrastructure = 2
+            industrial_complex = 1
+            103 = {
+                naval_base = 1
+            }
+        }
+    }
+}

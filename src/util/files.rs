@@ -427,15 +427,6 @@ impl ZipArchiveFilesMap {
     Ok(())
   }
 
-  #[deprecated]
-  pub fn edit<F>(mut source: File, callback: F) -> Result<(), Error>
-  where F: FnOnce(&mut Self) -> Result<(), Error> {
-    let mut zip_archive_files_map = Self::from_reader(&mut source)?;
-    callback(&mut zip_archive_files_map)?;
-    truncate_file(&source)?;
-    zip_archive_files_map.to_writer(&mut source)?;
-    Ok(())
-  }
 }
 
 impl Deref for ZipArchiveFilesMap {
@@ -450,24 +441,6 @@ impl DerefMut for ZipArchiveFilesMap {
   fn deref_mut(&mut self) -> &mut Self::Target {
     &mut self.map
   }
-}
-
-#[deprecated]
-pub fn create_or_edit_zip<F>(path: impl Into<PathBuf>, callback: F) -> Result<(), Error>
-where F: FnOnce(&mut ZipArchiveFilesMap) -> Result<(), Error> {
-  let path = path.into();
-  let mut zip_archive_files_map = ZipArchiveFilesMap::from_fs(&path)?;
-  callback(&mut zip_archive_files_map)?;
-  zip_archive_files_map.to_fs(path)?;
-  Ok(())
-}
-
-
-
-pub fn truncate_file(mut file: &File) -> Result<(), FilesError> {
-  file.seek(io::SeekFrom::Start(0)).context("failed to truncate file")?;
-  file.set_len(0).context("failed to truncate file")?;
-  Ok(())
 }
 
 pub fn open_file(path: impl Into<PathBuf>) -> Result<File, FilesError> {
