@@ -15,11 +15,7 @@ pub const UNKNOWN_PROVINCE_COLOR: Color = [0xff, 0x88, 0x00];
 pub const STATE_BOUNDARY_COLOR: Color = [0x12, 0x12, 0x12];
 pub const SELECTED_STATE_COLOR: Color = [0xff, 0xff, 0xff];
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum MapViewMode {
-  Provinces,
-  States,
-}
+pub use crate::app::map_layers::MapBaseView as MapViewMode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateSelection {
@@ -72,7 +68,7 @@ pub fn generate_state_view_for(
   unassigned_land_provinces: &BTreeSet<u32>,
 ) -> StateMapViewData {
   let started = Instant::now();
-  let mut image = map.gen_texture_buffer(|province_color| {
+  let image = map.gen_texture_buffer(|province_color| {
     let province = map.get_province(province_color);
     classify_province_color_for(
       province.preserved_id,
@@ -86,16 +82,6 @@ pub fn generate_state_view_for(
 
   let boundary_started = Instant::now();
   let state_boundaries = collect_state_boundaries_for(map, state_by_province);
-  for boundary in &state_boundaries {
-    for [x, y] in boundary.into_array() {
-      image.put_pixel(x, y, Rgba([
-        STATE_BOUNDARY_COLOR[0],
-        STATE_BOUNDARY_COLOR[1],
-        STATE_BOUNDARY_COLOR[2],
-        0xff,
-      ]));
-    }
-  }
   let boundary_scan_in = boundary_started.elapsed();
 
   StateMapViewData {
@@ -114,7 +100,7 @@ pub fn generate_state_view_region_for(
   extents: Extents,
 ) -> StateMapRegionData {
   let started = Instant::now();
-  let mut image = map.gen_texture_buffer_selective(extents, |province_color| {
+  let image = map.gen_texture_buffer_selective(extents, |province_color| {
     let province = map.get_province(province_color);
     classify_province_color_for(
       province.preserved_id,
@@ -135,22 +121,6 @@ pub fn generate_state_view_region_for(
         .then_some(boundary)
     })
     .collect::<Vec<_>>();
-  for boundary in &state_boundaries {
-    for [x, y] in boundary.into_array() {
-      if extents.contains([x, y]) {
-        image.put_pixel(
-          x - extents.lower[0],
-          y - extents.lower[1],
-          Rgba([
-            STATE_BOUNDARY_COLOR[0],
-            STATE_BOUNDARY_COLOR[1],
-            STATE_BOUNDARY_COLOR[2],
-            0xff,
-          ])
-        );
-      }
-    }
-  }
   let boundary_scan_in = boundary_started.elapsed();
 
   StateMapRegionData {
@@ -564,7 +534,7 @@ mod tests {
         province_id: 10
       }
     );
-    view_mode = MapViewMode::Provinces;
-    assert_eq!(view_mode, MapViewMode::Provinces);
+    view_mode = MapViewMode::ProvinceColors;
+    assert_eq!(view_mode, MapViewMode::ProvinceColors);
   }
 }

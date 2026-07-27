@@ -3,7 +3,7 @@ name = "hoi4_state_editor"
 version = "0.1.0"
 authors = ["ScottyThePilot <scotty.codes@gmail.com>", "AdriianCOE"]
 edition = "2024"
-description = "Graphical state editor for Hearts of Iron IV mods"
+description = "Visual province-map and state-history editor for Hearts of Iron IV mods"
 readme = "README.md"
 repository = "https://github.com/AdriianCOE/hoi4_state_editor"
 license = "MIT"
@@ -18,7 +18,7 @@ dunce = { version = "1.0" }
 fs-err = { version = "3.1.2" }
 geo = { version = "0.20" }
 glutin = { version = "0.26" }
-image = { version = "~0.24.9", features = ["bmp", "png", "rayon"], default-features = false }
+image = { version = "~0.24.9", features = ["bmp", "jpeg", "png", "rayon"], default-features = false }
 itertools = { version = "0.10" }
 once_cell = { version = "1.21" }
 piston = { version = "0.53" }

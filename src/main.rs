@@ -26,7 +26,10 @@ const WINDOW_HEIGHT_DEFAULT: u32 = 720;
 const WINDOW_WIDTH_MIN: u32 = 384;
 const WINDOW_HEIGHT_MIN: u32 = 256;
 
-pub const APPNAME: &str = concat!("HOI4 State Editor v", env!("CARGO_PKG_VERSION"));
+pub const PRODUCT_NAME: &str = "HOI4 Map Editor";
+pub const PRODUCT_SUBTITLE: &str = "Province and State Editing Toolkit";
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const APPNAME: &str = concat!("HOI4 Map Editor v", env!("CARGO_PKG_VERSION"));
 
 fn main() {
   install_handler();
@@ -63,12 +66,28 @@ use std::io::prelude::*;
 
 fn write_application_info(mut out: impl Write) -> Result<(), std::io::Error> {
   writeln!(out, "Application: {}", APPNAME)?;
-  writeln!(out, "Version: v{}", env!("CARGO_PKG_VERSION"))?;
+  writeln!(out, "Version: v{}", APP_VERSION)?;
+  writeln!(out, "Operating System: {}", env::consts::OS)?;
+  writeln!(out, "Architecture: {}", env::consts::ARCH)?;
   writeln!(out, "Debug Assertions Enabled: {:?}", cfg!(debug_assertions))?;
   writeln!(out, "Debug Mode Feature Enabled: {:?}", cfg!(feature = "debug-mode"))?;
   writeln!(out)?;
 
   Ok(())
+}
+
+pub(crate) fn diagnostic_summary() -> String {
+  let mut output = Vec::new();
+  write_application_info(&mut output).expect("writing application info to memory cannot fail");
+  String::from_utf8(output).expect("application information is valid UTF-8")
+}
+
+pub(crate) fn log_directory() -> PathBuf {
+  env::var_os("LOCALAPPDATA")
+    .map(PathBuf::from)
+    .unwrap_or_else(env::temp_dir)
+    .join("HOI4MapEditor")
+    .join("logs")
 }
 
 fn install_handler() {
@@ -97,7 +116,11 @@ fn install_handler() {
     // only write panic info to file if not on dev profile
     if cfg!(not(debug_assertions)) {
       let now = Local::now().format("%Y%m%d_%H%M%S");
-      match File::create(format!("crash_{}.log", now)) {
+      let log_dir = log_directory();
+      let log_path = log_dir.join(format!("crash_{}.log", now));
+      let create_result = std::fs::create_dir_all(&log_dir)
+        .and_then(|_| File::create(&log_path));
+      match create_result {
         Ok(out_file) => {
           if let Err(err) = write_application_info(&out_file) {
             eprintln!("Error while printing application info: {err:?}");
@@ -107,8 +130,22 @@ fn install_handler() {
             eprintln!("Error while printing panic: {err:?}");
           };
         },
-        Err(e) => eprintln!("Error creating crash log: {:?}", e)
+        Err(e) => eprintln!("Error creating crash log at {}: {:?}", log_path.display(), e)
       };
     };
   }));
+}
+
+#[cfg(test)]
+mod branding_tests {
+  use super::{APPNAME, APP_VERSION, PRODUCT_NAME, diagnostic_summary, log_directory};
+
+  #[test]
+  fn public_window_title_uses_map_editor_branding_without_version_bump() {
+    assert_eq!(APPNAME, "HOI4 Map Editor v0.1.0");
+    assert_eq!(PRODUCT_NAME, "HOI4 Map Editor");
+    assert_eq!(APP_VERSION, env!("CARGO_PKG_VERSION"));
+    assert!(diagnostic_summary().contains("Operating System:"));
+    assert!(log_directory().ends_with("HOI4MapEditor\\logs"));
+  }
 }
