@@ -240,6 +240,19 @@ impl StatePropertyDraft {
         }
     }
 
+    pub fn restore_field(&mut self, index: usize) -> bool {
+        if index < Self::TEXT_FIELD_COUNT {
+            let original = self.original.fields[index].clone();
+            *self.field_mut(index).unwrap() = original;
+            return true;
+        }
+        if index == Self::TEXT_FIELD_COUNT {
+            self.impassable = self.original.impassable;
+            return true;
+        }
+        false
+    }
+
     pub fn validate(&self) -> Result<EditableStateProperties, Vec<PropertyValidationError>> {
         let mut errors = Vec::new();
         let name = parse_optional_text("Name", &self.name, &mut errors);
@@ -817,6 +830,32 @@ mod tests {
         assert!(parse_grouped_nonnegative_integer("105,203").is_err());
         assert!(parse_grouped_nonnegative_integer("-1").is_err());
         assert_eq!(format_integer_pt_br(105_203), "105.203");
+    }
+
+    #[test]
+    fn escape_restores_only_the_active_state_property_field() {
+        let mut draft = StatePropertyDraft::new(
+            1,
+            &EditableStateProperties {
+                name: Some("STATE_1".into()),
+                manpower: Some(100_000),
+                impassable: true,
+                ..Default::default()
+            },
+        );
+        draft.name = "TEMP_NAME".into();
+        draft.manpower = "200000".into();
+        draft.impassable = false;
+
+        assert!(draft.restore_field(0));
+        assert_eq!(draft.name, "STATE_1");
+        assert_eq!(draft.manpower, "200000");
+        assert!(!draft.impassable);
+
+        assert!(draft.restore_field(StatePropertyDraft::TEXT_FIELD_COUNT));
+        assert!(draft.impassable);
+        assert!(draft.is_modified());
+        assert!(!draft.restore_field(StatePropertyDraft::TEXT_FIELD_COUNT + 1));
     }
 
     #[test]

@@ -2224,6 +2224,18 @@ impl Canvas {
         }
     }
 
+    pub fn cancel_state_property_field_edit(&mut self) -> bool {
+        let Some(draft) = self.state_property_draft.as_mut() else {
+            return false;
+        };
+        if !draft.restore_field(self.property_editor_field) {
+            return false;
+        }
+        self.property_editor_replace_field = false;
+        self.refresh_state_information();
+        true
+    }
+
     pub fn state_property_editor_backspace(&mut self) {
         if let Some(draft) = self.state_lifecycle_draft.as_mut() {
             let Some(field) = draft.field_mut(self.property_editor_field) else {

@@ -225,7 +225,13 @@ impl EventHandler for App {
         {
             match key {
                 Key::Escape => {
-                    self.resolve_property_draft();
+                    if !self
+                        .canvas
+                        .as_mut()
+                        .is_some_and(Canvas::cancel_state_property_field_edit)
+                    {
+                        self.resolve_property_draft();
+                    }
                     return;
                 }
                 Key::Tab => {
@@ -440,9 +446,10 @@ impl EventHandler for App {
         }
         if state
             && button == MouseButton::Left
-            && self.canvas.as_ref().is_some_and(|canvas| {
-                canvas.property_editor_is_open() || canvas.inspector_picker_is_open()
-            })
+            && self
+                .canvas
+                .as_ref()
+                .is_some_and(Canvas::inspector_picker_is_open)
         {
             self.left_press_consumed = true;
             self.action_activate_tool(pos, mods);
