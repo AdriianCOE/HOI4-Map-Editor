@@ -309,7 +309,12 @@ impl Canvas {
         let location = Location::Directory(project.paths.map_directory.clone());
         let mut config = Config::load()?;
         config.preserve_ids = true;
-        Self::load_with_access(location, Some(project), MapAccessMode::ReadOnly, config)
+        Self::load_with_access(
+            location,
+            Some(project),
+            MapAccessMode::EditableProvinceMap,
+            config,
+        )
     }
 
     fn load_with_access(
@@ -4888,7 +4893,7 @@ impl Canvas {
     }
 
     pub fn undo(&mut self) {
-        if self.map_access_mode == MapAccessMode::ReadOnly {
+        if self.is_state_workspace() {
             if self.property_draft_is_modified() {
                 return;
             }
@@ -4904,6 +4909,9 @@ impl Canvas {
             }
             return;
         };
+        if self.map_access_mode == MapAccessMode::ReadOnly {
+            return;
+        }
 
         if let Some(commit) = self.history.undo(&mut self.bundle.map) {
             self.bundle.map.recalculate_all_boundaries();
@@ -4916,7 +4924,7 @@ impl Canvas {
     }
 
     pub fn redo(&mut self) {
-        if self.map_access_mode == MapAccessMode::ReadOnly {
+        if self.is_state_workspace() {
             if self.property_draft_is_modified() {
                 return;
             }
@@ -4932,6 +4940,9 @@ impl Canvas {
             }
             return;
         };
+        if self.map_access_mode == MapAccessMode::ReadOnly {
+            return;
+        }
 
         if let Some(commit) = self.history.redo(&mut self.bundle.map) {
             self.bundle.map.recalculate_all_boundaries();

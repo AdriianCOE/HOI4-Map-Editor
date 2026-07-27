@@ -423,8 +423,12 @@ fn get_color_index(color_index: &[Option<Color>], id: u32) -> Option<Color> {
 #[cfg(test)]
 mod tests {
   use super::construct_map_data;
+  use crate::app::format::{Definition, DefinitionKind};
+  use crate::app::map::{Bundle, History};
   use crate::config::Config;
-  use image::RgbImage;
+  use crate::util::files::Location;
+  use image::{Rgb, RgbImage};
+  use std::fs;
 
   #[test]
   fn empty_definition_table_returns_error_instead_of_panicking() {
@@ -437,5 +441,59 @@ mod tests {
     );
 
     assert!(result.is_err());
+  }
+
+  #[test]
+  fn province_history_paints_pixels_and_terrain_with_undo_redo() {
+    let first = [10, 20, 30];
+    let second = [40, 50, 60];
+    let image = RgbImage::from_fn(3, 1, |x, _| Rgb(if x < 2 { first } else { second }));
+    let definitions = [first, second]
+      .into_iter()
+      .enumerate()
+      .map(|(index, rgb)| Definition {
+        id: index as u32 + 1,
+        rgb,
+        kind: DefinitionKind::Land,
+        coastal: false,
+        terrain: "plains".to_owned(),
+        continent: 1
+      })
+      .collect();
+    let config = Config {
+      preserve_ids: true,
+      ..Config::default()
+    };
+    let mut bundle =
+      construct_map_data(image, definitions, Vec::new(), None, config).unwrap();
+    let mut history = History::new(8, &bundle.map);
+
+    assert!(history
+      .paint_province_terrain(&mut bundle, [0, 0], "forest".to_owned())
+      .is_some());
+    assert_eq!(bundle.map.get_province(first).terrain, "forest");
+    assert!(history.undo(&mut bundle.map).is_some());
+    assert_eq!(bundle.map.get_province(first).terrain, "plains");
+    assert!(history.redo(&mut bundle.map).is_some());
+    assert_eq!(bundle.map.get_province(first).terrain, "forest");
+
+    assert!(history.paint_pixel(&mut bundle, [1, 0], second, 1).is_some());
+    assert_eq!(bundle.map.get_color_at([1, 0]), second);
+    assert!(history.undo(&mut bundle.map).is_some());
+    assert_eq!(bundle.map.get_color_at([1, 0]), first);
+    assert!(history.redo(&mut bundle.map).is_some());
+
+    let root = std::env::temp_dir().join(format!(
+      "hoi4-province-edit-{}",
+      std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir(&root).unwrap();
+    let location = Location::Directory(root.clone());
+    bundle.save(&location).unwrap();
+    let reloaded = Bundle::load(&location, bundle.config.clone()).unwrap();
+    assert_eq!(reloaded.map.get_color_at([1, 0]), second);
+    assert_eq!(reloaded.map.get_province(first).terrain, "forest");
+    fs::remove_dir_all(root).unwrap();
   }
 }

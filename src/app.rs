@@ -1118,6 +1118,13 @@ impl App {
     }
 
     fn action_set_workspace(&mut self, workspace: WorkspaceMode) {
+        let workspace_will_change = self
+            .canvas
+            .as_ref()
+            .is_some_and(|canvas| canvas.workspace_mode() != workspace);
+        if workspace_will_change && !self.resolve_property_draft() {
+            return;
+        }
         let changed = self
             .canvas
             .as_mut()
@@ -1287,7 +1294,9 @@ impl App {
         let state_project = self
             .canvas
             .as_ref()
-            .is_some_and(|canvas| canvas.project().is_some());
+            .is_some_and(|canvas| {
+                saves_state_files(canvas.workspace_mode(), canvas.project().is_some())
+            });
         if state_project {
             let confirmation = self
                 .canvas
@@ -1317,7 +1326,9 @@ impl App {
         if self
             .canvas
             .as_ref()
-            .is_some_and(|canvas| canvas.map_access_mode() == self::canvas::MapAccessMode::ReadOnly)
+            .is_some_and(|canvas| {
+                saves_state_files(canvas.workspace_mode(), canvas.project().is_some())
+            })
         {
             self.alerts.push(Err(
         "Save As does not apply to state projects. Use Save State Files after a Passed validation."
@@ -1568,6 +1579,10 @@ fn workspace_shortcut(
     }
 }
 
+fn saves_state_files(workspace: WorkspaceMode, has_project: bool) -> bool {
+    has_project && workspace == WorkspaceMode::States
+}
+
 #[cfg(test)]
 mod workspace_shortcut_tests {
     use super::*;
@@ -1594,6 +1609,13 @@ mod workspace_shortcut_tests {
             workspace_shortcut(Key::D1, KeyMods::default(), WorkspaceMode::States),
             None
         );
+    }
+
+    #[test]
+    fn save_target_follows_the_active_workspace() {
+        assert!(saves_state_files(WorkspaceMode::States, true));
+        assert!(!saves_state_files(WorkspaceMode::Provinces, true));
+        assert!(!saves_state_files(WorkspaceMode::Provinces, false));
     }
 }
 
