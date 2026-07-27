@@ -37,6 +37,13 @@ CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM THE FONT SOFTWARE.
 The complete SIL Open Font License 1.1 is retained in the source repository at
 `assets/Inconsolata-OFL.txt`.
 
+Inconsolata does not include Cyrillic or CJK glyphs. For Русский and 简体中文
+interface text, the editor reads a system font already installed on the
+user's Windows machine (Segoe UI, Microsoft YaHei UI, or SimSun) at startup,
+purely to render those glyphs on screen. These fonts are Microsoft property,
+are never bundled, copied, or redistributed with the application, and are
+simply skipped if not present on the system.
+
 ## Bundled icons
 
 The inherited UI spritesheet contains icons attributed by the original project

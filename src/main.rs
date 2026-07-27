@@ -161,7 +161,7 @@ mod branding_tests {
 
   #[test]
   fn public_window_title_uses_map_editor_branding_without_version_bump() {
-    assert_eq!(APPNAME, "HOI4 Map Editor v0.1.0");
+    assert_eq!(APPNAME, "HOI4 Map Editor v0.1.0-preview.1");
     assert_eq!(PRODUCT_NAME, "HOI4 Map Editor");
     assert_eq!(APP_VERSION, env!("CARGO_PKG_VERSION"));
     assert!(diagnostic_summary().contains("Operating System:"));

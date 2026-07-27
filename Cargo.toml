@@ -1,6 +1,6 @@
 [package]
 name = "hoi4_state_editor"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 authors = ["ScottyThePilot <scotty.codes@gmail.com>", "AdriianCOE <tommycramos@gmail.com>"]
 edition = "2024"
 description = "Province and State Editing Toolkit"

@@ -19,7 +19,8 @@ transactional file updates.
   Political Map Views with independent visual overlays.
 - Lossless State Patch Preview and validation in a temporary workspace.
 - Atomic Province Save and transactional State Apply with backup and rollback.
-- Application and project settings with English and Brazilian Portuguese UI.
+- Application and project settings with a 6-language interface: English,
+  Português do Brasil, Español, Français, Русский, and 简体中文.
 
 ## Install and open a mod
 

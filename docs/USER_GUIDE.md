@@ -41,6 +41,17 @@ view behavior. Press `Tab` or the arrow keys to move, `Left`/`Right` to adjust
 numeric choices, `Enter` to activate, and `Esc` to cancel. Settings use a draft:
 nothing is written before **Save**.
 
+### Changing the interface language
+
+Open **Edit → Settings...**, select the **Language** row, and press
+`Enter`/`Left`/`Right` to cycle between English, Português do Brasil,
+Español, Français, Русский, and 简体中文 (shown by their native names, not
+language codes). The interface updates immediately so you can preview a
+language before saving. Press **Save** to keep it, or **Cancel** to revert.
+The choice persists in `config.toml` and applies the next time the editor
+opens. Technical paths, file names, HOI4 identifiers, and mod content are
+never translated.
+
 Global settings are optional and created only after an explicit Settings save:
 
 ```text
@@ -73,5 +84,16 @@ Invalid files are never overwritten without explicit restore confirmation and
 a `.bak` backup. Saving either settings domain does not save maps, apply states,
 clear dirty state, or create an Undo command.
 
-The UI supports `en-US` and `pt-BR`. This setting translates the editor only;
-technical HOI4 identifiers and mod content are not translated.
+## Logs and reporting a problem
+
+Local logs are written under:
+
+```text
+%LOCALAPPDATA%\HOI4MapEditor\logs
+```
+
+If something goes wrong, include the application version (see **Help → About
+HOI4 Map Editor**), the exact error text, the relevant log lines, and a
+minimal reproducer if you have one. Do not share your whole mod, backup
+directory, usernames, or credentials. Report issues on the project's GitHub
+repository.

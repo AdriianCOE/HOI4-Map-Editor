@@ -1,34 +1,53 @@
 # Changelog
 
-## Unreleased
+## [0.1.0-preview.1] - 2026-07-27
 
-### Added
+First public preview of HOI4 Map Editor: a standalone tool for editing Hearts
+of Iron IV province maps and state history files. This is preview software —
+keep an independent backup of your mod.
 
-- Province editing inherited from HOI4 Province Editor.
-- State Workspace with States and Political views.
-- State Inspector, Lasso, Brush, Fill, Image Overlay, creation, removal, and property editing.
-- Lossless state patch preview and isolated round-trip validation.
-- Transactional state save with backup, rollback, and interrupted-save recovery.
-- Windows x64 allowlist packaging with checksum and release manifest.
-- User guide, known limitations, troubleshooting, privacy, and release checklist.
+### Province editing
 
-### Changed
+- Color editing, terrain/definition editing, and coastal recalculation.
+- Atomic Province Map Save: BMP/CSV candidates are prepared, validated, and
+  backed up before the mod files are replaced.
+- Export Province Map as a folder or ZIP archive without touching the open
+  project.
+- Undo and Redo across province edits.
+- Contextual search with focused navigation to a province on the map.
 
-- The public product name is HOI4 Map Editor.
-- Provinces and States use explicit workspaces with independent remembered Map Views.
-- The State Inspector is an overlay drawer and no longer resizes the map viewport.
-- Large inherited map samples were replaced with minimal artificial fixtures.
-- Release workflows now use read-only permissions and credential-free checkout.
+### State editing
 
-### Fixed
+- State creation and removal, and province-to-state assignment.
+- State Brush, Lasso, and Fill tools for assigning or unassigning provinces.
+- Owner, controller, colors, cores, claims, resources, buildings, and victory
+  points editing in the State Inspector.
+- Review State Changes → Validate in a temporary workspace → Apply State
+  Changes with backup, rollback, and interrupted-save recovery.
+- Isolated round-trip validation before any state file is written.
 
-- State creation clears temporary province/tool selections only after a successful transaction.
-- Focused inputs and modal controls suppress global map and workspace shortcuts.
-- Package output path validation no longer accepts sibling directories sharing
-  the repository name prefix.
+### Interface
 
-### Known Issues
+- Separate Provinces and States workspaces with independent remembered Map
+  Views and overlays.
+- Map Views (Province Colors, Province Types, Terrain, Continents, Coastal,
+  States, Political) and overlays (Rivers, Adjacencies, Province/State
+  Borders, Image Overlay).
+- State Inspector as an overlay drawer that no longer resizes the map
+  viewport.
+- Application Settings and Project Settings, including a language selector.
+- Six interface languages: English, Português do Brasil, Español, Français,
+  Русский, and 简体中文. Missing translations fall back to English rather
+  than showing a blank or broken label.
+- Contextual search with focused map navigation.
 
-- Adjacencies, Strategic Regions, Continents, Rivers, and Supply Network do not yet have complete dedicated editors.
-- Localised picker labels and `.gfx`/`.dds` sprite resolution are not implemented.
-- Real-mod smoke tests require a local controlled fixture and do not run in public CI.
+### Known limitations
+
+- Windows x64 only.
+- Game localization and metadata (province/state names from HOI4's own
+  localization files) are not yet loaded; the editor shows raw identifiers.
+- Game flags and icons (`.gfx`/`.dds`) are not yet loaded.
+- Adjacencies does not yet have a complete dedicated editing workspace.
+- Strategic Regions and Continents do not yet have dedicated workspaces.
+- This is preview software: keep an independent backup of your mod
+  regardless of the safeguards above.
