@@ -61,24 +61,29 @@ pub fn load_state_documents(directory: &Path) -> StateLoadBatch {
 }
 
 fn load_document(path: PathBuf, batch: &mut StateLoadBatch) -> StateDocument {
-  let (text, encoding_diagnostic) = match fs::read(&path) {
+  let (original_bytes, text, exact_utf8, encoding_diagnostic) = match fs::read(&path) {
     Ok(bytes) => {
       batch.files_read = batch.files_read.saturating_add(1);
-      match String::from_utf8(bytes) {
-        Ok(text) => (text, None),
+      match String::from_utf8(bytes.clone()) {
+        Ok(text) => (bytes.into(), text, true, None),
         Err(err) => {
           let message = format!(
             "Failed to decode state file {} as UTF-8 at byte {}.",
             path.display(),
             err.utf8_error().valid_up_to()
           );
-          (String::from_utf8_lossy(err.as_bytes()).into_owned(), Some(message))
+          (
+            bytes.into(),
+            String::from_utf8_lossy(err.as_bytes()).into_owned(),
+            false,
+            Some(message)
+          )
         }
       }
     }
     Err(err) => {
       let message = format!("Failed to read state file {}: {err}", path.display());
-      (String::new(), Some(message))
+      ([].into(), String::new(), false, Some(message))
     }
   };
 
@@ -97,6 +102,8 @@ fn load_document(path: PathBuf, batch: &mut StateLoadBatch) -> StateDocument {
   }
   StateDocument {
     path,
+    original_bytes,
+    exact_utf8,
     syntax,
     data: extracted.data,
     diagnostics,
@@ -165,5 +172,21 @@ mod tests {
     assert_eq!(batch.documents.len(), 2);
     assert!(batch.documents[0].data.is_some());
     assert!(!batch.documents[1].diagnostics.is_empty());
+  }
+
+  #[test]
+  fn preserves_exact_source_bytes_and_marks_lossy_utf8() {
+    let states = TempStates::new("source-bytes");
+    let valid = b"\xEF\xBB\xBFstate={\r\n\tid=1\r\n\tprovinces={1}\r\n}\r\n";
+    let invalid = b"state={id=2 name=\"\xFF\" provinces={2}}";
+    fs::write(states.path().join("1-valid.txt"), valid).unwrap();
+    fs::write(states.path().join("2-lossy.txt"), invalid).unwrap();
+
+    let batch = load_state_documents(states.path());
+
+    assert_eq!(batch.documents[0].original_bytes(), valid);
+    assert!(batch.documents[0].exact_utf8);
+    assert_eq!(batch.documents[1].original_bytes(), invalid);
+    assert!(!batch.documents[1].exact_utf8);
   }
 }

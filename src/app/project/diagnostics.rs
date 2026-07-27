@@ -2,14 +2,14 @@ use std::path::PathBuf;
 
 use crate::app::state::TextSpan;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DiagnosticSeverity {
   Info,
   Warning,
   Error
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProjectDiagnosticKind {
   InvalidStateFile,
   EmptyStateFile,

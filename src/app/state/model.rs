@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::{PdxDocument, TextSpan};
 use crate::app::project::ProjectDiagnostic;
@@ -7,6 +8,8 @@ use crate::app::project::ProjectDiagnostic;
 #[derive(Debug, Clone)]
 pub struct StateDocument {
   pub path: PathBuf,
+  pub original_bytes: Arc<[u8]>,
+  pub exact_utf8: bool,
   pub syntax: PdxDocument,
   pub data: Option<StateData>,
   pub diagnostics: Vec<ProjectDiagnostic>,
@@ -16,6 +19,10 @@ pub struct StateDocument {
 impl StateDocument {
   pub fn source(&self) -> &str {
     &self.syntax.source.text
+  }
+
+  pub fn original_bytes(&self) -> &[u8] {
+    &self.original_bytes
   }
 }
 

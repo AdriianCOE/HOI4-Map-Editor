@@ -18,10 +18,16 @@ use super::project::{
   DiagnosticSeverity, Hoi4Project, LassoSelectionMode, MapViewMode,
   ProvinceInclusionMode, StateEditSession, StateLassoPhase, StateSelection,
   EditableStateProperties, ProvinceDataDraft, StatePropertyDraft, StateRemovalPolicy,
-  BrushProvinceClassification, StateBrushMode, WorkingStateOrigin, sample_segment,
+  BrushProvinceClassification, ProjectPatchPlan, StateBrushMode, WorkingStateOrigin,
+  RoundTripCancellation, RoundTripStage, RoundTripValidationPolicy,
+  RoundTripValidationReport, RoundTripValidator, plan_state_patches, sample_segment,
   boundaries_for_state, classify_state_lasso, generate_state_view,
   generate_state_view_for, generate_state_view_region_for,
-  select_state_at_for as resolve_state_at_for, selection_overlay_for
+  select_state_at_for as resolve_state_at_for, selection_overlay_for,
+  RecoveryInfo, SaveTransactionState, StateSaveCancellation, StateSaveConditions,
+  StateSaveFault, StateSaveOutcome, StateSaveReport, detect_state_save_recovery,
+  execute_state_save, recover_interrupted_state_save, save_confirmation_text,
+  state_save_eligibility
 };
 use crate::config::Config;
 use crate::font::{self, FONT_SIZE};
@@ -33,6 +39,8 @@ use std::path::Path;
 use std::io::BufWriter;
 use std::fmt;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::Instant;
 
 const ZOOM_SENSITIVITY: f64 = 0.125;
@@ -90,6 +98,15 @@ pub struct Canvas {
   location: Location,
   project: Option<Hoi4Project>,
   state_edit_session: Option<StateEditSession>,
+  patch_preview: Option<ProjectPatchPlan>,
+  patch_preview_file: usize,
+  round_trip_report: Option<RoundTripValidationReport>,
+  round_trip_task: Option<RoundTripTask>,
+  round_trip_status: Option<String>,
+  state_save_report: Option<StateSaveReport>,
+  state_save_task: Option<StateSaveTask>,
+  state_save_status: Option<String>,
+  state_save_recovery: Option<RecoveryInfo>,
   state_lifecycle_draft: Option<StateLifecycleDraft>,
   state_property_draft: Option<StatePropertyDraft>,
   province_data_draft: Option<ProvinceDataDraft>,
@@ -126,6 +143,27 @@ enum StateLifecycleDraft {
     unassign: bool,
     province_count: usize,
   },
+}
+
+enum RoundTripTaskMessage {
+  Stage(RoundTripStage),
+  Finished(Box<RoundTripValidationReport>),
+}
+
+struct RoundTripTask {
+  receiver: Receiver<RoundTripTaskMessage>,
+  cancellation: RoundTripCancellation,
+}
+
+enum StateSaveTaskMessage {
+  Stage(SaveTransactionState, usize, usize),
+  Finished(Box<StateSaveReport>),
+}
+
+struct StateSaveTask {
+  receiver: Receiver<StateSaveTaskMessage>,
+  cancellation: StateSaveCancellation,
+  state: SaveTransactionState,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -247,6 +285,8 @@ impl Canvas {
     let state_edit_session = project
       .as_ref()
       .map(|project| StateEditSession::new(project, &bundle.map));
+    let state_save_recovery = project.as_ref()
+      .and_then(|project| detect_state_save_recovery(&project.paths.root));
     let project_status = project.as_ref().map(|project| {
       project_status_message_with_session(project, state_edit_session.as_ref(), 0, "initial")
     });
@@ -293,6 +333,16 @@ impl Canvas {
       location,
       project,
       state_edit_session,
+      patch_preview: None,
+      patch_preview_file: 0,
+      round_trip_report: None,
+      round_trip_task: None,
+      round_trip_status: None,
+      state_save_report: None,
+      state_save_task: None,
+      state_save_status: state_save_recovery.as_ref()
+        .map(|recovery| recovery.message.clone()),
+      state_save_recovery,
       state_lifecycle_draft: None,
       state_property_draft: None,
       province_data_draft: None,
@@ -1163,6 +1213,8 @@ impl Canvas {
   pub fn draw(&mut self, ctx: Context, interface: &Interface, glyph_cache: &mut FontGlyphCache, cursor_pos: Option<Vector2<f64>>, gl: &mut GlGraphics) {
     use super::alerts::PADDING;
 
+    self.poll_round_trip_validation();
+    self.poll_state_save();
     let transform = ctx.transform.append_transform(self.camera.display_matrix(interface));
     let showing_states = self.map_view_mode == MapViewMode::States;
     let texture = if showing_states {
@@ -2362,6 +2414,29 @@ impl Canvas {
       return StateActionAvailability::default();
     };
     let draft_modified = self.property_draft_is_modified();
+    let patch_preview_stale = self.patch_preview.as_ref()
+      .is_some_and(|plan| plan.is_stale(edit.revision()));
+    let patch_preview_blocked = self.patch_preview.as_ref()
+      .is_some_and(|plan| plan.summary.blocked_files != 0);
+    let patch_preview_review_required = self.patch_preview.as_ref()
+      .is_some_and(|plan| plan.summary.review_required_files != 0);
+    let save_running = self.state_save_task.is_some();
+    let recovery_required = self.state_save_recovery.is_some();
+    let edits_blocked = save_running || recovery_required;
+    let validation_current = self.round_trip_report.as_ref().is_some_and(|report| {
+      report.status == super::project::RoundTripStatus::Passed
+        && report.eligible_for_atomic_save_preparation
+        && !report.is_stale(edit.revision(), self.patch_preview.as_ref())
+    });
+    let save_eligible = !edits_blocked
+      && !self.property_editor_is_open()
+      && !lasso_active
+      && !brush_active
+      && self.patch_preview.as_ref().is_some_and(|plan| plan.files_len() != 0)
+      && !patch_preview_stale
+      && !patch_preview_blocked
+      && !patch_preview_review_required
+      && validation_current;
     StateActionAvailability {
       state_view,
       lasso_active,
@@ -2369,23 +2444,539 @@ impl Canvas {
       brush_active,
       has_selection: !edit.selected_provinces().is_empty(),
       has_target: edit.target_state_id().is_some_and(|state_id| edit.is_state_active(state_id)),
-      can_move: !lasso_active && !brush_active && edit.can_move_selection_to_target(),
-      can_unassign: !lasso_active && !brush_active && edit.can_unassign_selection(),
-      can_edit_properties: !lasso_active && !brush_active
+      can_move: !edits_blocked && !lasso_active && !brush_active
+        && edit.can_move_selection_to_target(),
+      can_unassign: !edits_blocked && !lasso_active && !brush_active
+        && edit.can_unassign_selection(),
+      can_edit_properties: !edits_blocked && !lasso_active && !brush_active
         && self.active_state_id.is_some_and(|state_id| edit.is_state_active(state_id)),
-      can_edit_province_data: !lasso_active && !brush_active
+      can_edit_province_data: !edits_blocked && !lasso_active && !brush_active
         && self.active_province_id
           .is_some_and(|province_id| edit.editable_province_state(province_id).is_ok()),
-      can_create_state: !lasso_active && !brush_active,
-      can_remove_state: !lasso_active && !brush_active
+      can_create_state: !edits_blocked && !lasso_active && !brush_active,
+      can_remove_state: !edits_blocked && !lasso_active && !brush_active
         && self.active_state_id
           .is_some_and(|state_id| edit.validate_removable_state(state_id).is_ok()),
       property_editor_open: self.property_editor_is_open(),
       property_draft_modified: draft_modified,
-      can_undo: !draft_modified && edit.can_undo(),
-      can_redo: !draft_modified && edit.can_redo(),
+      can_undo: !edits_blocked && !draft_modified && edit.can_undo(),
+      can_redo: !edits_blocked && !draft_modified && edit.can_redo(),
       has_edits: edit.is_dirty() || draft_modified,
+      has_patch_preview: self.patch_preview.is_some(),
+      patch_preview_files: self.patch_preview.as_ref()
+        .map(ProjectPatchPlan::files_len)
+        .unwrap_or(0),
+      patch_preview_stale,
+      patch_preview_blocked,
+      patch_preview_review_required,
+      validation_running: self.round_trip_task.is_some() || save_running,
+      has_validation_report: self.round_trip_report.is_some(),
+      save_eligible,
+      save_running,
+      save_cancellable: self.state_save_task.as_ref()
+        .is_some_and(|task| task.state.cancellable()),
+      recovery_required,
+      has_save_report: self.state_save_report.is_some(),
     }
+  }
+
+  pub fn generate_patch_preview(&mut self, alerts: &mut Alerts) {
+    let Some((project, edit)) = self.project.as_ref().zip(self.state_edit_session.as_ref()) else {
+      alerts.push(Err("Patch preview is available only for loaded state projects"));
+      return;
+    };
+    let plan = plan_state_patches(project, edit);
+    println!("{}", plan.summary_text());
+    for index in 0..plan.files_len() {
+      if let Some(report) = plan.file_report(index) {
+        println!("\n{report}");
+      }
+    }
+    let message = format!(
+      "Generated read-only patch preview: {} modified, {} created, {} removed; {} blocked",
+      plan.summary.modified_files,
+      plan.summary.created_files,
+      plan.summary.removed_files,
+      plan.summary.blocked_files,
+    );
+    self.patch_preview = Some(plan);
+    self.patch_preview_file = 0;
+    self.refresh_state_information();
+    alerts.push(Ok(message));
+  }
+
+  pub fn select_patch_preview_file(&mut self, offset: isize, alerts: &mut Alerts) {
+    let Some(plan) = self.patch_preview.as_ref() else {
+      alerts.push(Err("Generate a patch preview first"));
+      return;
+    };
+    let count = plan.files_len();
+    if count == 0 {
+      alerts.push(Ok("The patch preview contains no file operations"));
+      return;
+    }
+    self.patch_preview_file =
+      (self.patch_preview_file as isize + offset).rem_euclid(count as isize) as usize;
+    if let Some(report) = plan.file_report(self.patch_preview_file) {
+      println!("{report}");
+    }
+    self.refresh_state_information();
+    alerts.push(Ok(format!(
+      "Patch preview file {} of {count}",
+      self.patch_preview_file + 1,
+    )));
+  }
+
+  pub fn clear_patch_preview(&mut self, alerts: &mut Alerts) {
+    self.patch_preview = None;
+    self.patch_preview_file = 0;
+    self.refresh_state_information();
+    alerts.push(Ok("Cleared the in-memory patch preview"));
+  }
+
+  pub fn start_round_trip_validation(
+    &mut self,
+    allow_review_required: bool,
+    alerts: &mut Alerts,
+  ) {
+    if self.round_trip_task.is_some() {
+      alerts.push(Err("A round-trip validation is already running"));
+      return;
+    }
+    let Some(project) = self.project.as_ref().cloned() else {
+      alerts.push(Err("Round-trip validation is available only for state projects"));
+      return;
+    };
+    let Some(edit) = self.state_edit_session.as_ref().cloned() else {
+      alerts.push(Err("The state edit session is unavailable"));
+      return;
+    };
+    let Some(plan) = self.patch_preview.as_ref().cloned() else {
+      alerts.push(Err("Generate a patch preview before validating"));
+      return;
+    };
+    if plan.is_stale(edit.revision()) {
+      alerts.push(Err("Patch preview is outdated. Regenerate it before round-trip validation."));
+      return;
+    }
+    if plan.summary.blocked_files != 0 {
+      alerts.push(Err("Blocked patch plans cannot be validated"));
+      return;
+    }
+    if plan.summary.review_required_files != 0 && !allow_review_required {
+      alerts.push(Err(
+        "ReviewRequired changes need the explicit isolated validation action"
+      ));
+      return;
+    }
+
+    let (sender, receiver) = mpsc::channel();
+    let cancellation = RoundTripCancellation::default();
+    let worker_cancellation = cancellation.clone();
+    let policy = RoundTripValidationPolicy {
+      allow_review_required,
+      ..Default::default()
+    };
+    let spawn = thread::Builder::new()
+      .name("hoi4-roundtrip-validation".to_owned())
+      .spawn(move || {
+        let validator = RoundTripValidator { policy };
+        let report = validator.validate(
+          &project,
+          &edit,
+          &plan,
+          &worker_cancellation,
+          |stage| {
+            let _ = sender.send(RoundTripTaskMessage::Stage(stage));
+          },
+        );
+        let _ = sender.send(RoundTripTaskMessage::Finished(Box::new(report)));
+      });
+    match spawn {
+      Ok(_) => {
+        self.round_trip_task = Some(RoundTripTask { receiver, cancellation });
+        self.round_trip_status =
+          Some("Round-trip validation: checking patch plan...".to_owned());
+        self.refresh_state_information();
+        alerts.push(Ok(
+          "Temporary validation started. The original mod will not be changed."
+        ));
+      },
+      Err(err) => alerts.push(Err(format!(
+        "Failed to start temporary validation worker: {err}"
+      ))),
+    }
+  }
+
+  pub fn cancel_round_trip_validation(&mut self, alerts: &mut Alerts) {
+    let Some(task) = self.round_trip_task.as_ref() else {
+      alerts.push(Err("No round-trip validation is running"));
+      return;
+    };
+    task.cancellation.cancel();
+    self.round_trip_status =
+      Some("Round-trip validation: cancellation requested...".to_owned());
+    self.refresh_state_information();
+    alerts.push(Ok("Cancellation requested; the current file operation will finish safely"));
+  }
+
+  pub fn view_round_trip_report(&mut self, alerts: &mut Alerts) {
+    let Some(report) = self.round_trip_report.as_ref() else {
+      alerts.push(Err("No round-trip validation report is available"));
+      return;
+    };
+    println!("{}", report.full_text());
+    self.round_trip_status = Some(report.summary_text());
+    self.refresh_state_information();
+    alerts.push(Ok("Printed the full round-trip validation report to the console"));
+  }
+
+  pub fn clear_round_trip_report(&mut self, alerts: &mut Alerts) {
+    if self.round_trip_task.is_some() {
+      alerts.push(Err("Cancel the running validation before clearing its result"));
+      return;
+    }
+    self.round_trip_report = None;
+    self.round_trip_status = None;
+    self.refresh_state_information();
+    alerts.push(Ok("Cleared the in-memory round-trip validation result"));
+  }
+
+  pub fn state_save_confirmation_message(&self) -> Result<String, String> {
+    if self.round_trip_task.is_some() {
+      return Err("Wait for the running round-trip validation to finish.".to_owned());
+    }
+    let project = self.project.as_ref()
+      .ok_or_else(|| "State Save is available only for loaded state projects.".to_owned())?;
+    let edit = self.state_edit_session.as_ref()
+      .ok_or_else(|| "The state edit session is unavailable.".to_owned())?;
+    let eligibility = state_save_eligibility(
+      project,
+      edit,
+      self.patch_preview.as_ref(),
+      self.round_trip_report.as_ref(),
+      StateSaveConditions {
+        draft_pending: self.property_editor_is_open(),
+        tool_interaction_active: self.state_lasso_is_active() || self.state_brush_is_active(),
+        recovery_required: self.state_save_recovery.is_some(),
+        save_running: self.state_save_task.is_some(),
+      },
+    );
+    if !eligibility.eligible {
+      return Err(eligibility.reasons.first()
+        .map(|reason| reason.message())
+        .unwrap_or("State Save is not eligible.")
+        .to_owned());
+    }
+    Ok(save_confirmation_text(
+      project,
+      self.patch_preview.as_ref().expect("eligible Save has a patch plan"),
+    ))
+  }
+
+  pub fn start_state_save(&mut self, alerts: &mut Alerts) {
+    if self.round_trip_task.is_some() {
+      alerts.push(Err("Wait for the running round-trip validation to finish"));
+      return;
+    }
+    let Some(project) = self.project.as_ref().cloned() else {
+      alerts.push(Err("State Save is available only for loaded state projects"));
+      return;
+    };
+    let Some(edit) = self.state_edit_session.as_ref().cloned() else {
+      alerts.push(Err("The state edit session is unavailable"));
+      return;
+    };
+    let plan = self.patch_preview.as_ref().cloned();
+    let report = self.round_trip_report.as_ref().cloned();
+    let eligibility = state_save_eligibility(
+      &project,
+      &edit,
+      plan.as_ref(),
+      report.as_ref(),
+      StateSaveConditions {
+        draft_pending: self.property_editor_is_open(),
+        tool_interaction_active: self.state_lasso_is_active() || self.state_brush_is_active(),
+        recovery_required: self.state_save_recovery.is_some(),
+        save_running: self.state_save_task.is_some(),
+      },
+    );
+    let Some(authorization) = eligibility.authorization else {
+      alerts.push(Err(eligibility.reasons.first()
+        .map(|reason| reason.message())
+        .unwrap_or("State Save is not eligible.")));
+      return;
+    };
+    let plan = plan.expect("eligible Save has a patch plan");
+    let report = report.expect("eligible Save has a validation report");
+    let (sender, receiver) = mpsc::channel();
+    let cancellation = StateSaveCancellation::default();
+    let worker_cancellation = cancellation.clone();
+    let spawn = thread::Builder::new()
+      .name("hoi4-state-save".to_owned())
+      .spawn(move || {
+        let report = execute_state_save(
+          &project,
+          &edit,
+          &plan,
+          &report,
+          &authorization,
+          &worker_cancellation,
+          StateSaveFault::None,
+          |state, current, total| {
+            let _ = sender.send(StateSaveTaskMessage::Stage(state, current, total));
+          },
+        );
+        let _ = sender.send(StateSaveTaskMessage::Finished(Box::new(report)));
+      });
+    match spawn {
+      Ok(_) => {
+        self.state_save_task = Some(StateSaveTask {
+          receiver,
+          cancellation,
+          state: SaveTransactionState::Preparing,
+        });
+        self.state_save_status = Some("State Save: Preparing...".to_owned());
+        self.refresh_state_information();
+        alerts.push(Ok("State Save started; editing is locked until it finishes safely"));
+      },
+      Err(error) => alerts.push(Err(format!("Failed to start State Save worker: {error}"))),
+    }
+  }
+
+  pub fn cancel_state_save(&mut self, alerts: &mut Alerts) {
+    let Some(task) = self.state_save_task.as_ref() else {
+      alerts.push(Err("No State Save transaction is running"));
+      return;
+    };
+    if !task.state.cancellable() {
+      alerts.push(Err("State Save cannot be cancelled after commit begins"));
+      return;
+    }
+    task.cancellation.cancel();
+    self.state_save_status = Some("State Save: cancellation requested...".to_owned());
+    self.refresh_state_information();
+    alerts.push(Ok("Cancellation requested before commit"));
+  }
+
+  pub fn view_state_save_report(&mut self, alerts: &mut Alerts) {
+    let Some(report) = self.state_save_report.as_ref() else {
+      alerts.push(Err("No State Save report is available"));
+      return;
+    };
+    println!("{}", report.summary_text());
+    self.state_save_status = Some(report.summary_text());
+    self.refresh_state_information();
+    alerts.push(Ok("Printed the State Save report to the console"));
+  }
+
+  pub fn recover_state_save(&mut self, alerts: &mut Alerts) {
+    if self.state_save_task.is_some() {
+      alerts.push(Err("A State Save or recovery task is already running"));
+      return;
+    }
+    let Some(project) = self.project.as_ref() else {
+      alerts.push(Err("No state project is loaded"));
+      return;
+    };
+    if self.state_save_recovery.is_none() {
+      alerts.push(Err("No interrupted State Save was detected"));
+      return;
+    }
+    let root = project.paths.root.clone();
+    let (sender, receiver) = mpsc::channel();
+    let spawn = thread::Builder::new()
+      .name("hoi4-state-save-recovery".to_owned())
+      .spawn(move || {
+        let _ = sender.send(StateSaveTaskMessage::Stage(
+          SaveTransactionState::RollingBack,
+          0,
+          0,
+        ));
+        let report = recover_interrupted_state_save(&root);
+        let _ = sender.send(StateSaveTaskMessage::Finished(Box::new(report)));
+      });
+    match spawn {
+      Ok(_) => {
+        self.state_save_task = Some(StateSaveTask {
+          receiver,
+          cancellation: StateSaveCancellation::default(),
+          state: SaveTransactionState::RollingBack,
+        });
+        self.state_save_status = Some("State Save recovery: Rolling back...".to_owned());
+        self.refresh_state_information();
+        alerts.push(Ok("Verified recovery rollback started"));
+      },
+      Err(error) => alerts.push(Err(format!("Failed to start recovery worker: {error}"))),
+    }
+  }
+
+  pub fn state_save_is_running(&self) -> bool {
+    self.state_save_task.is_some()
+  }
+
+  pub fn state_save_blocks_editing(&self) -> bool {
+    self.state_save_task.is_some() || self.state_save_recovery.is_some()
+  }
+
+  pub fn state_save_blocks_close(&self) -> bool {
+    self.state_save_task.as_ref()
+      .is_some_and(|task| !task.state.cancellable())
+      || self.state_save_recovery.is_some()
+  }
+
+  pub fn state_save_can_cancel(&self) -> bool {
+    self.state_save_task.as_ref()
+      .is_some_and(|task| task.state.cancellable())
+  }
+
+  fn poll_round_trip_validation(&mut self) {
+    let mut stages = Vec::new();
+    let mut finished = None;
+    let mut disconnected = false;
+    if let Some(task) = self.round_trip_task.as_ref() {
+      loop {
+        match task.receiver.try_recv() {
+          Ok(RoundTripTaskMessage::Stage(stage)) => stages.push(stage),
+          Ok(RoundTripTaskMessage::Finished(report)) => {
+            finished = Some(*report);
+            break;
+          },
+          Err(TryRecvError::Empty) => break,
+          Err(TryRecvError::Disconnected) => {
+            disconnected = true;
+            break;
+          },
+        }
+      }
+    }
+    let mut changed = false;
+    if let Some(stage) = stages.last().copied() {
+      self.round_trip_status =
+        Some(format!("Round-trip validation: {}", stage.message()));
+      changed = true;
+    }
+    if let Some(report) = finished {
+      println!("{}", report.full_text());
+      self.round_trip_status = Some(report.summary_text());
+      self.round_trip_report = Some(report);
+      self.round_trip_task = None;
+      changed = true;
+    } else if disconnected {
+      self.round_trip_status =
+        Some("Round-trip validation: worker ended without a report.".to_owned());
+      self.round_trip_task = None;
+      changed = true;
+    }
+    if changed {
+      self.refresh_state_information();
+    }
+  }
+
+  fn poll_state_save(&mut self) {
+    let mut stages = Vec::new();
+    let mut finished = None;
+    let mut disconnected = false;
+    if let Some(task) = self.state_save_task.as_ref() {
+      loop {
+        match task.receiver.try_recv() {
+          Ok(StateSaveTaskMessage::Stage(state, current, total)) => {
+            stages.push((state, current, total));
+          },
+          Ok(StateSaveTaskMessage::Finished(report)) => {
+            finished = Some(*report);
+            break;
+          },
+          Err(TryRecvError::Empty) => break,
+          Err(TryRecvError::Disconnected) => {
+            disconnected = true;
+            break;
+          },
+        }
+      }
+    }
+    if let Some((state, current, total)) = stages.last().copied() {
+      if let Some(task) = self.state_save_task.as_mut() {
+        task.state = state;
+      }
+      self.state_save_status = Some(if total == 0 {
+        format!("State Save: {}...", state.label())
+      } else {
+        format!("State Save: {} {current}/{total}...", state.label())
+      });
+    }
+    if let Some(mut report) = finished {
+      println!("{}", report.summary_text());
+      if report.outcome == StateSaveOutcome::Completed {
+        if let Some(reloaded) = report.reloaded_project.take() {
+          self.promote_saved_project(reloaded);
+        }
+        self.state_save_recovery = None;
+      } else if report.outcome == StateSaveOutcome::RolledBack {
+        if let Some(reloaded) = report.reloaded_project.take() {
+          self.promote_saved_project(reloaded);
+        }
+        self.state_save_recovery = None;
+        self.patch_preview = None;
+        self.round_trip_report = None;
+        self.round_trip_status = None;
+      } else if report.outcome == StateSaveOutcome::RecoveryRequired
+        || report.outcome == StateSaveOutcome::RollbackFailed
+      {
+        self.state_save_recovery = self.project.as_ref()
+          .and_then(|project| detect_state_save_recovery(&project.paths.root));
+      }
+      self.state_save_status = Some(report.summary_text());
+      self.state_save_report = Some(report);
+      self.state_save_task = None;
+      self.refresh_state_information();
+    } else if disconnected {
+      self.state_save_status =
+        Some("State Save worker ended without a report; recovery may be required.".to_owned());
+      self.state_save_task = None;
+      self.state_save_recovery = self.project.as_ref()
+        .and_then(|project| detect_state_save_recovery(&project.paths.root));
+      self.refresh_state_information();
+    } else if !stages.is_empty() {
+      self.refresh_state_information();
+    }
+  }
+
+  fn promote_saved_project(&mut self, reloaded: Hoi4Project) {
+    let selected = self.state_edit_session.as_ref()
+      .map(|edit| edit.selected_provinces().clone())
+      .unwrap_or_default();
+    let target = self.state_edit_session.as_ref()
+      .and_then(StateEditSession::target_state_id);
+    let active_state = self.active_state_id;
+    let active_province = self.active_province_id;
+    let mut edit = StateEditSession::new(&reloaded, &self.bundle.map);
+    let valid_selection = selected.into_iter()
+      .filter(|province_id| edit.editable_province_state(*province_id).is_ok())
+      .collect::<BTreeSet<_>>();
+    let _ = edit.apply_lasso_selection(&valid_selection, LassoSelectionMode::Replace);
+    if let Some(target) = target.filter(|state_id| edit.is_state_active(*state_id)) {
+      let _ = edit.set_target_state(Some(target));
+    }
+    self.active_state_id =
+      active_state.filter(|state_id| edit.is_state_active(*state_id));
+    self.active_province_id =
+      active_province.filter(|province_id| edit.editable_province_state(*province_id).is_ok());
+    self.project = Some(reloaded);
+    self.state_edit_session = Some(edit);
+    self.patch_preview = None;
+    self.patch_preview_file = 0;
+    self.round_trip_report = None;
+    self.round_trip_status = None;
+    self.state_lifecycle_draft = None;
+    self.state_property_draft = None;
+    self.province_data_draft = None;
+    self.state_lasso_phase = StateLassoPhase::Inactive;
+    self.state_brush_phase = StateBrushPhase::Inactive;
+    self.state_selection = None;
+    self.selection_texture = None;
+    self.selected_state_boundaries.clear();
+    self.refresh_state_visuals_full(0);
   }
 
   pub fn activate_state_lasso(&mut self, mode_override: Option<LassoSelectionMode>, alerts: &mut Alerts) {
@@ -3439,11 +4030,51 @@ impl Canvas {
     let status = self.state_edit_status_text();
     let lasso = self.state_lasso_status_text();
     let brush = self.state_brush_status_text();
-    self.selection_info = [province_details, details, status, lasso, brush]
+    let patch = self.patch_preview_status_text();
+    let validation = self.round_trip_status_text();
+    let save = self.state_save_status.clone();
+    self.selection_info = [province_details, details, status, lasso, brush, patch, validation, save]
       .into_iter()
       .flatten()
       .join("\n")
       .into();
+  }
+
+  fn patch_preview_status_text(&self) -> Option<String> {
+    let plan = self.patch_preview.as_ref()?;
+    let stale = self.state_edit_session.as_ref()
+      .is_some_and(|edit| plan.is_stale(edit.revision()));
+    let mut text = plan.summary_text();
+    if stale {
+      text.push_str("\nSTALE: the working state changed; regenerate before relying on this preview.");
+    }
+    if let Some(report) = plan.file_report(self.patch_preview_file) {
+      let lines = report.lines().collect::<Vec<_>>();
+      text.push_str(&format!(
+        "\nFILE {} OF {}\n{}",
+        self.patch_preview_file + 1,
+        plan.files_len(),
+        lines.iter().take(42).copied().join("\n"),
+      ));
+      if lines.len() > 42 {
+        text.push_str("\n... full diff retained in memory and printed to the console.");
+      }
+    }
+    Some(text)
+  }
+
+  fn round_trip_status_text(&self) -> Option<String> {
+    let mut text = self.round_trip_status.clone()?;
+    let stale = self.round_trip_report.as_ref().is_some_and(|report| {
+      let revision = self.state_edit_session.as_ref()
+        .map(StateEditSession::revision)
+        .unwrap_or_default();
+      report.is_stale(revision, self.patch_preview.as_ref())
+    });
+    if stale {
+      text.push_str("\nSTALE: validation result is outdated.");
+    }
+    Some(text)
   }
 
   pub fn set_tool_mode(&mut self, mode: ToolMode) {

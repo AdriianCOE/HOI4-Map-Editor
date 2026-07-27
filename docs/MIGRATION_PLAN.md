@@ -76,12 +76,45 @@ mostra prévia e aplica somente no mouse release, chamando uma única transaçã
 províncias via o comando existente. Undo/Redo e Discard continuam em memória,
 sem serializer ou escrita em disco.
 
-## Fase 4A — arquitetura e preview de patches lossless
+## Fase 4A — arquitetura e preview de patches lossless (concluída)
 
-Usar os tokens e spans já preservados para planejar e visualizar alterações
-textuais somente nos intervalos afetados, mantendo comentários, formatação,
-ordem, chaves repetidas, blocos datados e campos desconhecidos. Esta etapa
-prepara o mecanismo lossless sem gravar automaticamente no Azarya.
+Compara baseline e working state, resolve proveniência nos tokens e spans,
+valida bytes esperados e overlaps, aplica patches somente em cópias na memória
+e apresenta resumo semântico, diagnósticos e diff. Bytes não relacionados,
+comentários, formatação, BOM, line endings, campos desconhecidos e blocos
+datados permanecem preservados; casos ambíguos ficam ReviewRequired ou
+Blocked. Estados novos recebem preview canônico e estados removidos apenas um
+plano de remoção. Nenhum arquivo real é escrito.
+
+## Fase 4B — validação isolada dos planos (concluída)
+
+Aplica planos somente em cópias reais dentro de um workspace temporário
+controlado, recarrega o candidato pelos loaders geográfico e de estados e
+compara semântica global, índices, cobertura, diagnósticos estruturais e bytes.
+Planos stale, Blocked, caminhos inseguros, colisões e fontes alteradas falham
+antes da cópia. ReviewRequired exige ação explícita e resulta no máximo em
+`PassedWithReview`. O workspace é removido por padrão em sucesso, falha ou
+cancelamento, e a origem é verificada novamente sem ser escrita.
+
+## Fase 4C — backup verificável, Save transacional e rollback (concluída)
+
+Somente o plano Safe atual cujo digest corresponde ao relatório 4B atual com
+status exatamente `Passed` pode iniciar Save. O fluxo exige confirmação
+explícita, revalida as fontes, adquire lock exclusivo, grava journal durável,
+cria backup físico com manifesto e verificação byte a byte, prepara stages ao
+lado dos destinos e faz commit determinístico por rename.
+
+Modified e removed preservam o original em rollback path até um reload real
+confirmar semântica, índices, cobertura, victory points, buildings,
+diagnósticos, bytes finais e imutabilidade dos arquivos de mapa. Falhas após o
+primeiro rename executam rollback integral em ordem inversa; rollback
+incompleto mantém lock, journal, backup e relatório crítico. Um lock encontrado
+no próximo carregamento bloqueia edição até recovery explícito por rollback.
+
+No sucesso, o projeto recarregado vira o novo baseline, Undo/Redo e dirty são
+zerados e backups permanecem. `Ctrl+S` usa esse fluxo somente quando elegível.
+`Save As`, autosave, restauração gráfica de backups, retenção avançada,
+integração Git e execução do HOI4 continuam fora do escopo.
 
 ## Fase 5 — validações e diagnósticos avançados
 
@@ -95,7 +128,7 @@ publicação somente após o fluxo lossless estar comprovado.
 
 ## Próxima etapa
 
-Fase 4A: preparar arquitetura e preview de patches lossless sobre os tokens e
-spans preservados, ainda sem gravar automaticamente nos arquivos reais. O mapa
-geográfico e os arquivos de estado permanecem sem salvamento até esse mecanismo
-ser validado.
+Fase 5: ampliar validações e diagnósticos sem alargar a fronteira de escrita.
+O núcleo principal das Fases 0 a 4C está implementado; Save continua restrito
+aos arquivos diretos `history/states/*.txt` autorizados pelo pipeline
+lossless.

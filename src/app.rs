@@ -196,6 +196,22 @@ impl EventHandler for App {
         _ => return,
       }
     }
+    if state && self.canvas.as_ref().is_some_and(Canvas::state_save_blocks_editing) {
+      if key == Key::S && mods.ctrl && !mods.shift {
+        self.action_save_map();
+      } else if key == Key::Escape
+        && self.canvas.as_ref().is_some_and(Canvas::state_save_can_cancel)
+      {
+        if let Some(canvas) = self.canvas.as_mut() {
+          canvas.cancel_state_save(&mut self.alerts);
+        }
+      } else {
+        self.alerts.push(Err(
+          "State editing is locked while Save or recovery is active"
+        ));
+      }
+      return;
+    }
     match (&mut self.canvas, state, key) {
       (_, state, Key::Tab) => self.alerts.set_state(state),
       (_, true, Key::O) if mods.ctrl => self.action_open_map(mods.alt),
@@ -338,6 +354,18 @@ impl EventHandler for App {
   }
 
   fn on_close(&mut self) -> bool {
+    if self.canvas.as_ref().is_some_and(Canvas::state_save_blocks_close) {
+      self.alerts.push(Err(
+        "Cannot close while State Save commit, rollback, or recovery is pending"
+      ));
+      return false;
+    }
+    if self.canvas.as_ref().is_some_and(Canvas::state_save_is_running) {
+      if let Some(canvas) = self.canvas.as_mut() {
+        canvas.cancel_state_save(&mut self.alerts);
+      }
+      return false;
+    }
     if self.canvas.as_ref().is_some_and(Canvas::property_draft_is_modified) {
       let province = self.canvas.as_ref().is_some_and(Canvas::province_data_editor_is_open);
       if !msg_dialog_discard_property_draft_exit(province) {
@@ -350,6 +378,20 @@ impl EventHandler for App {
       canvas.discard_unmodified_property_draft();
     }
     if self.canvas.as_ref().is_some_and(Canvas::has_unsaved_state_edits) {
+      let eligible = self.canvas.as_ref()
+        .and_then(|canvas| canvas.state_save_confirmation_message().ok());
+      if let Some(message) = eligible {
+        return match msg_dialog_state_edits_exit(&message) {
+          StateExitResolution::Save => {
+            if let Some(canvas) = self.canvas.as_mut() {
+              canvas.start_state_save(&mut self.alerts);
+            }
+            false
+          },
+          StateExitResolution::Discard => true,
+          StateExitResolution::KeepEditing => false,
+        };
+      }
       return msg_dialog_discard_state_edits_exit();
     }
     if self.is_canvas_modified() {
@@ -418,6 +460,20 @@ impl App {
 
   pub fn action_interface_button(&mut self, id: ButtonId) {
     use self::interface::ButtonId::*;
+    if self.canvas.as_ref().is_some_and(Canvas::state_save_blocks_editing)
+      && !matches!(
+        id,
+        ToolbarFileSave
+          | ToolbarPatchCancelSave
+          | ToolbarPatchViewSaveReport
+          | ToolbarPatchRecoverSave
+      )
+    {
+      self.alerts.push(Err(
+        "State editing is locked while Save or recovery is active"
+      ));
+      return;
+    }
     if id == ToolbarEditActivateStateLasso {
       if self.resolve_property_draft()
         && let Some(canvas) = self.canvas.as_mut()
@@ -460,7 +516,7 @@ impl App {
     match (&mut self.canvas, id) {
       (_, ToolbarFileOpenFileArchive) => self.action_open_map(true),
       (_, ToolbarFileOpenFolder) => self.action_open_map(false),
-      (Some(_), ToolbarFileSave) => self.action_save_map(),
+      (Some(_), ToolbarFileSave | ToolbarPatchSaveStateFiles) => self.action_save_map(),
       (Some(_), ToolbarFileSaveAsArchive) => self.action_save_map_as(true),
       (Some(_), ToolbarFileSaveAsFolder) => self.action_save_map_as(false),
       (Some(_), ToolbarFileReveal) => self.action_reveal_map(),
@@ -539,6 +595,42 @@ impl App {
       {
         canvas.discard_state_edit_session(&mut self.alerts);
       },
+      (Some(canvas), ToolbarPatchGenerate | ToolbarPatchRegenerate) => {
+        canvas.generate_patch_preview(&mut self.alerts);
+      },
+      (Some(canvas), ToolbarPatchPreviousFile) => {
+        canvas.select_patch_preview_file(-1, &mut self.alerts);
+      },
+      (Some(canvas), ToolbarPatchNextFile) => {
+        canvas.select_patch_preview_file(1, &mut self.alerts);
+      },
+      (Some(canvas), ToolbarPatchValidate) => {
+        canvas.start_round_trip_validation(false, &mut self.alerts);
+      },
+      (Some(canvas), ToolbarPatchValidateReview) => {
+        canvas.start_round_trip_validation(true, &mut self.alerts);
+      },
+      (Some(canvas), ToolbarPatchCancelValidation) => {
+        canvas.cancel_round_trip_validation(&mut self.alerts);
+      },
+      (Some(canvas), ToolbarPatchViewValidationReport) => {
+        canvas.view_round_trip_report(&mut self.alerts);
+      },
+      (Some(canvas), ToolbarPatchClearValidation) => {
+        canvas.clear_round_trip_report(&mut self.alerts);
+      },
+      (Some(canvas), ToolbarPatchCancelSave) => {
+        canvas.cancel_state_save(&mut self.alerts);
+      },
+      (Some(canvas), ToolbarPatchViewSaveReport) => {
+        canvas.view_state_save_report(&mut self.alerts);
+      },
+      (Some(canvas), ToolbarPatchRecoverSave) => {
+        canvas.recover_state_save(&mut self.alerts);
+      },
+      (Some(canvas), ToolbarPatchClear) => {
+        canvas.clear_patch_preview(&mut self.alerts);
+      },
       (Some(_), ToolbarViewMode1) => self.action_change_view_mode(ViewMode::Color),
       (Some(_), ToolbarViewMode2) => self.action_change_view_mode(ViewMode::Kind),
       (Some(_), ToolbarViewMode3) => self.action_change_view_mode(ViewMode::Terrain),
@@ -566,6 +658,12 @@ impl App {
   }
 
   fn action_activate_tool(&mut self, pos: Vector2<f64>, mods: KeyMods) {
+    if self.canvas.as_ref().is_some_and(Canvas::state_save_blocks_editing) {
+      self.alerts.push(Err(
+        "State editing is locked while Save or recovery is active"
+      ));
+      return;
+    }
     let editor_consumed = self.interface.as_ref().is_some_and(|interface| {
       self.canvas.as_mut().is_some_and(|canvas| {
         canvas.state_property_editor_click(interface, pos, &mut self.alerts)
@@ -633,6 +731,12 @@ impl App {
   }
 
   fn action_open_map(&mut self, archive: bool) {
+    if self.canvas.as_ref().is_some_and(Canvas::state_save_blocks_editing) {
+      self.alerts.push(Err(
+        "Finish or recover the active State Save before opening another project"
+      ));
+      return;
+    }
     if !self.resolve_property_draft() {
       return;
     }
@@ -652,16 +756,26 @@ impl App {
   }
 
   fn action_save_map(&mut self) {
-    if let Some(canvas) = &self.canvas {
-      if canvas.map_access_mode() == self::canvas::MapAccessMode::ReadOnly {
-        self.alerts.push(Err(
-          "Saving state files is not implemented yet. Created and removed states only exist in the current session."
-        ));
-        return;
+    let state_project = self.canvas.as_ref().is_some_and(|canvas| canvas.project().is_some());
+    if state_project {
+      let confirmation = self.canvas.as_ref()
+        .expect("state project has a canvas")
+        .state_save_confirmation_message();
+      match confirmation {
+        Ok(message) if msg_dialog_confirm_state_save(&message) => {
+          if let Some(canvas) = self.canvas.as_mut() {
+            canvas.start_state_save(&mut self.alerts);
+          }
+        },
+        Ok(_) => self.alerts.push(Ok("State Save cancelled before it started")),
+        Err(message) => self.alerts.push(Err(message)),
       }
+      return;
+    }
+    if let Some(canvas) = &self.canvas {
       let location = canvas.location().clone();
       self.raw_save_map_at(location);
-    };
+    }
   }
 
   fn action_save_map_as(&mut self, archive: bool) {
@@ -669,7 +783,7 @@ impl App {
       canvas.map_access_mode() == self::canvas::MapAccessMode::ReadOnly
     }) {
       self.alerts.push(Err(
-        "Saving state files is not implemented yet. Created and removed states only exist in the current session."
+        "Save As does not apply to state projects. Use Save State Files after a Passed validation."
       ));
     } else if self.canvas.is_some() {
       if let Some(location) = file_dialog_save(archive) {
@@ -871,6 +985,18 @@ fn msg_dialog_confirm_state_batch(description: &str) -> bool {
   )
 }
 
+fn msg_dialog_confirm_state_save(description: &str) -> bool {
+  matches!(
+    MessageDialog::new()
+      .set_title(crate::APPNAME)
+      .set_description(description)
+      .set_level(MessageLevel::Warning)
+      .set_buttons(MessageButtons::YesNo)
+      .show(),
+    MessageDialogResult::Yes
+  )
+}
+
 fn msg_dialog_unsaved_changes() -> bool {
   let result = MessageDialog::new()
     .set_title(crate::APPNAME)
@@ -892,7 +1018,7 @@ fn msg_dialog_discard_state_edits_exit() -> bool {
     .set_description(
       "This editing session contains unsaved in-memory changes.\n\n\
        Created, removed, reassigned, or edited states have not been saved.\n\
-       Saving state files is not available yet.\n\
+       The current session is not eligible for automatic Save.\n\
        Discard the changes and close?\n\n\
        Yes = Discard and close\n\
        No = Keep editing"
@@ -908,12 +1034,37 @@ fn msg_dialog_discard_state_edits_exit() -> bool {
   }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateExitResolution {
+  Save,
+  Discard,
+  KeepEditing,
+}
+
+fn msg_dialog_state_edits_exit(save_summary: &str) -> StateExitResolution {
+  let result = MessageDialog::new()
+    .set_title(crate::APPNAME)
+    .set_description(format!(
+      "This editing session contains unsaved state changes.\n\n\
+       Yes = Save state files\nNo = Discard and close\nCancel = Keep editing\n\n\
+       {save_summary}"
+    ))
+    .set_level(MessageLevel::Warning)
+    .set_buttons(MessageButtons::YesNoCancel)
+    .show();
+  match result {
+    MessageDialogResult::Yes => StateExitResolution::Save,
+    MessageDialogResult::No => StateExitResolution::Discard,
+    _ => StateExitResolution::KeepEditing,
+  }
+}
+
 fn msg_dialog_discard_state_edits() -> bool {
   let result = MessageDialog::new()
     .set_title(crate::APPNAME)
     .set_description(
       "Discard all in-memory state edits?\n\n\
-       State file saving is not available yet.\n\
+       Any current patch preview and validation result will also be discarded.\n\
        Yes = Discard changes\n\
        No = Keep editing"
     )

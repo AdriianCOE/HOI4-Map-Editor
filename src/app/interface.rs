@@ -662,6 +662,20 @@ pub enum ButtonId {
   ToolbarEditProblems,
   ToolbarEditToggleLassoSnap,
   ToolbarEditNextMaskMode,
+  ToolbarPatchGenerate,
+  ToolbarPatchRegenerate,
+  ToolbarPatchPreviousFile,
+  ToolbarPatchNextFile,
+  ToolbarPatchValidate,
+  ToolbarPatchValidateReview,
+  ToolbarPatchCancelValidation,
+  ToolbarPatchViewValidationReport,
+  ToolbarPatchClearValidation,
+  ToolbarPatchSaveStateFiles,
+  ToolbarPatchCancelSave,
+  ToolbarPatchViewSaveReport,
+  ToolbarPatchRecoverSave,
+  ToolbarPatchClear,
   ToolbarViewMode1,
   ToolbarViewMode2,
   ToolbarViewMode3,
@@ -705,7 +719,19 @@ pub struct StateActionAvailability {
   pub property_draft_modified: bool,
   pub can_undo: bool,
   pub can_redo: bool,
-  pub has_edits: bool
+  pub has_edits: bool,
+  pub has_patch_preview: bool,
+  pub patch_preview_files: usize,
+  pub patch_preview_stale: bool,
+  pub patch_preview_blocked: bool,
+  pub patch_preview_review_required: bool,
+  pub validation_running: bool,
+  pub has_validation_report: bool,
+  pub save_eligible: bool,
+  pub save_running: bool,
+  pub save_cancellable: bool,
+  pub recovery_required: bool,
+  pub has_save_report: bool
 }
 
 impl StateActionAvailability {
@@ -747,6 +773,36 @@ impl StateActionAvailability {
       ToolbarEditUnassignSelected => self.state_view && self.can_unassign,
       ToolbarEditClearStateSelection => self.state_view && self.has_selection,
       ToolbarEditDiscardStateSession => self.state_view && self.has_edits,
+      ToolbarPatchGenerate => self.state_view,
+      ToolbarPatchRegenerate => self.state_view && self.has_patch_preview,
+      ToolbarPatchPreviousFile | ToolbarPatchNextFile => {
+        self.state_view && self.patch_preview_files > 1
+      },
+      ToolbarPatchValidate => {
+        self.state_view
+          && self.has_patch_preview
+          && !self.patch_preview_stale
+          && !self.patch_preview_blocked
+          && !self.patch_preview_review_required
+          && !self.validation_running
+      },
+      ToolbarPatchValidateReview => {
+        self.state_view
+          && self.has_patch_preview
+          && !self.patch_preview_stale
+          && !self.patch_preview_blocked
+          && self.patch_preview_review_required
+          && !self.validation_running
+      },
+      ToolbarPatchCancelValidation => self.validation_running,
+      ToolbarPatchViewValidationReport | ToolbarPatchClearValidation => {
+        self.has_validation_report && !self.validation_running
+      },
+      ToolbarPatchSaveStateFiles => self.save_eligible && !self.save_running,
+      ToolbarPatchCancelSave => self.save_running && self.save_cancellable,
+      ToolbarPatchViewSaveReport => self.has_save_report && !self.save_running,
+      ToolbarPatchRecoverSave => self.recovery_required && !self.save_running,
+      ToolbarPatchClear => self.has_patch_preview,
       _ => true
     }
   }
@@ -806,6 +862,22 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
     ("Activate: Assign to target", "B", ButtonId::ToolbarEditActivateStateBrushAssign),
     ("Activate: Unassign", "", ButtonId::ToolbarEditActivateStateBrushUnassign),
     ("Cancel stroke / deactivate", "Esc", ButtonId::ToolbarEditCancelStateBrush)
+  ]),
+  ("Patch Preview", &[
+    ("Generate preview", "", ButtonId::ToolbarPatchGenerate),
+    ("Regenerate preview", "", ButtonId::ToolbarPatchRegenerate),
+    ("Previous file", "", ButtonId::ToolbarPatchPreviousFile),
+    ("Next file", "", ButtonId::ToolbarPatchNextFile),
+    ("Validate in temporary workspace", "", ButtonId::ToolbarPatchValidate),
+    ("Validate review-required changes in isolated workspace", "", ButtonId::ToolbarPatchValidateReview),
+    ("Cancel round-trip validation", "", ButtonId::ToolbarPatchCancelValidation),
+    ("View validation report", "", ButtonId::ToolbarPatchViewValidationReport),
+    ("Clear validation result", "", ButtonId::ToolbarPatchClearValidation),
+    ("Save state files", "Ctrl+S", ButtonId::ToolbarPatchSaveStateFiles),
+    ("Cancel state save", "", ButtonId::ToolbarPatchCancelSave),
+    ("View state save report", "", ButtonId::ToolbarPatchViewSaveReport),
+    ("Recover interrupted state save", "", ButtonId::ToolbarPatchRecoverSave),
+    ("Clear preview", "", ButtonId::ToolbarPatchClear)
   ]),
   ("View", &[
     ("Color/Province Map View Mode", "1", ButtonId::ToolbarViewMode1),

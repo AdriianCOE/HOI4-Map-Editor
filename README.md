@@ -33,8 +33,11 @@ For state projects, the geographic map is a read-only visual base.
 State rendering and selection use an in-memory working model. Province-to-state
 associations and selected state properties can be changed temporarily,
 inspected, undone, redone, or discarded. States can also be created or removed
-from the current session, but they are not serialized and no mod file is
-created, deleted, renamed, or written.
+from the current session. A disposable patch preview can show the exact
+span-based changes and canonical content planned for new states. That plan can
+also be applied and reloaded inside an isolated temporary workspace for
+round-trip validation. A current fully Safe plan whose exact validation status
+is `Passed` can then be saved transactionally after explicit confirmation.
 
 ## Current status
 
@@ -103,10 +106,55 @@ created, deleted, renamed, or written.
 - Create and Remove each produce exactly one command in the unified history.
   Redo keeps created IDs reserved, and global discard restores the loaded
   baseline with zero created or removed states.
+- The Patch Preview menu derives a `ProjectPatchPlan` from the immutable
+  baseline versus the current working state. Existing files use byte-span
+  Replace/Insert/Delete operations over a copy of their exact original bytes;
+  new states use an in-memory canonical renderer; removed states produce only
+  planned removals. Each file is marked Safe, Review required, or Blocked and
+  includes semantic changes, operations, diagnostics, and a textual diff.
+- Preview output is parsed and compared semantically before it can be marked
+  safe. Lossy UTF-8, changed source files, duplicate authoritative bindings,
+  ambiguous dated history, overlaps, and unsafe fragment transfers block the
+  affected file. Any edit, Undo, Redo, or Discard makes an older preview stale.
+- The Patch Preview menu can validate a current Safe plan in an isolated
+  workspace under the system temporary directory. It copies the two map inputs
+  and every direct `history/states/*.txt` file as real bytes, applies the plan
+  only to the candidate copy, reloads it through the normal map and state
+  loaders, and compares the full semantic model, indexes, province coverage,
+  structural diagnostics, and bytes.
+- Validation rejects stale, Blocked, unsafe, colliding, or externally changed
+  plans before creating the workspace. ReviewRequired plans need the explicit
+  review action and can finish only as `PassedWithReview`. The default policy
+  removes temporary workspaces after pass, failure, or cancellation; an
+  opt-in diagnostic policy may retain a failed workspace and reports its exact
+  path.
+- State Save is authorized only by the exact current plan and its exact current
+  `Passed` report. `PassedWithReview`, stale results, drafts, active
+  lasso/brush interactions, externally changed sources, net-zero plans, and
+  interrupted transactions remain ineligible.
+- `Ctrl+S` and `Patch Preview > Save state files` show the operation counts,
+  project root, planned backup location, and a warning before changing state
+  files. `Save As` remains unavailable for state projects.
+- Each confirmed Save acquires an exclusive
+  `.hoi4-state-editor/save.lock`, persists a deterministic journal, copies and
+  verifies every modified/removed source in a timestamped backup, writes and
+  verifies same-directory stage files, then commits modified, created, and
+  removed paths in deterministic order.
+- Existing files are renamed to transaction-specific rollback siblings before
+  replacement/removal. Those rollback files remain until a real project reload
+  and global semantic, index, coverage, victory-point, building, diagnostic,
+  byte, and map-input comparison succeeds.
+- Failures after commit begins trigger reverse journal-driven rollback.
+  Incomplete rollback keeps the lock, journal, backup, and critical report.
+  On the next open, an interrupted lock blocks editing until the explicit
+  recovery action performs a verified rollback.
+- A successful post-save reload becomes the new edit baseline with empty
+  Undo/Redo and dirty state. Backups and transaction reports remain; stage and
+  rollback siblings are removed.
 - Geographic painting, recoloring, metadata changes, adjacency changes, and
-  map saving are blocked when a state project is open. `Ctrl+S` remains
-  intentionally blocked for state projects because the serializer is not part
-  of this phase. The property editor never uses a Save action.
+  map saving are blocked when a state project is open. State Save touches only
+  direct `history/states/*.txt` paths; the property editor never uses a Save
+  action.
 - Opening a direct `map/` folder or map ZIP remains available as an explicitly
   legacy, editable compatibility mode.
 
@@ -115,11 +163,17 @@ See [Architecture](docs/ARCHITECTURE.md) and
 
 ## Safety
 
-This is experimental software. Keep backups of every mod before opening or
-editing it. The state-project path does not save `provinces.bmp`,
-`definition.csv`, `adjacencies.csv`, `rivers.bmp`, or state files in this
-phase. State edits are held only in memory until the edit session is discarded
-or the application is closed.
+This is experimental software. Keep independent backups of every mod.
+Round-trip validation still writes only to a newly created directory under the
+system temporary directory. State Save is a separate, explicitly confirmed
+operation and writes only the Safe direct `history/states/*.txt` operations
+that passed the exact current validation. It never saves `provinces.bmp`,
+`definition.csv`, `adjacencies.csv`, or `rivers.bmp`.
+
+Verified backups, journals, and reports are stored under
+`<mod>/.hoi4-state-editor/`. Same-directory temporary files use suffixes after
+`.txt` (`.hse-stage-*` and `.hse-rollback-*`) so HOI4 does not interpret them
+as states. Backups are not removed automatically.
 
 ## Building
 

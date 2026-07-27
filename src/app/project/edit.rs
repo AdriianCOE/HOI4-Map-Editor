@@ -28,6 +28,7 @@ pub struct StateEditSession {
   session_diagnostics: Vec<ProjectDiagnostic>,
   last_timings: StateEditTimings,
   last_changed_provinces: BTreeSet<u32>,
+  revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -230,6 +231,7 @@ impl StateEditSession {
       session_diagnostics: Vec::new(),
       last_timings: StateEditTimings::default(),
       last_changed_provinces: BTreeSet::new(),
+      revision: 0,
     }
   }
 
@@ -346,6 +348,10 @@ impl StateEditSession {
 
   pub fn dirty_state_ids(&self) -> &BTreeSet<u32> {
     &self.dirty_state_ids
+  }
+
+  pub fn revision(&self) -> u64 {
+    self.revision
   }
 
   pub fn can_undo(&self) -> bool {
@@ -602,6 +608,7 @@ impl StateEditSession {
     self.last_changed_provinces.extend(command.changed_provinces());
     self.undo_stack.push(command);
     self.redo_stack.clear();
+    self.revision = self.revision.wrapping_add(1);
     Ok(())
   }
 
@@ -630,6 +637,7 @@ impl StateEditSession {
     self.push_command_diagnostics(&command);
     self.undo_stack.push(command);
     self.redo_stack.clear();
+    self.revision = self.revision.wrapping_add(1);
     Ok(true)
   }
 
@@ -769,6 +777,7 @@ impl StateEditSession {
     self.push_command_diagnostics(&command);
     self.undo_stack.push(command);
     self.redo_stack.clear();
+    self.revision = self.revision.wrapping_add(1);
     Ok(true)
   }
 
@@ -798,6 +807,7 @@ impl StateEditSession {
     self.redo_stack.push(command);
     self.rebuild_session_diagnostics();
     self.last_timings.undo = started.elapsed();
+    self.revision = self.revision.wrapping_add(1);
     true
   }
 
@@ -832,6 +842,7 @@ impl StateEditSession {
     self.undo_stack.push(command);
     self.rebuild_session_diagnostics();
     self.last_timings.redo = started.elapsed();
+    self.revision = self.revision.wrapping_add(1);
     true
   }
 
@@ -856,6 +867,7 @@ impl StateEditSession {
     self.target_state_id = None;
     self.session_diagnostics.clear();
     self.last_timings.discard = started.elapsed();
+    self.revision = self.revision.wrapping_add(1);
   }
 
   pub fn validate_invariants(&self) -> Result<(), StateEditError> {
@@ -941,6 +953,7 @@ impl StateEditSession {
     self.last_changed_provinces.extend(command.changed_provinces());
     self.undo_stack.push(command);
     self.redo_stack.clear();
+    self.revision = self.revision.wrapping_add(1);
     Ok(())
   }
 
@@ -1635,7 +1648,10 @@ mod tests {
     UNASSIGNED_LAND_COLOR, classify_province_color_for, generate_state_view_for, state_color
   };
   use crate::app::state::{StateDocument, parse_text};
-  use crate::app::project::{ProjectPaths, StateLoadSummary};
+  use crate::app::project::{
+    ProjectPaths, RoundTripCancellation, RoundTripStatus, RoundTripValidator,
+    StateLoadSummary, plan_state_patches,
+  };
   use crate::config::Config;
   use crate::util::files::Location;
   use std::path::PathBuf;
@@ -1648,6 +1664,8 @@ mod tests {
     data.provinces.extend(provinces.iter().copied());
     StateDocument {
       path: PathBuf::from(format!("{id}.txt")),
+      original_bytes: Vec::new().into(),
+      exact_utf8: true,
       syntax: parse_text("", ""),
       data: Some(data),
       diagnostics: Vec::new(),
@@ -1707,6 +1725,7 @@ mod tests {
       session_diagnostics: Vec::new(),
       last_timings: StateEditTimings::default(),
       last_changed_provinces: BTreeSet::new(),
+      revision: 0,
     }
   }
 
@@ -2183,6 +2202,266 @@ mod tests {
   }
 
   #[test]
+  #[ignore = "requires HOI4_STATE_EDITOR_REAL_MOD_ROOT"]
+  fn real_mod_phase4a_patch_preview_smoke() {
+    let root = std::env::var_os("HOI4_STATE_EDITOR_REAL_MOD_ROOT")
+      .map(PathBuf::from)
+      .expect("set HOI4_STATE_EDITOR_REAL_MOD_ROOT");
+    let paths = ProjectPaths::discover(&root).unwrap();
+    let config = Config {
+      preserve_ids: true,
+      ..Config::default()
+    };
+    let bundle = Bundle::load(&Location::Directory(paths.map_directory.clone()), config).unwrap();
+    let province_ids = bundle.map.province_ids().collect::<BTreeSet<_>>();
+    let land_province_ids = bundle.map.iter_province_data()
+      .filter(|(_, province)| province.kind == ProvinceKind::Land)
+      .filter_map(|(_, province)| province.preserved_id)
+      .collect::<BTreeSet<_>>();
+    let mut project = Hoi4Project::new(paths);
+    project.load_states(&province_ids, &land_province_ids);
+    let mut edit = StateEditSession::new(&project, &bundle.map);
+
+    let original_valverde = edit.state_data(1).expect("State 1");
+    assert_eq!(original_valverde.manpower, Some(142_000));
+    assert_eq!(original_valverde.state_category.as_deref(), Some("rural"));
+    assert_eq!(original_valverde.resources.get("oil"), Some(&8));
+    assert_eq!(edit.province_state_id(5144), Some(1));
+    assert_eq!(edit.province_data(5144).unwrap().victory_point, Some(5));
+
+    let mut valverde = EditableStateProperties::from_state(&original_valverde);
+    valverde.manpower = Some(150_000);
+    valverde.state_category = Some("town".to_owned());
+    valverde.resources.insert("oil".to_owned(), 10);
+    edit.update_state_properties(1, valverde).unwrap();
+    let commands = edit.summary().commands;
+    let dirty = edit.dirty_state_ids().clone();
+    let scalar_plan = plan_state_patches(&project, &edit);
+    assert_eq!(edit.summary().commands, commands);
+    assert_eq!(edit.dirty_state_ids(), &dirty);
+    assert_eq!(scalar_plan.modified_files.len(), 1);
+    assert!(scalar_plan.modified_files[0].after.is_some());
+    assert!(scalar_plan.modified_files[0].semantic_changes.iter().any(|change| {
+      change.contains("manpower") && change.contains("150000")
+    }));
+    println!("Phase 4A Scenario A:\n{}", scalar_plan.summary_text());
+    println!("{}", scalar_plan.file_report(0).unwrap());
+    edit.discard();
+
+    let move_target = edit.valid_state_ids().iter()
+      .copied()
+      .find(|state_id| *state_id != 1)
+      .expect("another valid state");
+    edit.reassign_provinces(&[5144], Some(move_target)).unwrap();
+    let move_plan = plan_state_patches(&project, &edit);
+    let move_report = (0..move_plan.files_len())
+      .filter_map(|index| move_plan.file_report(index))
+      .collect::<Vec<_>>()
+      .join("\n");
+    assert!(move_report.contains("remove Province 5144"));
+    assert!(move_report.contains("add Province 5144"));
+    assert!(move_report.contains("remove VP 5144 = 5"));
+    assert!(move_report.contains("add VP 5144 = 5"));
+    println!("Phase 4A Scenario B (target State {move_target}):\n{}", move_plan.summary_text());
+    println!("{move_report}");
+    edit.discard();
+
+    let new_state_id = edit.suggest_next_state_id();
+    assert_eq!(new_state_id, 512);
+    edit.toggle_selected_province(5144).unwrap();
+    edit.create_state(
+      new_state_id,
+      EditableStateProperties {
+        name: Some("STATE_512".to_owned()),
+        manpower: Some(1_000),
+        state_category: Some("rural".to_owned()),
+        ..Default::default()
+      },
+      true,
+    ).unwrap();
+    let create_plan = plan_state_patches(&project, &edit);
+    let created = create_plan.created_files.iter()
+      .find(|file| file.state_id == new_state_id)
+      .expect("planned State 512 file");
+    assert_eq!(
+      created.path,
+      PathBuf::from("history/states/512-State_512.txt")
+    );
+    assert!(!project.paths.root.join(&created.path).exists());
+    assert_ne!(created.safety, crate::app::project::PatchSafety::Blocked);
+    println!("Phase 4A Scenario C:\n{}", create_plan.summary_text());
+    println!(
+      "{}",
+      create_plan.file_report(create_plan.modified_files.len()).unwrap()
+    );
+    let stale_plan = create_plan.clone();
+    edit.discard();
+    assert!(stale_plan.is_stale(edit.revision()));
+    let empty_after_discard = plan_state_patches(&project, &edit);
+    assert_eq!(empty_after_discard.files_len(), 0);
+
+    let removal_id = edit.valid_state_ids().iter().copied()
+      .filter(|state_id| *state_id != 1)
+      .find(|state_id| {
+        let mut probe = edit.clone();
+        probe.remove_state(*state_id, StateRemovalPolicy::MoveToState(1)).is_ok()
+      })
+      .expect("removable loaded state");
+    edit.remove_state(removal_id, StateRemovalPolicy::MoveToState(1)).unwrap();
+    let removal_plan = plan_state_patches(&project, &edit);
+    assert!(removal_plan.removed_files.iter().any(|file| file.state_id == removal_id));
+    println!("Phase 4A Scenario D (removed State {removal_id}):\n{}", removal_plan.summary_text());
+    assert!(edit.undo());
+    let restored_plan = plan_state_patches(&project, &edit);
+    assert!(restored_plan.removed_files.is_empty());
+    edit.discard();
+
+    let mut net_zero = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+    net_zero.manpower = Some(150_000);
+    edit.update_state_properties(1, net_zero).unwrap();
+    assert!(edit.undo());
+    let net_zero_plan = plan_state_patches(&project, &edit);
+    assert_eq!(net_zero_plan.files_len(), 0);
+    assert!(net_zero_plan.diagnostics.is_empty());
+    println!(
+      "Phase 4A Scenarios E/H: net-zero and stale/discard passed.\n{}",
+      net_zero_plan.summary_text()
+    );
+  }
+
+  #[test]
+  #[ignore = "requires HOI4_STATE_EDITOR_REAL_MOD_ROOT"]
+  fn real_mod_phase4b_round_trip_smoke() {
+    let root = std::env::var_os("HOI4_STATE_EDITOR_REAL_MOD_ROOT")
+      .map(PathBuf::from)
+      .expect("set HOI4_STATE_EDITOR_REAL_MOD_ROOT");
+    let paths = ProjectPaths::discover(&root).unwrap();
+    let config = Config {
+      preserve_ids: true,
+      ..Config::default()
+    };
+    let bundle = Bundle::load(&Location::Directory(paths.map_directory.clone()), config).unwrap();
+    let province_ids = bundle.map.province_ids().collect::<BTreeSet<_>>();
+    let land_province_ids = bundle.map.iter_province_data()
+      .filter(|(_, province)| province.kind == ProvinceKind::Land)
+      .filter_map(|(_, province)| province.preserved_id)
+      .collect::<BTreeSet<_>>();
+    let mut project = Hoi4Project::new(paths);
+    project.load_states(&province_ids, &land_province_ids);
+    let validator = RoundTripValidator::default();
+    let validate = |label: &str, edit: &StateEditSession| {
+      let plan = plan_state_patches(&project, edit);
+      let report = validator.validate(
+        &project,
+        edit,
+        &plan,
+        &RoundTripCancellation::default(),
+        |_| {},
+      );
+      println!("Phase 4B {label}:\n{}", report.full_text());
+      assert_eq!(report.status, RoundTripStatus::Passed, "{label}: {}", report.full_text());
+      assert!(report.workspace.cleaned || report.no_candidate_changes);
+      report
+    };
+
+    let mut edit = StateEditSession::new(&project, &bundle.map);
+    let mut valverde = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+    valverde.manpower = Some(150_000);
+    valverde.state_category = Some("town".to_owned());
+    valverde.resources.insert("oil".to_owned(), 10);
+    edit.update_state_properties(1, valverde).unwrap();
+    let scalar = validate("Scenario A - Valverde properties", &edit);
+    assert_eq!(scalar.application.modified_files_applied, 1);
+    edit.discard();
+
+    let move_target = edit.valid_state_ids().iter()
+      .copied()
+      .find(|state_id| *state_id != 1)
+      .unwrap();
+    edit.reassign_provinces(&[5144], Some(move_target)).unwrap();
+    let moved = validate("Scenario B - Province 5144", &edit);
+    assert_eq!(moved.application.modified_files_applied, 2);
+    assert_eq!(edit.province_data(5144).unwrap().victory_point, Some(5));
+    edit.discard();
+
+    edit.toggle_selected_province(5144).unwrap();
+    edit.create_state(
+      512,
+      EditableStateProperties {
+        name: Some("STATE_512".to_owned()),
+        manpower: Some(1_000),
+        state_category: Some("rural".to_owned()),
+        ..Default::default()
+      },
+      true,
+    ).unwrap();
+    let created = validate("Scenario C - State 512", &edit);
+    assert_eq!(created.application.created_files_applied, 1);
+    assert!(!root.join("history/states/512-State_512.txt").exists());
+    edit.discard();
+
+    let removal_id = edit.valid_state_ids().iter().copied()
+      .filter(|state_id| *state_id != 1)
+      .find(|state_id| {
+        let mut probe = edit.clone();
+        probe.remove_state(*state_id, StateRemovalPolicy::MoveToState(1)).is_ok()
+      })
+      .expect("removable loaded state");
+    let removed_source = project.state_document(removal_id).unwrap().path.clone();
+    edit.remove_state(removal_id, StateRemovalPolicy::MoveToState(1)).unwrap();
+    let removed = validate("Scenario D - loaded state removal", &edit);
+    assert_eq!(removed.application.removed_files_applied, 1);
+    assert!(removed_source.exists());
+    edit.discard();
+
+    let mut combined_properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+    combined_properties.manpower = Some(150_000);
+    combined_properties.state_category = Some("town".to_owned());
+    combined_properties.resources.insert("oil".to_owned(), 10);
+    edit.update_state_properties(1, combined_properties).unwrap();
+    let provincial_id = edit.state_data(1).unwrap().provinces.iter()
+      .copied()
+      .find(|province_id| *province_id != 5144)
+      .expect("another State 1 province");
+    edit.update_province_data(
+      provincial_id,
+      1,
+      EditableProvinceData {
+        victory_point: Some(1),
+        buildings: BTreeMap::from([("bunker".to_owned(), 1)]),
+      },
+    ).unwrap();
+    edit.toggle_selected_province(5144).unwrap();
+    edit.create_state(
+      512,
+      EditableStateProperties {
+        name: Some("STATE_512".to_owned()),
+        state_category: Some("rural".to_owned()),
+        ..Default::default()
+      },
+      true,
+    ).unwrap();
+    let combined_removal_id = edit.valid_state_ids().iter().copied()
+      .filter(|state_id| *state_id != 1 && *state_id != 512)
+      .find(|state_id| {
+        let mut probe = edit.clone();
+        probe.remove_state(*state_id, StateRemovalPolicy::MoveToState(1)).is_ok()
+      })
+      .expect("combined removable loaded state");
+    edit.remove_state(combined_removal_id, StateRemovalPolicy::MoveToState(1)).unwrap();
+    let combined = validate("Scenario E - combined global candidate", &edit);
+    assert!(combined.application.modified_files_applied >= 1);
+    assert_eq!(combined.application.created_files_applied, 1);
+    assert_eq!(combined.application.removed_files_applied, 1);
+    edit.discard();
+
+    let empty = validate("Scenario F/K - discard and net-zero", &edit);
+    assert!(empty.no_candidate_changes);
+    assert_eq!(edit.summary().commands, 0);
+    assert_eq!(edit.summary().modified_states, 0);
+  }
+
+  #[test]
   fn state_edit_moves_victory_points_and_undo_restores_them() {
     let mut edit = session();
     edit.reassign_provinces(&[10], Some(2)).unwrap();
@@ -2290,6 +2569,7 @@ mod tests {
   #[test]
   fn undo_redo_discard_and_edit_invariants_roundtrip() {
     let mut edit = session();
+    assert_eq!(edit.revision(), 0);
     edit.reassign_provinces(&[10, 11], Some(2)).unwrap();
     assert!(edit.undo());
     edit.validate_invariants().unwrap();
@@ -2308,6 +2588,7 @@ mod tests {
     assert!(edit.redo_stack.is_empty());
     assert!(edit.dirty_state_ids.is_empty());
     assert!(edit.session_diagnostics.is_empty());
+    assert_eq!(edit.revision(), 6);
   }
 
   #[test]

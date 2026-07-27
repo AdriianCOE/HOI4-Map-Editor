@@ -33,8 +33,8 @@ carregados nas próximas fases.
   árvore original ou campos desconhecidos;
 - `loader.rs`: enumera somente arquivos `.txt` diretamente em
   `history/states/`, ordena os caminhos e continua após falhas individuais;
-- `model.rs`: mantém o documento sintático, dados tipados, diagnósticos e o
-  texto original dentro de `PdxDocument::source`.
+- `model.rs`: mantém o documento sintático, dados tipados, diagnósticos, bytes
+  originais exatos e a indicação de UTF-8 lossless.
 
 Comentários, whitespace e newlines permanecem na sequência de tokens. A
 árvore preserva ordem, chaves repetidas, listas posicionais e blocos
@@ -180,6 +180,109 @@ seletiva da textura e das bordas naquela região; lotes maiores usam o rebuild
 completo existente. A política é deliberadamente simples e ambos os caminhos
 são registrados no console.
 
+## Planejamento lossless da Fase 4A
+
+`app::project::patch` compara o baseline com o working set atual, resolve a
+proveniência diretamente na árvore sintática e produz operações `Replace`,
+`Insert` e `Delete` com spans de bytes e bytes esperados. As operações são
+verificadas contra overlaps, aplicadas em ordem decrescente somente sobre uma
+cópia de `original_bytes` e o resultado é novamente parseado e comparado
+semanticamente.
+
+Arquivos carregados nunca passam pelo renderer canônico. Comentários, campos
+desconhecidos, ordem, whitespace, BOM e line endings fora dos spans permanecem
+byte a byte. Fragmentos provinciais transferidos podem reutilizar os bytes da
+origem; quando isso não pode ser provado, o arquivo fica `Blocked`. UTF-8
+lossy, fonte alterada externamente, binding autoritativo duplicado, histórico
+datado ambíguo e patch sobreposto também bloqueiam.
+
+Estados criados usam renderer canônico somente em memória, com estilo
+predominante do projeto e nome determinístico
+`history/states/{id}-State_{id}.txt`. Estados carregados removidos geram apenas
+`PlannedFileRemoval`. O `ProjectPatchPlan` guarda fingerprints, previews,
+diffs, diagnósticos e uma geração ligada à revisão do working set; mudanças,
+Undo/Redo e Discard tornam o preview anterior stale.
+
+## Validação isolada da Fase 4B
+
+`app::project::validation` recebe um `ProjectPatchPlan` atual e cria um
+workspace descartável em `%TEMP%/hoi4-state-editor/roundtrip`. O candidato
+recebe cópias reais de `provinces.bmp`, `definition.csv` e dos arquivos
+diretos `history/states/*.txt`; hardlinks, symlinks e caminhos fora desse
+conjunto não fazem parte do fluxo. Um resolvedor central rejeita caminhos
+absolutos, prefixos de drive, `..`, extensões inesperadas, colisões sem
+distinção de caixa e sobreposição entre criação, modificação e remoção.
+
+Antes da cópia, fingerprints e bytes autoritativos são relidos da origem.
+Somente o candidato recebe as operações da Fase 4A. Em seguida, o mesmo
+`Bundle::load` geográfico e o carregador normal de estados recarregam o
+workspace. A comparação cobre estados ativos e preservados, propriedades,
+victory points, construções, `states_by_id`, `state_by_province`, províncias
+sem estado, ambiguidades, cobertura e novos diagnósticos estruturais. Arquivos
+inalterados precisam continuar idênticos byte a byte; arquivos modificados
+precisam coincidir exatamente com o preview; criações e remoções precisam
+existir somente no candidato.
+
+O resultado é `Passed`, `PassedWithReview`, `Failed` ou `Cancelled`.
+`ReviewRequired` exige uma ação explícita e nunca produz `Passed`. Planos stale
+ou `Blocked`, fonte alterada e caminhos inseguros falham antes do workspace.
+Por padrão, pass, falha e cancelamento removem o diretório temporário; uma
+política diagnóstica explícita pode reter somente falhas e sempre registra o
+caminho. A origem é verificada novamente depois das comparações. Esta camada
+continua isolada e não escreve no mod.
+
+## Salvamento transacional da Fase 4C
+
+`app::project::save` é a única fronteira que pode persistir arquivos de
+estado. O gate central exige um `ProjectPatchPlan` atual e integralmente
+`Safe`, um `RoundTripValidationReport` atual com status exatamente `Passed`,
+digests correspondentes, fontes ainda idênticas, nenhuma diferença líquida
+vazia, nenhum draft ou gesto ativo e nenhuma transação/recovery pendente.
+`PassedWithReview` nunca autoriza Save.
+
+Depois da confirmação explícita, a transação:
+
+```text
+exclusive save.lock
+-> durable journal
+-> source revalidation
+-> physical backup + deterministic manifest
+-> backup byte verification
+-> same-directory stage files
+-> staged byte verification
+-> second source revalidation
+-> deterministic rename commit
+-> real project reload
+-> semantic/index/coverage/VP/building/diagnostic/byte/map comparison
+-> new baseline or verified rollback
+```
+
+Metadados ficam em `<mod>/.hoi4-state-editor/`. Backups usam cópias físicas,
+nunca hardlinks; arquivos criados constam no manifesto sem bytes anteriores.
+Stages e rollbacks ficam ao lado do destino com sufixos
+`.hse-stage-<id>` e `.hse-rollback-<id>` depois de `.txt`, garantindo a mesma
+filesystem boundary para rename e evitando que HOI4 os carregue como states.
+
+Modified renomeia o original para rollback e o stage para o path final.
+Created renomeia somente o stage, depois de confirmar que o destino continua
+ausente. Removed renomeia o original para rollback; não há delete antes de
+backup. O journal é atualizado por arquivo. Cancelamento é aceito somente
+antes de `Committing`.
+
+Rollback percorre as operações registradas em ordem inversa, verifica bytes
+antes de remover um candidato e restaura modified/removed ou elimina created.
+Falha parcial mantém lock, journal, backup e paths de rollback para recuperação
+manual. Um lock encontrado no carregamento bloqueia edição e novo Save até a
+ação explícita de recovery executar rollback verificado. Backup e relatório
+permanecem depois de sucesso; stages e rollbacks são removidos somente depois
+da validação pós-save.
+
+No sucesso, o projeto salvo é recarregado pelo loader real e substitui
+`Hoi4Project` e `StateEditSession`: o working set passa a baseline, Undo/Redo e
+dirty ficam vazios, e seleção/target são preservados apenas quando ainda
+válidos. `Save As` continua fora desse contrato e o Save geográfico legado
+permanece separado.
+
 ## Fluxo de dados
 
 ```text
@@ -195,6 +298,13 @@ state file
 -> temporary validated property draft
 -> unified province/property/lifecycle edit history
 -> refreshed state texture / selection overlays when geography changed
+-> semantic diff / syntax provenance
+-> in-memory patch plan / parsed textual preview
+-> isolated temporary candidate / real project reload
+-> semantic, index, diagnostic and byte comparison report
+-> exact Passed authorization
+-> backup / staging / journal / deterministic commit
+-> post-save reload / new baseline or verified rollback
 ```
 
 O mapa continua seguindo `provinces.bmp -> RGB -> definition.csv -> province
@@ -204,26 +314,27 @@ relido e referências desconhecidas podem ser diagnosticadas com segurança.
 
 ## Componentes a substituir ou adaptar
 
-- o salvamento futuro alterará somente documentos de estado afetados;
+- o salvamento de estados altera somente documentos afetados por plano Safe;
 - controles herdados de edição geográfica poderão ser removidos após existir
   substituição funcional.
 
-## Limites das Fases 2A, 2B, 3A, 3B, 3C e 3D
+## Limites das Fases 2A a 4C
 
-- parser, leitura, visualização, seleção e reassociação em memória
-  implementados, mas sem serializer, diff, backup ou salvamento;
+- parser, leitura, visualização, seleção, reassociação, preview lossless,
+  validação round-trip, backup e salvamento transacional implementados;
 - lasso de seleção e State Brush por província implementados, mas sem pintura
   de pixels, merge, split ou brush com raio;
-- criação e remoção controladas existem somente no working set; nenhum arquivo
-  é criado, removido, renomeado ou associado a um nome final;
+- criação e remoção controladas existem no working set e só alcançam paths
+  reais por um plano Safe validado e Save explicitamente confirmado;
 - propriedades gerais, owner/controller, cores, claims, recursos, construções
   estaduais, victory points e construções provinciais podem ser editados
-  somente no working set; IDs, sintaxe e caminho do arquivo permanecem somente
-  leitura;
+  primeiro no working set e persistidos somente após preview e validação;
+  IDs existentes e paths continuam protegidos pelo plano;
 - `victory_points` e `province_buildings` acompanhando a província movida são
   realocados no working set quando não há conflito; sintaxe desconhecida segue
   preservada no documento original;
-- `Ctrl+S` e `Save As` continuam bloqueados em projetos de estado;
+- `Ctrl+S` executa State Save somente quando elegível; `Save As`, autosave,
+  retenção avançada e restauração gráfica de backups não existem;
 - blocos datados são detectados e preservados, não interpretados;
 - arquivos que não são UTF-8 recebem diagnóstico e uma representação lossy
   somente para inspeção; nunca são reescritos;

@@ -207,6 +207,8 @@ mod tests {
   fn document(path: &str, data: StateData) -> StateDocument {
     StateDocument {
       path: PathBuf::from(path),
+      original_bytes: Vec::new().into(),
+      exact_utf8: true,
       syntax: parse_text(path, ""),
       data: Some(data),
       diagnostics: Vec::new(),

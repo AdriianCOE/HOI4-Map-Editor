@@ -3,8 +3,11 @@ mod brush;
 mod edit;
 mod indexes;
 mod lasso;
+mod patch;
 mod paths;
 mod properties;
+mod save;
+mod validation;
 mod view;
 
 pub use diagnostics::{DiagnosticSeverity, ProjectDiagnostic, ProjectDiagnosticKind};
@@ -20,11 +23,32 @@ pub use lasso::{
   LassoCandidateSet, LassoSelectionMode, ProvinceInclusionMode, StateLassoError,
   StateLassoPhase, classify_state_lasso
 };
+pub use patch::{
+  PatchDiagnostic, PatchDiagnosticKind, PatchPlanSummary, PatchPlanTimings, PatchSafety,
+  PlannedFileCreation, PlannedFileRemoval, PlannedFileModification, ProjectPatchPlan,
+  SourceFingerprint, TextPatchOperation, plan_state_patches
+};
 pub use paths::{ProjectPathError, ProjectPaths};
 pub use properties::{
   EditableProvinceData, EditableStateProperties, NamedIntegerValue,
   ProvinceDataDraft, ProvinceDataValidationError, PropertyValidationError,
   StatePropertyDraft
+};
+pub use save::{
+  BackupManifest, BackupManifestEntry, FileOperationProgress, PersistedFingerprint,
+  RecoveryInfo, SaveFailure, SaveFileKind, SaveFileOperationJournal, SaveTransactionJournal,
+  SaveTransactionState, StateSaveAuthorization, StateSaveBlockReason, StateSaveCancellation,
+  StateSaveConditions, StateSaveEligibility, StateSaveFault, StateSaveOutcome, StateSaveReport,
+  detect_state_save_recovery, execute_state_save, recover_interrupted_state_save,
+  save_confirmation_text, state_save_eligibility,
+};
+pub use validation::{
+  ByteComparisonResult, ByteDifference, CandidateApplicationResult, DiagnosticComparison,
+  FileFingerprint, ProjectReloadResult, ProjectSemanticComparison, RoundTripCancellation,
+  RoundTripDiagnostic, RoundTripStage, RoundTripStatus, RoundTripTimings,
+  RoundTripValidationPolicy, RoundTripValidationReport, RoundTripValidator, SemanticDifference,
+  SourceVerificationResult, TemporaryProjectManifest, TemporaryWorkspaceSummary,
+  resolve_candidate_path,
 };
 pub use view::{
   MapViewMode, StateMapRegionData, StateMapViewData, StateSelection, boundaries_for_state,
