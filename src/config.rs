@@ -297,12 +297,6 @@ impl GlobalConfig {
     }
 
     pub fn validate(&self) -> Result<(), SaveConfigError> {
-        if !matches!(self.language.as_str(), "en-US" | "pt-BR") {
-            return Err(SaveConfigError::Invalid(format!(
-                "Language '{}' is not supported.",
-                self.language
-            )));
-        }
         if !(1..=500).contains(&self.max_undo_states) {
             return Err(SaveConfigError::Invalid(
                 "Maximum undo history must be between 1 and 500.".to_owned(),

@@ -13,8 +13,7 @@ use defy::Contextualize;
 use glutin::window::CursorIcon;
 use graphics::{Transformed, Viewport};
 use graphics::context::Context;
-use graphics::glyph_cache::rusttype::GlyphCache;
-use opengl_graphics::{Filter, GlGraphics, Texture, TextureSettings};
+use opengl_graphics::{Filter, GlGraphics, TextureSettings};
 use piston::input::{Key, MouseButton};
 use vecmath::Vector2;
 
@@ -93,7 +92,7 @@ pub mod colors {
     pub const BUTTON_TOOLBAR_HOVER_ACTIVE: DrawColor = color_active(80 + 16);
 }
 
-pub type FontGlyphCache = GlyphCache<'static, (), Texture>;
+pub type FontGlyphCache = font::MultiFontGlyphCache<'static>;
 
 pub struct App {
     pub canvas: Option<Canvas>,
@@ -112,10 +111,8 @@ pub struct App {
 impl EventHandler for App {
     fn new(_gl: &mut GlGraphics) -> Self {
         let texture_settings = TextureSettings::new().filter(Filter::Nearest);
-        let mut glyph_cache = GlyphCache::from_font(font::get_font(), (), texture_settings);
-        glyph_cache
-            .preload_printable_ascii(font::FONT_SIZE)
-            .expect("unable to preload font glyphs");
+        let mut glyph_cache = font::get_glyph_cache(texture_settings);
+        glyph_cache.preload_printable_ascii(font::FONT_SIZE);
 
         let loaded = GlobalConfig::load().ok();
         let global_config = loaded
@@ -910,11 +907,8 @@ impl App {
         match self.preferences_dialog.as_mut() {
             Some(PreferencesDialog::Global { draft, .. }) => match selected {
                 0 => {
-                    draft.language = if draft.language == "en-US" {
-                        "pt-BR".to_owned()
-                    } else {
-                        "en-US".to_owned()
-                    };
+                    draft.language =
+                        crate::localization::next_language(&draft.language).to_owned();
                     crate::localization::set_language(&draft.language);
                     self.interface = None;
                 }
@@ -2076,7 +2070,7 @@ fn confirm_dialog(title: &str, description: &str) -> bool {
 }
 
 fn preferences_rect(window_size: [f64; 2]) -> [f64; 4] {
-    let width = window_size[0].clamp(420.0, 720.0);
+    let width = window_size[0].clamp(520.0, 720.0);
     let height = 400.0;
     [
         ((window_size[0] - width) / 2.0).max(0.0),
@@ -2105,7 +2099,11 @@ fn draw_preferences_dialog(
             crate::localization::tr("settings.title"),
             *selected,
             vec![
-                format!("{}: {}", crate::localization::tr("settings.language"), draft.language),
+                format!(
+                    "{}: {}",
+                    crate::localization::tr("settings.language"),
+                    crate::localization::native_name(&draft.language)
+                ),
                 setting_row(crate::localization::tr("settings.open_last"), draft.open_last_project),
                 setting_row(
                     crate::localization::tr("settings.remember_workspace"),

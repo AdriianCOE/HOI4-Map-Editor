@@ -168,6 +168,7 @@ close = "Fechar"
 [status]
 pending_changes.zero = "Nenhuma alteração pendente"
 pending_changes.one = "1 alteração pendente"
+pending_changes.few = "{count} alterações pendentes"
 pending_changes.other = "{count} alterações pendentes"
 
 [config]

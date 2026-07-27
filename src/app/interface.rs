@@ -1860,7 +1860,7 @@ enum SidebarPrimitiveKind {
     Option,
 }
 
-const TOOLBAR_DROPDOWN_WIDTH: u32 = 320;
+const TOOLBAR_DROPDOWN_WIDTH: u32 = 540;
 const WORKSPACE_DROPDOWNS: &[(
     &str,
     &[(&str, &str, ButtonId)],
@@ -2690,5 +2690,46 @@ mod tests {
             ..Default::default()
         }
         .button_enabled(ButtonId::ToolbarFileProjectSettings));
+    }
+}
+
+#[cfg(test)]
+mod layout_regressions {
+    use super::*;
+    use crate::localization::{self, SUPPORTED_LANGUAGES};
+
+    /// Dropdown menu rows draw `text_left` growing rightward from the row's
+    /// left edge and `text_right` (the shortcut hint) right-aligned to the
+    /// row's right edge, with no clipping or wrapping. If both together are
+    /// wider than the row, they visually overlap. This asserts every menu
+    /// entry fits in every supported language, catching both a too-narrow
+    /// constant and future translations/labels that grow past it.
+    #[test]
+    fn dropdown_menu_entries_fit_their_row_in_every_language() {
+        let budget = TOOLBAR_DROPDOWN_WIDTH as f64 - PADDING[0] * 3.0;
+        let mut overflows = Vec::new();
+        for (code, _) in SUPPORTED_LANGUAGES {
+            localization::set_language(code);
+            let groups = TOOLBAR_PRIMITIVE
+                .iter()
+                .map(|(_, entries)| *entries)
+                .chain(WORKSPACE_DROPDOWNS.iter().map(|(_, entries, _, _)| *entries));
+            for entries in groups {
+                for (left, right, _) in entries {
+                    let width = font::get_width_metric_str(ui_literal(left))
+                        + font::get_width_metric_str(right);
+                    if width > budget {
+                        overflows.push(format!(
+                            "{code} '{left}'+'{right}' width={width:.1} budget={budget:.1}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            overflows.is_empty(),
+            "dropdown entries overflow TOOLBAR_DROPDOWN_WIDTH:\n{}",
+            overflows.join("\n")
+        );
     }
 }
