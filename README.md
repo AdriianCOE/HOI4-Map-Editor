@@ -52,7 +52,7 @@ Switch between:
 - Province Colors
 - Province Types
 - Terrain
-- Continents
+- s
 - Coastal Provinces
 - States
 - Political
@@ -76,7 +76,7 @@ Use `Ctrl+F` to find provinces and states by:
 - terrain;
 - type;
 - owner or controller;
-- continent;
+- ;
 - coastal status.
 
 Selecting a result focuses and zooms the map automatically.
@@ -216,10 +216,8 @@ Map shortcuts are suspended while typing in a field, picker or search box.
 - Country names, state localizations and other game-data localizations are not
   loaded from the game yet.
 - Country flags and game icons are not displayed yet.
-- Adjacencies can be inspected, but the full editing workspace is still
-  planned.
-- Strategic Regions and Continents do not yet have complete editing
-  workspaces.
+- Adjacencies can be inspected, but the full editing workspace is still planned.
+- Strategic Regions do not yet have complete editing workspaces.
 - Rivers, supply networks, heightmaps and trees are not directly editable.
 - The executable is not currently digitally signed and Windows SmartScreen may
   display a warning for early preview builds.
