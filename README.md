@@ -2,13 +2,9 @@
 
 A visual province and state editor for Hearts of Iron IV mods.
 
-Paint provinces, edit terrain, organize states and review changes without
-manually editing large bitmaps or PDXScript files.
+Paint provinces, edit terrain, organize states, and review changes without manually editing large bitmaps, CSV rows, or PDXScript files.
 
-HOI4 Map Editor is based on
-[ScottyThePilot's HOI4 Province Editor](https://github.com/ScottyThePilot/hoi4_province_editor)
-and extends it with state editing, map views, project validation, backups and
-safer file updates.
+HOI4 Map Editor is based on [ScottyThePilot's HOI4 Province Editor](https://github.com/ScottyThePilot/hoi4_province_editor) and extends it with state editing, map views, project validation, backups, rollback, recovery, and safer file updates.
 
 [Download the latest preview](https://github.com/AdriianCOE/hoi4_state_editor/releases)
 
@@ -21,17 +17,17 @@ safer file updates.
 
 ### Province editing
 
-- Paint, fill, recolor and lasso-select provinces directly on the map.
-- Edit terrain, province type, coastal status and continent data.
-- Inspect province IDs, colors and map diagnostics.
+- Paint, fill, recolor, and lasso-select provinces directly on the map.
+- Edit terrain, province type, coastal status, continent, RGB color, and definition data.
+- Inspect province IDs, colors, terrain, state assignments, and map diagnostics.
+- Search and focus provinces by technical properties.
 - Undo and redo geographic changes.
-- Save `provinces.bmp` and `definition.csv` through an atomic, validated
-  workflow.
+- Save `provinces.bmp` and `definition.csv` through an atomic, validated workflow.
 
 ### State editing
 
-- Select provinces with Select, Brush, Lasso or Fill.
-- Assign, move and unassign provinces between states.
+- Select provinces with Select, Brush, Lasso, or Fill.
+- Assign, move, or unassign provinces between states.
 - Create and remove states.
 - Edit:
   - name and category;
@@ -42,8 +38,8 @@ safer file updates.
   - state buildings;
   - victory points;
   - province buildings.
-- Keep all changes in memory until they are reviewed and applied.
-- Undo, redo or discard state changes.
+- Keep changes in memory until they are reviewed and applied.
+- Undo, redo, or discard state changes.
 
 ### Map views
 
@@ -52,7 +48,7 @@ Switch between:
 - Province Colors
 - Province Types
 - Terrain
-- s
+- Continents
 - Coastal Provinces
 - States
 - Political
@@ -76,8 +72,9 @@ Use `Ctrl+F` to find provinces and states by:
 - terrain;
 - type;
 - owner or controller;
-- ;
-- coastal status.
+- continent;
+- coastal status;
+- current state assignment.
 
 Selecting a result focuses and zooms the map automatically.
 
@@ -90,20 +87,20 @@ Province and state changes use separate save workflows.
 - writes only `map/provinces.bmp` and `map/definition.csv`;
 - prepares and validates complete replacement files before touching the mod;
 - creates a backup;
+- uses atomic replacement;
 - rolls back if the operation fails.
 
 **Apply State Changes**
 
-- writes only direct files under `history/states/`;
+- writes only files under `history/states/`;
 - generates a lossless patch preview;
 - validates the result in a temporary project copy;
 - creates a backup;
-- applies the changes transactionally;
+- applies changes transactionally;
 - reloads and verifies the saved project;
 - supports rollback and interrupted-save recovery.
 
-Existing state files retain unrelated comments, formatting, unknown fields and
-unsupported blocks.
+Existing state files retain unrelated comments, formatting, unknown fields, and unsupported blocks.
 
 ### Settings and languages
 
@@ -132,8 +129,7 @@ State backups and recovery data are stored in:
 
 ## Installation
 
-1. Download the Windows x64 ZIP from
-   [GitHub Releases](https://github.com/AdriianCOE/hoi4_state_editor/releases).
+1. Download the Windows x64 ZIP from [GitHub Releases](https://github.com/AdriianCOE/hoi4_state_editor/releases).
 2. Extract the ZIP into a writable folder.
 3. Run `HOI4 Map Editor.exe`.
 4. Select **File → Open HOI4 Mod...**
@@ -158,7 +154,7 @@ mod-root/
 
 Only `provinces.bmp` and `definition.csv` are required for province editing.
 
-The States workspace additionally requires `history/states/*.txt`.
+The States workspace additionally uses `history/states/*.txt`.
 
 ## Basic workflow
 
@@ -171,7 +167,7 @@ Open Mod
 → Validate
 → Backup
 → Replace Files
-→ Reload
+→ Reload and Verify
 ```
 
 ### States
@@ -185,8 +181,7 @@ Open Mod
 → Reload and Verify
 ```
 
-There is no combined **Save All** operation. Province and state changes remain
-independent so one workflow cannot silently save or clear the other.
+There is no combined **Save All** operation. Province and state changes remain independent so one workflow cannot silently save or clear the other.
 
 ## Essential shortcuts
 
@@ -207,20 +202,18 @@ independent so one workflow cannot silently save or clear the other.
 | `Esc` | Cancel the current action |
 | `H` | Reset zoom |
 
-Map shortcuts are suspended while typing in a field, picker or search box.
+Map shortcuts are suspended while typing in a field, picker, or search box.
 
 ## Current limitations
 
 - Preview builds currently support Windows x64 only.
 - Province Save and State Apply are separate transactions.
-- Country names, state localizations and other game-data localizations are not
-  loaded from the game yet.
+- Country names, state localizations, and other game-data localizations are not loaded from the game yet.
 - Country flags and game icons are not displayed yet.
 - Adjacencies can be inspected, but the full editing workspace is still planned.
-- Strategic Regions do not yet have complete editing workspaces.
-- Rivers, supply networks, heightmaps and trees are not directly editable.
-- The executable is not currently digitally signed and Windows SmartScreen may
-  display a warning for early preview builds.
+- Strategic Regions and Continents do not yet have complete dedicated editing workspaces.
+- Rivers, supply networks, heightmaps, and tree maps are not directly editable.
+- The executable is not currently digitally signed, so Windows SmartScreen may display a warning for early preview builds.
 
 The project does not distribute proprietary Hearts of Iron IV assets.
 
@@ -228,7 +221,7 @@ The project does not distribute proprietary Hearts of Iron IV assets.
 
 ### Game data integration
 
-- Load localized country, state, building, resource and terrain names.
+- Load localized country, state, building, resource, terrain, and category names.
 - Resolve data from both the mod and the local Hearts of Iron IV installation.
 - Use mod files as overrides over vanilla data.
 - Display real country colors in the Political Map View.
@@ -243,9 +236,9 @@ The project does not distribute proprietary Hearts of Iron IV assets.
 
 ### Adjacencies
 
-- Create, edit and remove adjacency entries.
-- Support sea crossings, canals and through-province connections.
-- Validate endpoints and invalid adjacency records.
+- Create, edit, and remove adjacency entries.
+- Support sea crossings, canals, and through-province connections.
+- Validate endpoints and malformed adjacency records.
 - Preview changes directly on the map.
 
 ### Project validation
@@ -253,8 +246,8 @@ The project does not distribute proprietary Hearts of Iron IV assets.
 - Validate province colors and IDs.
 - Detect missing or duplicate state assignments.
 - Check coastal provinces and naval bases.
-- Validate state, strategic region and continent references.
-- Produce a clear report with direct navigation to each problem.
+- Validate state, strategic region, and continent references.
+- Produce a report with direct navigation to each problem.
 
 ### Strategic Regions
 
@@ -284,8 +277,7 @@ Possible additions after the core editor is stable:
 - Procedural island and province generation
 - Steam Workshop publishing helpers
 
-Planned features are not guaranteed and may change based on testing and
-community feedback.
+Planned features are not guaranteed and may change based on testing and community feedback.
 
 ## Documentation
 
@@ -308,8 +300,7 @@ To create the portable Windows package:
 .\scripts\package-windows.ps1
 ```
 
-The packaging script creates the ZIP, SHA-256 checksum and release manifest in
-`dist/`.
+The packaging script creates the ZIP, SHA-256 checksum, and release manifest in `dist/`.
 
 ## Reporting issues
 
@@ -328,19 +319,24 @@ Logs are stored under:
 %LOCALAPPDATA%\HOI4MapEditor\logs
 ```
 
-Do not upload an entire mod unless it is necessary and you have permission to
-share it.
+Do not upload an entire mod unless it is necessary and you have permission to share it.
+
+## Support
+
+HOI4 Map Editor is developed independently and provided for free.
+
+<a href="https://ko-fi.com/adriiancoe">
+  <img src="https://raw.githubusercontent.com/AdriianCOE/AdriianCOE/refs/heads/main/support_me_on_kofi_badge_dark.png" alt="Support Adrian Costa on Ko-fi" width="180">
+</a>
+
+Support helps with development, testing, documentation, and future updates.
 
 ## Credits
 
-Based on
-[HOI4 Province Editor](https://github.com/ScottyThePilot/hoi4_province_editor)
-by ScottyThePilot.
+Based on [HOI4 Province Editor](https://github.com/ScottyThePilot/hoi4_province_editor) by ScottyThePilot.
 
 Developed and extended by Adrian Costa.
 
-HOI4 Map Editor is an unofficial community project and is not affiliated with
-or endorsed by Paradox Interactive.
+HOI4 Map Editor is an unofficial community project and is not affiliated with or endorsed by Paradox Interactive.
 
-The project retains the original MIT license and all applicable third-party
-notices.
+The project retains the original MIT license and all applicable third-party notices.
