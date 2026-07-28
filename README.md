@@ -323,8 +323,6 @@ Do not upload an entire mod unless it is necessary and you have permission to sh
 
 ## Support
 
-HOI4 Map Editor is developed independently and provided for free.
-
 <a href="https://ko-fi.com/adriiancoe">
   <img src="https://raw.githubusercontent.com/AdriianCOE/AdriianCOE/refs/heads/main/support_me_on_kofi_badge.png" alt="Support Adrian Costa on Ko-fi" width="180">
 </a>
