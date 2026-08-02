@@ -14,7 +14,8 @@ visual layers and never mark a project as modified.
 
 ## Province workspace
 
-- **Save Current Workspace** runs **Save Province Map**.
+- **Save Project** reviews and saves pending province-map and state changes
+  together.
 - **Export Province Map As...** creates a folder copy.
 - **Export Province Map Archive...** creates a ZIP copy.
 
@@ -29,9 +30,11 @@ owner/controller, cores, claims, resources, buildings, and victory points.
 Brush, Lasso, and Fill preview province-level changes in memory. `Esc` cancels;
 `Enter` confirms an applicable preview.
 
-Apply State Changes regenerates a stale preview, validates a temporary copy,
-creates a backup, commits, reloads, and verifies. `ReviewRequired` needs
-explicit review; `Blocked` changes cannot be applied.
+Save Project regenerates stale previews, validates a temporary copy, creates
+backups and a durable journal, commits the affected files, reloads, and
+verifies. `ReviewRequired` needs explicit review; `Blocked` changes cannot be
+applied. Individual replacements are staged safely, but this preview does not
+claim project-wide filesystem atomicity across all files and platforms.
 
 ## Settings and project configuration
 

@@ -16,7 +16,8 @@ use crate::util::files::Location;
 use super::patch::apply_operations;
 use super::{
   DiagnosticSeverity, Hoi4Project, PatchSafety, ProjectDiagnosticKind, ProjectPatchPlan,
-  ProjectPaths, SourceFingerprint, StateEditSession,
+  ProjectPaths, ProjectValidationReport, ProjectValidationTarget, SourceFingerprint,
+  StateEditSession, validate_project,
 };
 
 static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -275,6 +276,59 @@ pub struct RoundTripValidationReport {
   pub diagnostics: Vec<RoundTripDiagnostic>,
   pub eligible_for_atomic_save_preparation: bool,
   pub no_candidate_changes: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CombinedRoundTripValidationReport {
+  pub round_trip: RoundTripValidationReport,
+  pub project_validation: Option<ProjectValidationReport>,
+  pub candidate_digest: SourceFingerprint,
+  pub authorization_digest: SourceFingerprint,
+}
+
+impl CombinedRoundTripValidationReport {
+  fn new(
+    round_trip: RoundTripValidationReport,
+    candidate_digest: SourceFingerprint,
+  ) -> Self {
+    let authorization_digest = combined_authorization_digest(
+      &round_trip,
+      &candidate_digest,
+      None,
+    );
+    Self {
+      round_trip,
+      project_validation: None,
+      candidate_digest,
+      authorization_digest,
+    }
+  }
+
+  fn with_project_validation(
+    mut self,
+    project_validation: ProjectValidationReport,
+  ) -> Self {
+    self.authorization_digest =
+      combined_authorization_digest(
+        &self.round_trip,
+        &self.candidate_digest,
+        Some(&project_validation),
+      );
+    self.project_validation = Some(project_validation);
+    self
+  }
+
+  pub fn is_stale(
+    &self,
+    revision: u64,
+    plan: Option<&ProjectPatchPlan>,
+    map_candidate_files: Option<&BTreeMap<PathBuf, Vec<u8>>>,
+  ) -> bool {
+    self.round_trip.is_stale(revision, plan)
+      || plan.is_none_or(|plan| {
+        combined_candidate_digest(plan, map_candidate_files) != self.candidate_digest
+      })
+  }
 }
 
 impl RoundTripValidationReport {
@@ -639,6 +693,319 @@ impl RoundTripValidator {
     );
     report
   }
+
+  #[allow(clippy::too_many_arguments)]
+  pub fn validate_combined<F, V>(
+    &self,
+    project: &Hoi4Project,
+    edit: &StateEditSession,
+    plan: &ProjectPatchPlan,
+    map_candidate_files: Option<&BTreeMap<PathBuf, Vec<u8>>>,
+    validate_map_candidate: V,
+    cancellation: &RoundTripCancellation,
+    mut progress: F,
+  ) -> CombinedRoundTripValidationReport
+  where
+    F: FnMut(RoundTripStage),
+    V: FnOnce(&Path) -> Result<(), String>,
+  {
+    let total_started = Instant::now();
+    let mut report = RoundTripValidationReport::new(plan);
+    let mut workspace_root = None;
+    let map_candidate_files = map_candidate_files
+      .filter(|files| !files.is_empty());
+    let candidate_digest = combined_candidate_digest(plan, map_candidate_files);
+
+    macro_rules! fail {
+      ($failure:expr) => {{
+        let failure = $failure;
+        report.status = if failure.cancelled {
+          RoundTripStatus::Cancelled
+        } else {
+          RoundTripStatus::Failed
+        };
+        report.diagnostics.push(failure.diagnostic);
+        finish_report(
+          &self.policy,
+          &mut report,
+          workspace_root.as_deref(),
+          total_started,
+          &mut progress,
+        );
+        CombinedRoundTripValidationReport::new(report, candidate_digest.clone())
+      }};
+    }
+    macro_rules! gate {
+      ($result:expr) => {
+        match $result {
+          Ok(value) => value,
+          Err(failure) => return fail!(failure),
+        }
+      };
+    }
+
+    progress(RoundTripStage::Preflight);
+    gate!(check_cancelled(cancellation, RoundTripStage::Preflight));
+    if let Some(files) = map_candidate_files {
+      gate!(validate_map_candidate_paths(files));
+    }
+    let mut plan_sets = gate!(validate_plan(project, edit, plan, &self.policy));
+    if plan.files_len() == 0 && map_candidate_files.is_none() {
+      report.status = RoundTripStatus::Passed;
+      report.no_candidate_changes = true;
+      report.semantic_comparison = ProjectSemanticComparison {
+        states_match: true,
+        indexes_match: true,
+        province_coverage_match: true,
+        victory_points_match: true,
+        buildings_match: true,
+        created_states_match: true,
+        removed_states_match: true,
+        differences: Vec::new(),
+      };
+      report.byte_comparison.map_files_unchanged = true;
+      report.source_verification.source_unchanged_after_validation = true;
+      report.eligible_for_atomic_save_preparation = true;
+      report.timings.total_ms = total_started.elapsed().as_millis();
+      return CombinedRoundTripValidationReport::new(report, candidate_digest);
+    }
+    if let Some(files) = map_candidate_files {
+      for relative in files.keys() {
+        plan_sets.modified.insert(PathBuf::from("map").join(relative));
+      }
+    }
+
+    progress(RoundTripStage::SourceVerification);
+    gate!(check_cancelled(cancellation, RoundTripStage::SourceVerification));
+    let started = Instant::now();
+    let snapshot = gate!(verify_source(project, plan, &plan_sets));
+    report.timings.source_verification_ms = started.elapsed().as_millis();
+    report.source_verification.files_verified = snapshot.files.len();
+    report.source_verification.map_files_verified =
+      snapshot.files.keys().filter(|path| path.starts_with("map")).count();
+    report.source_verification.planned_sources_verified =
+      plan.modified_files.len() + plan.removed_files.len();
+
+    progress(RoundTripStage::WorkspaceCreation);
+    gate!(check_cancelled(cancellation, RoundTripStage::WorkspaceCreation));
+    let started = Instant::now();
+    let workspace = gate!(create_workspace(&project.paths.root));
+    workspace_root = Some(workspace.root.clone());
+    report.workspace.workspace_root = Some(workspace.root.clone());
+    report.workspace.candidate_root = Some(workspace.candidate.clone());
+    report.timings.workspace_creation_ms = started.elapsed().as_millis();
+
+    progress(RoundTripStage::Copying);
+    gate!(check_cancelled(cancellation, RoundTripStage::Copying));
+    let started = Instant::now();
+    let manifest = gate!(copy_source(
+      project,
+      &workspace.candidate,
+      &snapshot,
+      &plan_sets,
+      cancellation,
+    ));
+    report.timings.copy_ms = started.elapsed().as_millis();
+    report.workspace.copied_files = manifest.copied_files.len();
+
+    progress(RoundTripStage::Applying);
+    gate!(check_cancelled(cancellation, RoundTripStage::Applying));
+    let started = Instant::now();
+    if let Some(files) = map_candidate_files {
+      gate!(apply_map_candidate(&workspace.candidate, files, &mut report.application));
+      gate!(validate_map_candidate(&workspace.candidate.join("map")).map_err(|message| {
+        Failure::new(
+          RoundTripStage::Applying,
+          Some(workspace.candidate.join("map")),
+          None,
+          message,
+          "Regenerate the province-map candidate before validating the combined project.",
+        )
+      }));
+    }
+    gate!(apply_plan(
+      &workspace.candidate,
+      plan,
+      &manifest,
+      &mut report.application,
+      cancellation,
+    ));
+    report.timings.plan_application_ms = started.elapsed().as_millis();
+
+    progress(RoundTripStage::FilesystemVerification);
+    gate!(check_cancelled(cancellation, RoundTripStage::FilesystemVerification));
+    let started = Instant::now();
+    gate!(verify_final_file_set(&workspace.candidate, &manifest));
+    report.application.final_file_set_verified = true;
+    report.timings.filesystem_verification_ms = started.elapsed().as_millis();
+
+    progress(RoundTripStage::Reloading);
+    gate!(check_cancelled(cancellation, RoundTripStage::Reloading));
+    let started = Instant::now();
+    let (candidate_bundle, candidate_project, land_province_ids) =
+      gate!(reload_project_with_bundle(&workspace.candidate));
+    report.timings.project_reload_ms = started.elapsed().as_millis();
+    report.reload = ProjectReloadResult {
+      files_found: candidate_project.load_summary.files_found,
+      valid_states: candidate_project.load_summary.valid_states,
+      invalid_states: candidate_project.load_summary.invalid_states,
+      indexed_states: candidate_project.load_summary.indexed_states,
+      errors: candidate_project.load_summary.errors,
+      warnings: candidate_project.load_summary.warnings,
+    };
+
+    progress(RoundTripStage::SemanticComparison);
+    gate!(check_cancelled(cancellation, RoundTripStage::SemanticComparison));
+    let started = Instant::now();
+    report.semantic_comparison =
+      compare_semantics(project, edit, plan, &candidate_project, &land_province_ids);
+    report.timings.semantic_comparison_ms = started.elapsed().as_millis();
+    if !report.semantic_comparison.states_match
+      || !report.semantic_comparison.indexes_match
+      || !report.semantic_comparison.province_coverage_match
+    {
+      return fail!(Failure::new(
+        RoundTripStage::SemanticComparison,
+        None,
+        None,
+        "The reloaded combined candidate does not match the current working session.",
+        "Inspect the listed semantic differences and regenerate the project preview.",
+      ));
+    }
+
+    progress(RoundTripStage::ByteComparison);
+    gate!(check_cancelled(cancellation, RoundTripStage::ByteComparison));
+    let started = Instant::now();
+    report.byte_comparison = gate!(compare_bytes_with_map_candidate(
+      project,
+      plan,
+      &workspace.candidate,
+      &snapshot,
+      &manifest,
+      map_candidate_files,
+    ));
+    report.timings.byte_comparison_ms = started.elapsed().as_millis();
+
+    progress(RoundTripStage::DiagnosticComparison);
+    gate!(check_cancelled(cancellation, RoundTripStage::DiagnosticComparison));
+    let started = Instant::now();
+    report.diagnostics_comparison =
+      compare_diagnostics(project, edit, plan, &candidate_project);
+    let project_validation = validate_project(
+      &candidate_bundle,
+      &candidate_project,
+      ProjectValidationTarget::PendingChanges,
+    );
+    report.timings.diagnostic_comparison_ms = started.elapsed().as_millis();
+    if report.diagnostics_comparison.unexpected_diagnostics != 0
+      || project_validation.blocks_save
+      || project_validation.errors != 0
+    {
+      report.status = RoundTripStatus::Failed;
+      report.diagnostics.push(Failure::new(
+        RoundTripStage::DiagnosticComparison,
+        None,
+        None,
+        "The combined candidate introduced project validation errors.",
+        "Inspect candidate diagnostics and regenerate or revise the project save plan.",
+      ).diagnostic);
+      finish_report(
+        &self.policy,
+        &mut report,
+        workspace_root.as_deref(),
+        total_started,
+        &mut progress,
+      );
+      return CombinedRoundTripValidationReport::new(report, candidate_digest)
+        .with_project_validation(project_validation);
+    }
+
+    gate!(verify_source_unchanged(project, &snapshot));
+    report.source_verification.source_unchanged_after_validation = true;
+    report.status = if plan_sets.has_review_required || project_validation.requires_warning_review {
+      RoundTripStatus::PassedWithReview
+    } else {
+      RoundTripStatus::Passed
+    };
+    report.eligible_for_atomic_save_preparation = matches!(
+      report.status,
+      RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
+    );
+    finish_report(
+      &self.policy,
+      &mut report,
+      workspace_root.as_deref(),
+      total_started,
+      &mut progress,
+    );
+    CombinedRoundTripValidationReport::new(report, candidate_digest)
+      .with_project_validation(project_validation)
+  }
+}
+
+fn combined_authorization_digest(
+  round_trip: &RoundTripValidationReport,
+  candidate_digest: &SourceFingerprint,
+  project_validation: Option<&ProjectValidationReport>,
+) -> SourceFingerprint {
+  fn append(bytes: &mut Vec<u8>, value: &[u8]) {
+    bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(value);
+  }
+
+  let round_trip_fingerprint = round_trip.content_fingerprint();
+  let mut bytes = b"HOI4_STATE_EDITOR_COMBINED_ROUND_TRIP_V1".to_vec();
+  bytes.extend_from_slice(&candidate_digest.byte_len.to_le_bytes());
+  bytes.extend_from_slice(&candidate_digest.content_hash.to_le_bytes());
+  bytes.extend_from_slice(&round_trip_fingerprint.byte_len.to_le_bytes());
+  bytes.extend_from_slice(&round_trip_fingerprint.content_hash.to_le_bytes());
+  if let Some(project_validation) = project_validation {
+    bytes.extend_from_slice(&(project_validation.total as u64).to_le_bytes());
+    bytes.extend_from_slice(&(project_validation.errors as u64).to_le_bytes());
+    bytes.extend_from_slice(&(project_validation.warnings as u64).to_le_bytes());
+    bytes.push(u8::from(project_validation.blocks_save));
+    bytes.push(u8::from(project_validation.requires_warning_review));
+    for diagnostic in &project_validation.diagnostics {
+      append(&mut bytes, diagnostic.code.as_bytes());
+      append(&mut bytes, diagnostic.message_key.as_bytes());
+      append(&mut bytes, diagnostic.message.as_bytes());
+      append(
+        &mut bytes,
+        diagnostic.path.as_ref()
+          .map(|path| path.to_string_lossy())
+          .unwrap_or_default()
+          .as_bytes(),
+      );
+      bytes.extend_from_slice(&diagnostic.province_id.unwrap_or_default().to_le_bytes());
+      bytes.extend_from_slice(&diagnostic.state_id.unwrap_or_default().to_le_bytes());
+    }
+  }
+  SourceFingerprint::from_bytes(&bytes)
+}
+
+pub(crate) fn combined_candidate_digest(
+  plan: &ProjectPatchPlan,
+  map_candidate_files: Option<&BTreeMap<PathBuf, Vec<u8>>>,
+) -> SourceFingerprint {
+  fn append(bytes: &mut Vec<u8>, value: &[u8]) {
+    bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(value);
+  }
+
+  let plan_fingerprint = plan.content_fingerprint();
+  let mut bytes = b"HOI4_STATE_EDITOR_COMBINED_CANDIDATE_V1".to_vec();
+  bytes.extend_from_slice(&plan_fingerprint.byte_len.to_le_bytes());
+  bytes.extend_from_slice(&plan_fingerprint.content_hash.to_le_bytes());
+  if let Some(files) = map_candidate_files {
+    for (path, content) in files {
+      append(
+        &mut bytes,
+        path.to_string_lossy().replace('\\', "/").as_bytes(),
+      );
+      append(&mut bytes, content);
+    }
+  }
+  SourceFingerprint::from_bytes(&bytes)
 }
 
 #[derive(Debug)]
@@ -956,6 +1323,13 @@ fn enumerate_source_files(
     )?;
     files.insert(relative, FileFingerprint::from_bytes(&bytes));
   }
+  for relative in [PathBuf::from("map/adjacencies.csv"), PathBuf::from("map/id_changes.txt")] {
+    let source = project.paths.root.join(&relative);
+    if source.exists() {
+      let bytes = read(&source, RoundTripStage::SourceVerification, "read optional map source")?;
+      files.insert(relative, FileFingerprint::from_bytes(&bytes));
+    }
+  }
   let entries = fs::read_dir(&project.paths.states_directory)
     .map_err(|err| Failure::io(
       RoundTripStage::SourceVerification,
@@ -1183,6 +1557,44 @@ fn apply_plan(
   Ok(())
 }
 
+fn validate_map_candidate_paths(
+  files: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<(), Failure> {
+  for relative in files.keys() {
+    if relative.is_absolute()
+      || relative.components().count() != 1
+      || relative.components().any(|component| {
+        matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+      })
+      || !matches!(
+        relative.file_name().and_then(|name| name.to_str()),
+        Some("provinces.bmp" | "definition.csv" | "adjacencies.csv" | "id_changes.txt")
+      )
+    {
+      return Err(unsafe_path(relative, "candidate map paths must be direct province-map output files"));
+    }
+  }
+  Ok(())
+}
+
+fn apply_map_candidate(
+  candidate_root: &Path,
+  files: &BTreeMap<PathBuf, Vec<u8>>,
+  application: &mut CandidateApplicationResult,
+) -> Result<(), Failure> {
+  for (relative, bytes) in files {
+    let target = resolve_map_or_state_path(candidate_root, &PathBuf::from("map").join(relative))?;
+    if target.exists() {
+      write_existing(&target, bytes, RoundTripStage::Applying, "write map candidate")?;
+      application.modified_files_applied += 1;
+    } else {
+      write_new(&target, bytes, RoundTripStage::Applying, "create map candidate")?;
+      application.created_files_applied += 1;
+    }
+  }
+  Ok(())
+}
+
 fn verify_final_file_set(
   candidate_root: &Path,
   manifest: &TemporaryProjectManifest,
@@ -1215,6 +1627,13 @@ fn verify_final_file_set(
 }
 
 fn reload_project(candidate_root: &Path) -> Result<(Hoi4Project, BTreeSet<u32>), Failure> {
+  let (_, project, land_province_ids) = reload_project_with_bundle(candidate_root)?;
+  Ok((project, land_province_ids))
+}
+
+fn reload_project_with_bundle(
+  candidate_root: &Path,
+) -> Result<(Bundle, Hoi4Project, BTreeSet<u32>), Failure> {
   let config = Config {
     preserve_ids: true,
     ..Config::default()
@@ -1243,7 +1662,7 @@ fn reload_project(candidate_root: &Path) -> Result<(Hoi4Project, BTreeSet<u32>),
     ))?;
   let mut project = Hoi4Project::new(paths);
   project.load_states(&province_ids, &land_province_ids);
-  Ok((project, land_province_ids))
+  Ok((bundle, project, land_province_ids))
 }
 
 pub(crate) fn reload_project_for_save(
@@ -1464,6 +1883,17 @@ fn compare_bytes(
   snapshot: &SourceSnapshot,
   manifest: &TemporaryProjectManifest,
 ) -> Result<ByteComparisonResult, Failure> {
+  compare_bytes_with_map_candidate(project, plan, candidate_root, snapshot, manifest, None)
+}
+
+fn compare_bytes_with_map_candidate(
+  project: &Hoi4Project,
+  plan: &ProjectPatchPlan,
+  candidate_root: &Path,
+  snapshot: &SourceSnapshot,
+  manifest: &TemporaryProjectManifest,
+  map_candidate_files: Option<&BTreeMap<PathBuf, Vec<u8>>>,
+) -> Result<ByteComparisonResult, Failure> {
   let mut result = ByteComparisonResult::default();
   for relative in snapshot.files.keys() {
     let source_path = project.paths.root.join(relative);
@@ -1488,17 +1918,23 @@ fn compare_bytes(
       RoundTripStage::ByteComparison,
       "read candidate for byte comparison",
     )?;
+    let map_expected = relative.strip_prefix("map").ok()
+      .and_then(|path| map_candidate_files.and_then(|files| files.get(path)));
     if manifest.expected_modified_files.contains(relative) {
-      let expected = plan.modified_files.iter()
-        .find(|file| file.path == *relative)
-        .and_then(|file| file.after.as_ref())
-        .ok_or_else(|| Failure::new(
-          RoundTripStage::ByteComparison,
-          Some(candidate_path.clone()),
-          None,
-          "No authoritative preview bytes exist for a modified file.",
-          "Regenerate the patch preview.",
-        ))?;
+      let expected = if let Some(expected) = map_expected {
+        expected
+      } else {
+        plan.modified_files.iter()
+          .find(|file| file.path == *relative)
+          .and_then(|file| file.after.as_ref())
+          .ok_or_else(|| Failure::new(
+            RoundTripStage::ByteComparison,
+            Some(candidate_path.clone()),
+            None,
+            "No authoritative preview bytes exist for a modified file.",
+            "Regenerate the patch preview.",
+          ))?
+      };
       if &candidate != expected {
         result.differences.push(byte_difference(relative, expected, &candidate));
       }
@@ -1517,6 +1953,20 @@ fn compare_bytes(
       result.differences.push(byte_difference(&file.path, &file.content, &candidate));
     }
     result.created_files_verified += 1;
+  }
+  if let Some(files) = map_candidate_files {
+    for (relative, expected) in files {
+      let project_relative = PathBuf::from("map").join(relative);
+      if snapshot.files.contains_key(&project_relative) {
+        continue;
+      }
+      let candidate_path = resolve_map_or_state_path(candidate_root, &project_relative)?;
+      let candidate = read(&candidate_path, RoundTripStage::ByteComparison, "read created map candidate")?;
+      if &candidate != expected {
+        result.differences.push(byte_difference(&project_relative, expected, &candidate));
+      }
+      result.created_files_verified += 1;
+    }
   }
   result.map_files_unchanged = result.differences.iter()
     .all(|difference| !difference.path.starts_with("map"));
@@ -1712,9 +2162,10 @@ fn write_existing(
 fn resolve_map_or_state_path(candidate_root: &Path, relative: &Path) -> Result<PathBuf, Failure> {
   if is_state_path(relative) {
     candidate_state_path(candidate_root, relative)
-  } else if relative == Path::new("map/provinces.bmp")
-    || relative == Path::new("map/definition.csv")
-  {
+  } else if matches!(
+    path_key(relative).as_str(),
+    "map/provinces.bmp" | "map/definition.csv" | "map/adjacencies.csv" | "map/id_changes.txt"
+  ) {
     let root = candidate_root.canonicalize()
       .map_err(|err| Failure::io(
         RoundTripStage::Copying,
@@ -1731,7 +2182,7 @@ fn resolve_map_or_state_path(candidate_root: &Path, relative: &Path) -> Result<P
       Err(unsafe_path(relative, "map path escapes the candidate root"))
     }
   } else {
-    Err(unsafe_path(relative, "only the two map files and direct state files are supported"))
+    Err(unsafe_path(relative, "only province-map outputs and direct state files are supported"))
   }
 }
 
@@ -2080,6 +2531,63 @@ mod tests {
     assert_eq!(remove_report.application.removed_files_applied, 1);
     assert_eq!(fs::read(&source_path).unwrap(), source_before);
     fs::remove_dir_all(remove_root).unwrap();
+  }
+
+  #[test]
+  fn combined_candidate_overlays_map_and_states_without_touching_source() {
+    let (root, project, mut edit) = test_project("combined");
+    let source_state_path = root.join("history/states/1-Test.txt");
+    let source_definition_path = root.join("map/definition.csv");
+    let source_state_before = fs::read(&source_state_path).unwrap();
+    let source_definition_before = fs::read(&source_definition_path).unwrap();
+
+    let mut properties = EditableStateProperties::from_state(
+      project.state_document(1).unwrap().data.as_ref().unwrap()
+    );
+    properties.manpower = Some(7);
+    assert!(edit.update_state_properties(1, properties).unwrap());
+    let plan = plan_state_patches(&project, &edit);
+
+    let candidate_definition =
+      b"0;0;0;0;land;false;unknown;0\n1;1;2;3;land;false;forest;1\n".to_vec();
+    let map_files = BTreeMap::from([(
+      PathBuf::from("definition.csv"),
+      candidate_definition.clone(),
+    )]);
+    let saw_candidate_definition = std::cell::Cell::new(false);
+
+    let report = RoundTripValidator::default().validate_combined(
+      &project,
+      &edit,
+      &plan,
+      Some(&map_files),
+      |map_root| {
+        let bytes = fs::read(map_root.join("definition.csv"))
+          .map_err(|err| err.to_string())?;
+        saw_candidate_definition.set(bytes == candidate_definition);
+        Ok(())
+      },
+      &RoundTripCancellation::default(),
+      |_| {},
+    );
+
+    assert!(
+      matches!(report.round_trip.status, RoundTripStatus::Passed | RoundTripStatus::PassedWithReview),
+      "{}",
+      report.round_trip.full_text()
+    );
+    assert!(saw_candidate_definition.get());
+    assert!(report.project_validation.is_some());
+    assert!(!report.is_stale(edit.revision(), Some(&plan), Some(&map_files)));
+    let changed_map_files = BTreeMap::from([(
+      PathBuf::from("definition.csv"),
+      b"0;0;0;0;land;false;unknown;0\n1;1;2;3;land;false;hills;1\n".to_vec(),
+    )]);
+    assert!(report.is_stale(edit.revision(), Some(&plan), Some(&changed_map_files)));
+    assert!(report.round_trip.workspace.cleaned);
+    assert_eq!(fs::read(&source_state_path).unwrap(), source_state_before);
+    assert_eq!(fs::read(&source_definition_path).unwrap(), source_definition_before);
+    fs::remove_dir_all(root).unwrap();
   }
 
   fn test_project(name: &str) -> (PathBuf, Hoi4Project, StateEditSession) {

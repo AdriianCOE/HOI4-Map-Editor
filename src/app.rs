@@ -25,7 +25,8 @@ use self::interface::{ButtonId, Interface, StateActionAvailability, get_interfac
 use self::map::ProvinceSaveMode;
 use self::map_layers::WorkspaceMode;
 use self::project::{
-    Hoi4Project, LassoSelectionMode, MapViewMode, ProjectPaths, ProvinceInclusionMode,
+    Hoi4Project, LassoSelectionMode, MapViewMode, ProjectPathError, ProjectPaths,
+    ProvinceInclusionMode,
     StateBrushMode, StateFillMode,
 };
 use crate::error::Error;
@@ -160,7 +161,7 @@ impl EventHandler for App {
             self.raw_open_map_at("./test_map.zip");
             #[cfg(not(any(debug_assertions, feature = "debug-mode")))]
             self.alerts.push(Ok(
-                "HOI4 Map Editor — open or drag a HOI4 mod root",
+                "HOI4 Map Editor is a standalone tool; no HOI4 playset is required. Open or drag a mod root. Use Help > User Guide for setup help and Help > Open Logs Folder for diagnostics.",
             ));
         };
     }
@@ -506,8 +507,13 @@ impl EventHandler for App {
                 }
                 _ => StateApplyDialogAction::None,
             };
-            if action == StateApplyDialogAction::ConfirmSave {
-                self.action_save_map();
+            match action {
+                StateApplyDialogAction::ConfirmSave => self.action_save_map(),
+                StateApplyDialogAction::OpenSource(path) => {
+                    let result = open_source_with(&path, |path| open_file_default(path));
+                    self.handle_result_none(result);
+                }
+                StateApplyDialogAction::None => {}
             }
             return;
         }
@@ -1169,7 +1175,7 @@ impl App {
 
     fn is_canvas_modified(&self) -> bool {
         if let Some(canvas) = &self.canvas {
-            canvas.modified || canvas.has_unsaved_state_edits()
+            canvas.has_unsaved_province_edits() || canvas.has_unsaved_state_edits()
         } else {
             false
         }
@@ -1439,7 +1445,7 @@ impl App {
                 canvas.select_patch_preview_file(1, &mut self.alerts);
             }
             (Some(canvas), ToolbarPatchValidate) => {
-                canvas.start_round_trip_validation(false, &mut self.alerts);
+                canvas.validate_project_for_ui(&mut self.alerts);
             }
             (Some(canvas), ToolbarPatchValidateReview) => {
                 canvas.start_round_trip_validation(true, &mut self.alerts);
@@ -1779,7 +1785,7 @@ impl App {
             return;
         }
         if let Some(canvas) = &mut self.canvas {
-            if canvas.modified {
+            if canvas.has_unsaved_province_edits() {
                 if msg_dialog_unsaved_changes() {
                     self.action_save_map();
                 };
@@ -1794,27 +1800,28 @@ impl App {
     }
 
     fn action_save_map(&mut self) {
-        let state_project = self
+        if self
             .canvas
             .as_ref()
-            .is_some_and(|canvas| {
-                saves_state_files(canvas.workspace_mode(), canvas.project().is_some())
-            });
-        if state_project {
+            .is_some_and(|canvas| canvas.project().is_some())
+        {
             let confirmation = self
                 .canvas
-                .as_ref()
-                .expect("state project has a canvas")
-                .state_save_confirmation_message();
+                .as_mut()
+                .expect("loaded project has a canvas")
+                .prepare_project_save();
             match confirmation {
                 Ok(message) if msg_dialog_confirm_state_save(&message) => {
                     if let Some(canvas) = self.canvas.as_mut() {
-                        canvas.start_state_save(&mut self.alerts);
+                        canvas.start_project_save(true, &mut self.alerts);
                     }
                 }
                 Ok(_) => self
                     .alerts
-                    .push(Ok("Apply State Changes cancelled before it started")),
+                    .push(Ok("Save Project cancelled before it started")),
+                Err(message) if message == "No changes to save." => {
+                    self.alerts.push(Ok(message));
+                }
                 Err(message) => self.alerts.push(Err(message)),
             }
             return;
@@ -1910,6 +1917,17 @@ impl App {
                 }
                 (canvas, success_message)
               },
+              Err(ProjectPathError::MissingHistoryDirectory(_)
+                | ProjectPathError::MissingStatesDirectory(_))
+                if root.join("map/provinces.bmp").is_file()
+                  && root.join("map/definition.csv").is_file() => {
+                  let location = Location::Directory(root);
+                  let success_message = format!(
+                    "Loaded Province-only project from {}. State editing is unavailable because history/states is missing.",
+                    location
+                  );
+                  (Canvas::load(location)?, success_message)
+                },
               Err(err) if ProjectPaths::is_project_root_candidate(&root) => return Err(err.into()),
               Err(_) => {
                 let location = Location::Directory(root);
@@ -2382,7 +2400,7 @@ mod workspace_shortcut_tests {
     }
 
     #[test]
-    fn save_target_follows_the_active_workspace() {
+    fn province_export_is_blocked_only_in_the_states_workspace() {
         assert!(saves_state_files(WorkspaceMode::States, true));
         assert!(!saves_state_files(WorkspaceMode::Provinces, true));
         assert!(!saves_state_files(WorkspaceMode::Provinces, false));

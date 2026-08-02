@@ -483,6 +483,116 @@ pub fn canonicalize(path: impl AsRef<Path>) -> Result<PathBuf, FilesError> {
   Ok(path)
 }
 
+pub(crate) fn write_complete_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+  write_file(path, bytes, false)
+}
+
+pub(crate) fn write_new_complete_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+  write_file(path, bytes, true)
+}
+
+fn write_file(path: &Path, bytes: &[u8], create_new: bool) -> io::Result<()> {
+  let mut file = std::fs::OpenOptions::new()
+    .write(true)
+    .create(true)
+    .create_new(create_new)
+    .truncate(!create_new)
+    .open(path)?;
+  file.write_all(bytes)?;
+  file.flush()?;
+  file.sync_all()
+}
+
+pub(crate) fn atomic_replace_file(
+  replacement: &Path,
+  destination: &Path,
+  backup: Option<&Path>,
+) -> io::Result<()> {
+  atomic_replace_existing(replacement, destination, backup)
+}
+
+pub(crate) fn atomic_move_new_file(source: &Path, destination: &Path) -> io::Result<()> {
+  atomic_move_new(source, destination)
+}
+
+#[cfg(windows)]
+fn wide(path: &Path) -> Vec<u16> {
+  use std::os::windows::ffi::OsStrExt;
+  path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+#[cfg(windows)]
+fn atomic_replace_existing(
+  replacement: &Path,
+  destination: &Path,
+  backup: Option<&Path>,
+) -> io::Result<()> {
+  #[link(name = "kernel32")]
+  unsafe extern "system" {
+    fn ReplaceFileW(
+      replaced: *const u16,
+      replacement: *const u16,
+      backup: *const u16,
+      flags: u32,
+      exclude: *mut core::ffi::c_void,
+      reserved: *mut core::ffi::c_void,
+    ) -> i32;
+  }
+  let destination_wide = wide(destination);
+  let replacement_wide = wide(replacement);
+  let backup_wide = backup.map(wide);
+  let backup_ptr = backup_wide.as_ref().map_or(std::ptr::null(), |path| path.as_ptr());
+  let result = unsafe {
+    ReplaceFileW(
+      destination_wide.as_ptr(),
+      replacement_wide.as_ptr(),
+      backup_ptr,
+      0x0000_0001,
+      std::ptr::null_mut(),
+      std::ptr::null_mut(),
+    )
+  };
+  if result == 0 {
+    Err(io::Error::last_os_error())
+  } else {
+    Ok(())
+  }
+}
+
+#[cfg(windows)]
+fn atomic_move_new(source: &Path, destination: &Path) -> io::Result<()> {
+  #[link(name = "kernel32")]
+  unsafe extern "system" {
+    fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+  }
+  let source_wide = wide(source);
+  let destination_wide = wide(destination);
+  let result = unsafe { MoveFileExW(source_wide.as_ptr(), destination_wide.as_ptr(), 0x0000_0008) };
+  if result == 0 {
+    Err(io::Error::last_os_error())
+  } else {
+    Ok(())
+  }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_existing(
+  replacement: &Path,
+  destination: &Path,
+  backup: Option<&Path>,
+) -> io::Result<()> {
+  if let Some(backup) = backup {
+    std::fs::copy(destination, backup)?;
+    std::fs::OpenOptions::new().read(true).open(backup)?.sync_all()?;
+  }
+  std::fs::rename(replacement, destination)
+}
+
+#[cfg(not(windows))]
+fn atomic_move_new(source: &Path, destination: &Path) -> io::Result<()> {
+  std::fs::rename(source, destination)
+}
+
 #[cfg(test)]
 mod tests {
   use super::ZipArchiveFilesMap;

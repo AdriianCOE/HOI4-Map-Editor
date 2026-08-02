@@ -1927,12 +1927,12 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 ButtonId::ToolbarFileProjectSettings,
             ),
             (
-                "Review State Changes",
+                "Review Project Changes",
                 "",
                 ButtonId::WorkspaceReviewChanges,
             ),
             (
-                "Save Current Workspace",
+                "Save Project",
                 "Ctrl+S",
                 ButtonId::ToolbarFileSave,
             ),
@@ -2144,7 +2144,7 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 ButtonId::ToolbarPatchNextFile,
             ),
             (
-                "Validation / Temporary Copy",
+                "Validate Project",
                 "",
                 ButtonId::ToolbarPatchValidate,
             ),
@@ -2644,14 +2644,14 @@ mod tests {
     }
 
     #[test]
-    fn file_menu_distinguishes_workspace_save_from_province_exports() {
+    fn file_menu_distinguishes_project_save_from_province_exports() {
         let file = TOOLBAR_PRIMITIVE
             .iter()
             .find(|(label, _)| *label == "File")
             .map(|(_, entries)| *entries)
             .unwrap();
         assert!(file.iter().any(|(label, shortcut, id)| {
-            *label == "Save Current Workspace"
+            *label == "Save Project"
                 && *shortcut == "Ctrl+S"
                 && *id == ButtonId::ToolbarFileSave
         }));

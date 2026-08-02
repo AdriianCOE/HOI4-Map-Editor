@@ -37,16 +37,14 @@ parser lossless `toml_edit` preserva comentários, ordem e chaves desconhecidas.
 Ausência ou erro de configuração nunca impede a abertura do editor e nunca
 marca mapas ou states como modificados.
 
-`localization.rs` compila os catálogos UTF-8 `en-US` e `pt-BR` no binário.
+`localization.rs` compila os catálogos UTF-8 `en-US`, `pt-BR`, `es-ES`,
+`fr-FR`, `ru-RU` e `zh-CN` no binário.
 Chaves de UI são resolvidas por uma API central; dados técnicos do HOI4 não
 passam pela localização.
 
-`Canvas::MapAccessMode` separa dois fluxos:
-
-- `ReadOnly`: projeto de estado aberto pela raiz do mod. Os arquivos
-  geograficos sao base visual e nao sao salvos pelo fluxo de estados.
-- `EditableProvinceMap`: modo legado para abrir uma pasta `map/` direta ou ZIP
-  de mapa. Mantem temporariamente as ferramentas herdadas do Province Editor.
+Projetos abertos pela raiz do mod editam Province Map e States sob o mesmo
+coordenador. Abrir uma pasta `map/` direta ou ZIP permanece como modo legado de
+Province Map, sem domínio de States.
 
 `MapBaseView` e o estado canonico da visualizacao: `ProvinceColors`,
 `ProvinceTypes`, `Terrain`, `Continents`, `Coastal`, `States` e `Political`.
@@ -179,12 +177,12 @@ acao explicita; somente o fluxo Validate and Continue pode usar um
 
 ## Salvamento transacional
 
-`app::project::save` e a unica fronteira que pode persistir arquivos de estado.
-O gate exige um `ProjectPatchPlan` atual, sem operacoes `Blocked`, e um
-`RoundTripValidationReport` atual (`Passed`, ou `PassedWithReview` com
-autorizacao explicita), alem de digests correspondentes, fontes ainda
-identicas, nenhuma diferenca liquida vazia, nenhum draft ou gesto ativo e
-nenhuma transacao/recovery pendente.
+`app::project::save` e a fronteira coordenada que pode persistir arquivos do
+projeto. O gate exige candidatos atuais de mapa e/ou estados, sem operacoes
+`Blocked`, e um relatorio de validacao atual (`Passed`, ou
+`PassedWithReview` com autorizacao explicita), alem de digests
+correspondentes, fontes ainda identicas, nenhuma diferenca liquida vazia,
+nenhum draft ou gesto ativo e nenhuma transacao/recovery pendente.
 
 Depois da confirmacao explicita, a transacao segue:
 
@@ -197,7 +195,7 @@ exclusive save.lock
 -> same-directory stage files
 -> staged byte verification
 -> second source revalidation
--> deterministic rename commit
+-> deterministic staged commit
 -> real project reload
 -> semantic/index/coverage/VP/building/diagnostic/byte/map comparison
 -> new baseline or verified rollback
@@ -206,6 +204,14 @@ exclusive save.lock
 Metadados ficam em `<mod>/.hoi4-state-editor/`. Backups usam copias fisicas.
 Stages e rollbacks ficam ao lado do destino com sufixos `.hse-stage-<id>` e
 `.hse-rollback-<id>` depois de `.txt`.
+O fluxo e journaled, coordenado e capaz de rollback, mas nao promete
+atomicidade filesystem de projeto inteiro entre todos os arquivos e plataformas.
+
+A ordem de commit e deterministica: substituicoes de arquivos existentes por
+caminho relativo normalizado, depois criacoes por caminho e, por ultimo,
+remocoes por caminho. Todo destino ja possui backup verificado antes dessa
+sequencia; rollback percorre a mesma lista em ordem inversa e verifica os bytes
+originais.
 
 ## State Inspector e catalogos
 
@@ -266,15 +272,15 @@ fornece os IDs reais ao carregador de estados.
 
 - Lasso de selecao e State Brush operam por provincia; nao ha pintura de
   pixels, merge, split ou brush com raio para estados.
-- `Ctrl+S` salva somente o workspace atual: Province Save no workspace
-  Provinces e Apply State Changes no workspace States. Exports de Province
-  criam copias e nao limpam o dirty state.
+- `Ctrl+S` usa Save Project para salvar candidatos de mapa e estados quando a
+  implementacao unificada esta habilitada. Exports de Province criam copias e
+  nao limpam o dirty state.
 - Blocos datados sao detectados e preservados, nao interpretados.
 - Arquivos que nao sao UTF-8 recebem diagnostico e representacao lossy somente
   para inspecao; nunca sao reescritos.
 - A camada geografica ainda exige IDs contiguos em `definition.csv`.
-- Sem alteracao de `provinces.bmp`, `definition.csv`, `adjacencies.csv` ou
-  `rivers.bmp` quando uma raiz de mod e aberta.
+- O Save Project desta fase altera somente `provinces.bmp`, `definition.csv` e
+  `history/states/*.txt`; adjacencies e rivers continuam fora do coordenador.
 - Sem suporte a ZIP de mod; ZIP permanece apenas no modo legado.
 
 ## Riscos conhecidos

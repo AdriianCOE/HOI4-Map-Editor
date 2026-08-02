@@ -7,11 +7,11 @@ use thiserror::Error;
 use toml_edit::{value, DocumentMut, Item, Table};
 
 use crate::app::map::{Color, ProvinceKind};
+use crate::util::files::{atomic_move_new_file, atomic_replace_file, write_complete_file};
 
 use std::env;
 use std::fmt;
-use std::fs::OpenOptions;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1034,17 +1034,6 @@ fn fingerprint_bytes(bytes: &[u8]) -> FileFingerprint {
     }
 }
 
-fn write_complete_file(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.flush()?;
-    file.sync_all()
-}
-
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     let stage_id = NEXT_STAGE_ID.fetch_add(1, Ordering::Relaxed);
     let temporary = path.with_file_name(format!(
@@ -1062,78 +1051,14 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
         ));
     }
     let result = if path.exists() {
-        atomic_replace_existing(&temporary, path)
+        atomic_replace_file(&temporary, path, None)
     } else {
-        atomic_move_new(&temporary, path)
+        atomic_move_new_file(&temporary, path)
     };
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
-}
-
-#[cfg(windows)]
-fn wide(path: &Path) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    path.as_os_str().encode_wide().chain(Some(0)).collect()
-}
-
-#[cfg(windows)]
-fn atomic_replace_existing(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
-    #[link(name = "Kernel32")]
-    unsafe extern "system" {
-        fn ReplaceFileW(
-            replaced: *const u16,
-            replacement: *const u16,
-            backup: *const u16,
-            flags: u32,
-            exclude: *mut std::ffi::c_void,
-            reserved: *mut std::ffi::c_void,
-        ) -> i32;
-    }
-    let replaced = wide(destination);
-    let replacement = wide(source);
-    let success = unsafe {
-        ReplaceFileW(
-            replaced.as_ptr(),
-            replacement.as_ptr(),
-            std::ptr::null(),
-            0x0000_0001,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    if success == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-fn atomic_move_new(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
-    #[link(name = "Kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-    }
-    let source = wide(source);
-    let destination = wide(destination);
-    let success = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0x0000_0008) };
-    if success == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(windows))]
-fn atomic_replace_existing(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
-    fs::rename(source, destination)
-}
-
-#[cfg(not(windows))]
-fn atomic_move_new(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
-    fs::rename(source, destination)
 }
 
 fn roaming_app_data() -> Option<PathBuf> {

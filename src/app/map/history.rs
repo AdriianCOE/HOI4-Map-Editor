@@ -13,6 +13,7 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct History {
   steps: VecDeque<Step>,
+  baseline: MapBase,
   position: usize,
   max_undo_states: usize
 }
@@ -29,6 +30,7 @@ impl History {
 
     History {
       steps,
+      baseline: map.base.clone(),
       position: 0,
       max_undo_states
     }
@@ -63,6 +65,14 @@ impl History {
     })
   }
 
+  pub fn is_dirty(&self, map: &Map) -> bool {
+    self.baseline != map.base
+  }
+
+  pub fn promote_baseline(&mut self, map: &Map) {
+    self.baseline = map.base.clone();
+  }
+
   fn push(&mut self, step: Step) {
     // Erase everything past the current state
     self.steps.truncate(self.position + 1);
@@ -81,6 +91,7 @@ impl History {
 
     if self.steps.len() > self.max_undo_states {
       self.steps.pop_front();
+      self.position = self.position.saturating_sub(1);
     };
   }
 
@@ -382,4 +393,77 @@ fn pixel_area(map: &Map, pos: Vector2<f64>, radius: f64, color: Color, mask: Opt
   };
 
   (extents, pixels)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::app::map::ProvinceData;
+  use ahash::AHashMap;
+  use image::{Rgb, RgbImage};
+
+  fn test_map(color: Color) -> Map {
+    let mut province_data_map = AHashMap::default();
+    province_data_map.insert(color, Arc::new(ProvinceData {
+      preserved_id: None,
+      kind: ProvinceKind::Land,
+      terrain: "plains".to_owned(),
+      continent: 1,
+      coastal: Some(false),
+      pixel_count: 1,
+      pixel_sum: [0, 0]
+    }));
+
+    Map {
+      base: MapBase {
+        color_buffer: Arc::new(RgbImage::from_pixel(1, 1, Rgb(color))),
+        province_data_map: Arc::new(province_data_map),
+        connection_data_map: Arc::new(AHashMap::default()),
+        rivers_overlay: None
+      },
+      boundaries: AHashMap::default(),
+      preserved_unsupported_adjacencies: Vec::new(),
+      preserved_id_count: None
+    }
+  }
+
+  fn edit_pixel(history: &mut History, map: &mut Map, color: Color, id: u32) {
+    map.put_pixel([0, 0], color);
+    history.push_map_state(map, StepOrigin::PaintPixel(id), ViewMode::Color);
+  }
+
+  #[test]
+  fn undo_to_baseline_is_clean() {
+    let mut map = test_map([1, 1, 1]);
+    let mut history = History::new(4, &map);
+
+    edit_pixel(&mut history, &mut map, [2, 2, 2], 1);
+    assert!(history.is_dirty(&map));
+
+    history.undo(&mut map).unwrap();
+    assert!(!history.is_dirty(&map));
+  }
+
+  #[test]
+  fn dirty_survives_discarded_undo_baseline() {
+    let mut map = test_map([1, 1, 1]);
+    let mut history = History::new(1, &map);
+
+    edit_pixel(&mut history, &mut map, [2, 2, 2], 1);
+
+    assert_eq!(history.steps.len(), 1);
+    assert!(history.is_dirty(&map));
+  }
+
+  #[test]
+  fn promote_baseline_clears_dirty() {
+    let mut map = test_map([1, 1, 1]);
+    let mut history = History::new(4, &map);
+
+    edit_pixel(&mut history, &mut map, [2, 2, 2], 1);
+    assert!(history.is_dirty(&map));
+
+    history.promote_baseline(&map);
+    assert!(!history.is_dirty(&map));
+  }
 }

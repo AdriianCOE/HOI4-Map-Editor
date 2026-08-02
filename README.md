@@ -22,7 +22,7 @@ HOI4 Map Editor is based on [ScottyThePilot's HOI4 Province Editor](https://gith
 - Inspect province IDs, colors, terrain, state assignments, and map diagnostics.
 - Search and focus provinces by technical properties.
 - Undo and redo geographic changes.
-- Save `provinces.bmp` and `definition.csv` through an atomic, validated workflow.
+- Save `provinces.bmp` and `definition.csv` through validated per-file atomic replacements.
 
 ### State editing
 
@@ -80,25 +80,19 @@ Selecting a result focuses and zooms the map automatically.
 
 ### Safe file updates
 
-Province and state changes use separate save workflows.
+**Save Project** reviews every pending Province Map and State change together.
 
-**Save Province Map**
+- prepares `provinces.bmp`, `definition.csv`, and all affected
+  `history/states/*.txt` candidates before the first mod write;
+- validates the combined candidate in a physical temporary copy;
+- creates one verified backup and durable journal;
+- replaces each affected file atomically in deterministic order;
+- rolls back the coordinated operation when a later step fails;
+- reloads and verifies the complete project before clearing dirty state;
+- detects external file changes and supports interrupted-save recovery.
 
-- writes only `map/provinces.bmp` and `map/definition.csv`;
-- prepares and validates complete replacement files before touching the mod;
-- creates a backup;
-- uses atomic replacement;
-- rolls back if the operation fails.
-
-**Apply State Changes**
-
-- writes only files under `history/states/`;
-- generates a lossless patch preview;
-- validates the result in a temporary project copy;
-- creates a backup;
-- applies changes transactionally;
-- reloads and verifies the saved project;
-- supports rollback and interrupted-save recovery.
+This is a transactional, rollback-capable project save. Windows does not offer
+one filesystem operation that atomically replaces the whole multi-file project.
 
 Existing state files retain unrelated comments, formatting, unknown fields, and unsupported blocks.
 
@@ -158,37 +152,24 @@ The States workspace additionally uses `history/states/*.txt`.
 
 ## Basic workflow
 
-### Province map
-
 ```text
 Open Mod
-→ Edit Provinces
-→ Save Province Map
-→ Validate
-→ Backup
-→ Replace Files
+→ Edit Provinces and/or States
+→ Review Project Changes
+→ Validate Combined Temporary Copy
+→ Save Project
 → Reload and Verify
 ```
 
-### States
-
-```text
-Open Mod
-→ Edit States
-→ Review State Changes
-→ Validate Temporary Copy
-→ Apply State Changes
-→ Reload and Verify
-```
-
-There is no combined **Save All** operation. Province and state changes remain independent so one workflow cannot silently save or clear the other.
+**Export Province Map As...** remains separate and never clears project dirty
+state.
 
 ## Essential shortcuts
 
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl+O` | Open a mod |
-| `Ctrl+S` | Save the current workspace |
+| `Ctrl+S` | Review and Save Project |
 | `Ctrl+Shift+S` | Export Province Map As |
 | `Ctrl+1` | Provinces workspace |
 | `Ctrl+2` | States workspace |
@@ -207,7 +188,8 @@ Map shortcuts are suspended while typing in a field, picker, or search box.
 ## Current limitations
 
 - Preview builds currently support Windows x64 only.
-- Province Save and State Apply are separate transactions.
+- The Validation Results window currently offers basic all-domain results;
+  advanced report export and persistent ignore policies are planned.
 - Country names, state localizations, and other game-data localizations are not loaded from the game yet.
 - Country flags and game icons are not displayed yet.
 - Adjacencies can be inspected, but the full editing workspace is still planned.

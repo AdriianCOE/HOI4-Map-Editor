@@ -8,8 +8,10 @@ mod patch;
 mod paths;
 mod properties;
 mod save;
+mod save_plan;
 mod state_fill;
 mod validation;
+mod validation_core;
 mod view;
 
 pub use brush::{BrushProvinceClassification, StateBrushMode, sample_segment};
@@ -43,20 +45,26 @@ pub use save::{
     SaveFailure, SaveFileKind, SaveFileOperationJournal, SaveTransactionJournal,
     SaveTransactionState, StateSaveAuthorization, StateSaveBlockReason, StateSaveCancellation,
     StateSaveConditions, StateSaveEligibility, StateSaveFault, StateSaveOutcome, StateSaveReport,
-    detect_state_save_recovery, execute_state_save, recover_interrupted_state_save,
-    save_confirmation_text, state_save_eligibility,
+    authorize_project_save_plan, detect_state_save_recovery, execute_project_save,
+    execute_state_save, recover_interrupted_state_save, save_confirmation_text,
+    state_save_eligibility,
 };
+pub use save_plan::{ProjectDirtyState, ProjectSavePlan, SaveDomain};
 pub use state_fill::{
     ProvinceAdjacency, StateFillBlockedProvince, StateFillBlockedReason, StateFillMode,
     StateFillPreview, StateFillProvince, StateFillProvinceKind, plan_state_fill,
 };
 pub use validation::{
-    ByteComparisonResult, ByteDifference, CandidateApplicationResult, DiagnosticComparison,
-    FileFingerprint, ProjectReloadResult, ProjectSemanticComparison, RoundTripCancellation,
-    RoundTripDiagnostic, RoundTripStage, RoundTripStatus, RoundTripTimings,
-    RoundTripValidationPolicy, RoundTripValidationReport, RoundTripValidator, SemanticDifference,
-    SourceVerificationResult, TemporaryProjectManifest, TemporaryWorkspaceSummary,
-    resolve_candidate_path,
+    ByteComparisonResult, ByteDifference, CandidateApplicationResult,
+    CombinedRoundTripValidationReport, DiagnosticComparison, FileFingerprint,
+    ProjectReloadResult, ProjectSemanticComparison, RoundTripCancellation, RoundTripDiagnostic,
+    RoundTripStage, RoundTripStatus, RoundTripTimings, RoundTripValidationPolicy,
+    RoundTripValidationReport, RoundTripValidator, SemanticDifference, SourceVerificationResult,
+    TemporaryProjectManifest, TemporaryWorkspaceSummary, resolve_candidate_path,
+};
+pub use validation_core::{
+    ProjectValidationDiagnostic, ProjectValidationDomain, ProjectValidationReport,
+    ProjectValidationSummary, ProjectValidationTarget, validate_project,
 };
 pub use view::{
     AMBIGUOUS_PROVINCE_COLOR, MapViewMode, SELECTED_STATE_COLOR, STATE_BOUNDARY_COLOR,

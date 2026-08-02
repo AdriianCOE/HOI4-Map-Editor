@@ -9,7 +9,8 @@ applicable item is confirmed.
 - [ ] The same gates pass in a clean clone made from committed history.
 - [ ] Portable ZIP was produced by `scripts/package-windows.ps1`.
 - [ ] ZIP contains only the executable, README, LICENSE, changelog, and notices.
-- [ ] Embedded `en-US` and `pt-BR` catalogs work without external locale files.
+- [ ] Embedded `en-US`, `pt-BR`, `es-ES`, `fr-FR`, `ru-RU`, and `zh-CN`
+      catalogs work without external locale files.
 - [ ] Package contains no personal, project, or legacy configuration file.
 - [ ] SHA-256 checksum matches the ZIP.
 - [ ] `RELEASE_MANIFEST.txt` matches the ZIP name, version, size, and SHA-256.
@@ -21,8 +22,8 @@ applicable item is confirmed.
 
 - [ ] Test on a clean supported Windows machine from a writable extracted folder.
 - [ ] Test with at least two independently backed-up mods.
-- [ ] Review State Changes, temporary validation, backup, Apply State Changes, reload, rollback, and recovery are exercised.
-- [ ] Province editing legacy flow is tested separately from State Apply.
+- [ ] Review Project Changes, combined temporary validation, backup, Save Project, reload, rollback, and recovery are exercised.
+- [ ] Province-only, state-only, and combined dirty-save flows are tested separately.
 - [ ] Logs are created under `%LOCALAPPDATA%\HOI4MapEditor\logs`.
 - [ ] Global settings are created only after explicit Save and project settings
       only after explicit Project Settings Save.
@@ -33,7 +34,7 @@ applicable item is confirmed.
 - [ ] All screenshots and promotional assets are original or properly licensed.
 - [ ] Description states that the tool is unofficial and not endorsed by Paradox Interactive.
 - [ ] Known limitations and update policy are documented.
-- [ ] User guide, troubleshooting, privacy, checksum, and rollback information are current.
+- [ ] User guide, troubleshooting, privacy, changelog, checksum, and rollback information are current.
 - [ ] The inherited spritesheet provenance limitation has been resolved or accepted explicitly.
 - [ ] Dependency licence metadata has received a final manual review.
 

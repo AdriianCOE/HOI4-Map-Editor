@@ -24,7 +24,7 @@ visible for inspection but unsafe edits and Apply remain blocked.
 
 ## Apply is disabled
 
-Open Review State Changes. The editor regenerates a stale plan and offers temporary
+Open **Review Project Changes**. The editor regenerates a stale plan and offers temporary
 validation directly. `ReviewRequired` needs **Validate and Continue**;
 `Blocked` diagnostics must be resolved. Editing after validation makes the
 report stale and requires another review.
@@ -37,11 +37,38 @@ backup, or replacement fails. The original `provinces.bmp` and
 triggers verified rollback. Do not delete the reported backup if recovery is
 required.
 
-## State validation or Apply State Changes failed
+## Project validation or Save Project failed
 
 Do not remove `<mod>/.hoi4-state-editor/`. Reload the same mod and let recovery
 finish. If recovery remains blocked, preserve that directory and the local log
-before changing files manually.
+before changing files manually. Files are saved only after backup and
+validation; rollback should leave either the old project or the verified new
+project in place.
+
+## Save Project says the project changed on disk
+
+Another program changed `provinces.bmp`, `definition.csv`, or an affected State
+file after review began. The editor aborts without overwriting that change.
+Reload the project, inspect the external edit, and review Save Project again.
+There is no **Save Anyway** override for these files.
+
+## Save Project says there are no changes
+
+The current in-memory Province Map and States match their loaded baselines. No
+backup, journal, or project file is created.
+
+## Recovery is required or rollback was incomplete
+
+Do not delete the reported backup, journal, or lock under
+`<mod>/.hoi4-state-editor/`. Reopen the same project and retry recovery. New
+project or domain saves remain blocked until restored file sizes and SHA-256
+hashes verify successfully.
+
+## State changes depend on unsaved Province changes
+
+Use the primary **Save Project** action so both candidates are validated and
+saved together. A partial advanced save is blocked when it would leave known
+cross-domain inconsistencies.
 
 ## A configuration file is invalid
 

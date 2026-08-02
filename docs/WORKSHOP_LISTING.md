@@ -7,7 +7,7 @@ file is not used by the build or the packager; it is prepared text only.
 
 Unofficial standalone editor for HOI4 province maps and state history
 files. Province colors/terrain, state creation and properties, validated
-transactional saves with backup/rollback, and a 6-language interface.
+coordinated saves with backup/rollback, and a 6-language interface.
 Preview software - keep an independent backup of your mod.
 
 ## Long description
@@ -28,8 +28,8 @@ not modify the game itself.
   Fill.
 - State Inspector for owner, controller, colors, cores, claims, resources,
   buildings, and victory points.
-- Review State Changes -> validate in a temporary workspace -> Apply State
-  Changes with backup, rollback, and interrupted-save recovery.
+- Review Project Changes -> validate in a temporary workspace -> Save Project
+  with backup, rollback, and interrupted-save recovery.
 - Contextual search with focused map navigation.
 - Six interface languages: English, Portugues do Brasil, Espanol, Francais,
   Russkiy, and Simplified Chinese.
@@ -66,7 +66,7 @@ against the current Workshop tag list at publish time.)
 
 ## Changelog (for the Workshop "Change Notes" field)
 
-Copy the `## [0.1.0-preview.1]` section from `CHANGELOG.md` at publish time.
+Copy the matching release section from `CHANGELOG.md` at publish time.
 
 ## Screenshot checklist (none captured yet - required before publishing)
 
@@ -74,7 +74,7 @@ Copy the `## [0.1.0-preview.1]` section from `CHANGELOG.md` at publish time.
       the Inspector visible.
 - [ ] States workspace, Political view, a state with owner/controller/cores
       set, State Inspector open.
-- [ ] Review State Changes / Apply State Changes dialog mid-flow.
+- [ ] Review Project Changes / Save Project dialog mid-flow.
 - [ ] Settings dialog with the Language row showing a non-English language
       selected (demonstrates the 6-language UI).
 - [ ] Search with a focused province result.

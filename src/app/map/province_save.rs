@@ -1,10 +1,12 @@
 use super::bridge::{
   deconstruct_map_data, read_rgb_bmp_image, write_adjacencies_table, write_definition_table,
-  write_id_changes,
+  write_id_changes, write_rgb_bmp_image,
 };
 use super::{Bundle, SaveOperation};
 use crate::app::format::{Definition, ParseCsv};
-use crate::util::files::{Location, ZipArchiveFilesMap};
+use crate::util::files::{
+  atomic_move_new_file, atomic_replace_file, write_new_complete_file, Location, ZipArchiveFilesMap,
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -175,11 +177,11 @@ impl ProvinceSaveCancellation {
 }
 
 #[derive(Debug)]
-struct Candidate {
-  files: BTreeMap<PathBuf, Vec<u8>>,
-  definitions: Vec<Definition>,
-  image: image::RgbImage,
-  had_id_changes: bool,
+pub(crate) struct ProvinceMapCandidate {
+  pub(crate) files: BTreeMap<PathBuf, Vec<u8>>,
+  pub(crate) definitions: Vec<Definition>,
+  pub(crate) image: image::RgbImage,
+  pub(crate) had_id_changes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,40 +301,23 @@ pub fn execute_province_save(
   )
 }
 
-fn execute_province_save_with_fault(
-  location: &Location,
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn build_province_map_candidate(bundle: &Bundle) -> Result<ProvinceMapCandidate, String> {
+  build_province_map_candidate_inner(bundle, Fault::None, |_, _, _| {}).map(|(candidate, _)| candidate)
+}
+
+fn build_province_map_candidate_inner(
   bundle: &Bundle,
-  mode: ProvinceSaveMode,
-  cancellation: &ProvinceSaveCancellation,
   fault: Fault,
-  progress: &mut impl FnMut(ProvinceSaveProgress),
-) -> Result<ProvinceSaveReport, String> {
-  let transaction_id = transaction_id();
+  mut progress: impl FnMut(ProvinceSaveStage, u64, u64),
+) -> Result<(ProvinceMapCandidate, ProvinceSaveTimings), String> {
+  #[cfg(not(test))]
+  let _ = fault;
   let mut timings = ProvinceSaveTimings::default();
-  emit(progress, ProvinceSaveStage::Preparing, 0, 1);
   let started = Instant::now();
   let (definitions, adjacencies, id_changes) =
     deconstruct_map_data(bundle).map_err(|error| error.to_string())?;
   timings.preparing = started.elapsed();
-  check_cancel(cancellation)?;
-  let mut output_paths = vec![
-    PathBuf::from("provinces.bmp"),
-    PathBuf::from("definition.csv"),
-  ];
-  if !adjacencies.is_empty() {
-    output_paths.push(PathBuf::from("adjacencies.csv"));
-  }
-  if id_changes.is_some() {
-    output_paths.push(PathBuf::from("id_changes.txt"));
-  }
-  let directory_baseline = match location {
-    Location::Directory(root) => Some(capture_directory_baseline(root, &output_paths)?),
-    Location::ZipArchive(_) => None,
-  };
-  let archive_baseline = match location {
-    Location::ZipArchive(path) => Some(read_optional(path)?),
-    Location::Directory(_) => None,
-  };
 
   let started = Instant::now();
   let expected_bmp_size = expected_bmp_size(
@@ -340,24 +325,23 @@ fn execute_province_save_with_fault(
     bundle.map.base.color_buffer.height(),
   )?;
   let mut bmp = ProgressWriter::new(Vec::with_capacity(expected_bmp_size as usize), expected_bmp_size, |current, total| {
-    emit(progress, ProvinceSaveStage::EncodingBmp, current, total);
+    progress(ProvinceSaveStage::EncodingBmp, current, total);
   });
   #[cfg(test)]
   if fault == Fault::Encoding {
     return Err("Injected failure during BMP encoding".to_owned());
   }
-  super::bridge::write_rgb_bmp_image(&mut bmp, &bundle.map.base.color_buffer)
+  write_rgb_bmp_image(&mut bmp, &bundle.map.base.color_buffer)
     .map_err(|error| format!("Cannot encode provinces.bmp: {error}"))?;
   let bmp = bmp.into_inner();
   timings.encoding_bmp = started.elapsed();
-  check_cancel(cancellation)?;
 
   let started = Instant::now();
-  emit(progress, ProvinceSaveStage::WritingDefinition, 0, 1);
+  progress(ProvinceSaveStage::WritingDefinition, 0, 1);
   let mut definition_csv = Vec::new();
   write_definition_table(&mut definition_csv, definitions.clone())
     .map_err(|error| format!("Cannot encode definition.csv: {error}"))?;
-  emit(progress, ProvinceSaveStage::WritingDefinition, 1, 1);
+  progress(ProvinceSaveStage::WritingDefinition, 1, 1);
   timings.writing_definition = started.elapsed();
 
   let had_id_changes = id_changes.is_some();
@@ -377,12 +361,47 @@ fn execute_province_save_with_fault(
       .map_err(|error| format!("Cannot encode id_changes.txt: {error}"))?;
     files.insert(PathBuf::from("id_changes.txt"), bytes);
   }
-  let candidate = Candidate {
-    files,
-    definitions,
-    image: (*bundle.map.base.color_buffer).clone(),
-    had_id_changes,
+
+  Ok((
+    ProvinceMapCandidate {
+      files,
+      definitions,
+      image: (*bundle.map.base.color_buffer).clone(),
+      had_id_changes,
+    },
+    timings,
+  ))
+}
+
+fn execute_province_save_with_fault(
+  location: &Location,
+  bundle: &Bundle,
+  mode: ProvinceSaveMode,
+  cancellation: &ProvinceSaveCancellation,
+  fault: Fault,
+  progress: &mut impl FnMut(ProvinceSaveProgress),
+) -> Result<ProvinceSaveReport, String> {
+  let transaction_id = transaction_id();
+  emit(progress, ProvinceSaveStage::Preparing, 0, 1);
+  let output_paths = vec![
+    PathBuf::from("provinces.bmp"),
+    PathBuf::from("definition.csv"),
+    PathBuf::from("adjacencies.csv"),
+    PathBuf::from("id_changes.txt"),
+  ];
+  let directory_baseline = match location {
+    Location::Directory(root) => Some(capture_directory_baseline(root, &output_paths)?),
+    Location::ZipArchive(_) => None,
   };
+  let archive_baseline = match location {
+    Location::ZipArchive(path) => Some(read_optional(path)?),
+    Location::Directory(_) => None,
+  };
+  check_cancel(cancellation)?;
+  let (candidate, timings) = build_province_map_candidate_inner(bundle, fault, |stage, current, total| {
+    emit(progress, stage, current, total);
+  })?;
+  check_cancel(cancellation)?;
 
   match location {
     Location::Directory(root) => execute_directory(
@@ -417,7 +436,7 @@ fn execute_province_save_with_fault(
 #[allow(clippy::too_many_arguments)]
 fn execute_directory(
   root: &Path,
-  candidate: Candidate,
+  candidate: ProvinceMapCandidate,
   mode: ProvinceSaveMode,
   cancellation: &ProvinceSaveCancellation,
   fault: Fault,
@@ -483,7 +502,7 @@ fn execute_directory(
     if fault == Fault::Validation {
       return Err("Injected failure during staged validation".to_owned());
     }
-    validate_candidate_files(&candidate, |relative| {
+    validate_province_map_candidate(&candidate, |relative| {
       let file = prepared
         .iter()
         .find(|file| file.relative == relative)
@@ -595,7 +614,7 @@ fn execute_directory(
       if fault == Fault::Reload {
         return Err("Injected failure during reload".to_owned());
       }
-      validate_candidate_files(&candidate, |relative| {
+      validate_province_map_candidate(&candidate, |relative| {
         let path = root.join(relative);
         fs::read(&path).map_err(|error| format!("Cannot reload {}: {error}", path.display()))
       })?;
@@ -710,7 +729,7 @@ fn execute_directory(
 #[allow(clippy::too_many_arguments)]
 fn execute_archive(
   path: &Path,
-  candidate: Candidate,
+  candidate: ProvinceMapCandidate,
   cancellation: &ProvinceSaveCancellation,
   fault: Fault,
   before: Option<Vec<u8>>,
@@ -760,7 +779,7 @@ fn execute_archive(
     if names != expected {
       return Err("Staged archive contains files outside the province export allowlist.".to_owned());
     }
-    validate_candidate_files(&candidate, |relative| {
+    validate_province_map_candidate(&candidate, |relative| {
       staged_archive
         .get(relative)
         .cloned()
@@ -799,7 +818,7 @@ fn execute_archive(
       fs::read(path).map_err(|error| format!("Cannot verify {}: {error}", path.display()))?;
     let final_archive = ZipArchiveFilesMap::from_fs(path)
       .map_err(|error| format!("Cannot reopen final archive: {error}"))?;
-    validate_candidate_files(&candidate, |relative| {
+    validate_province_map_candidate(&candidate, |relative| {
       final_archive
         .get(relative)
         .cloned()
@@ -866,8 +885,8 @@ fn capture_directory_baseline(
     .collect()
 }
 
-fn validate_candidate_files(
-  candidate: &Candidate,
+pub(crate) fn validate_province_map_candidate(
+  candidate: &ProvinceMapCandidate,
   mut read: impl FnMut(&Path) -> Result<Vec<u8>, String>,
 ) -> Result<(), String> {
   let bmp = read(Path::new("provinces.bmp"))?;
@@ -1195,9 +1214,21 @@ fn write_toml_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
   remove_if_exists(&temporary)?;
   write_new_synced(&temporary, &bytes)?;
   if path.exists() {
-    atomic_replace_existing(&temporary, path, None)?;
+    atomic_replace_file(&temporary, path, None).map_err(|error| {
+      format!(
+        "Cannot atomically replace {} with {}: {error}",
+        path.display(),
+        temporary.display()
+      )
+    })?;
   } else {
-    atomic_move_new(&temporary, path)?;
+    atomic_move_new_file(&temporary, path).map_err(|error| {
+      format!(
+        "Cannot atomically publish {} as {}: {error}",
+        temporary.display(),
+        path.display()
+      )
+    })?;
   }
   Ok(())
 }
@@ -1207,15 +1238,7 @@ fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
     fs::create_dir_all(parent)
       .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
   }
-  let mut file = OpenOptions::new()
-    .write(true)
-    .create_new(true)
-    .open(path)
-    .map_err(|error| format!("Cannot create {}: {error}", path.display()))?;
-  file
-    .write_all(bytes)
-    .and_then(|_| file.flush())
-    .and_then(|_| file.sync_all())
+  write_new_complete_file(path, bytes)
     .map_err(|error| format!("Cannot persist {}: {error}", path.display()))
 }
 
@@ -1227,135 +1250,22 @@ fn publish_file(
 ) -> Result<(), String> {
   remove_if_exists(rollback)?;
   if destination_exists {
-    atomic_replace_existing(stage, destination, Some(rollback))
+    atomic_replace_file(stage, destination, Some(rollback)).map_err(|error| {
+      format!(
+        "Cannot atomically replace {} with {}: {error}",
+        destination.display(),
+        stage.display()
+      )
+    })
   } else {
-    atomic_move_new(stage, destination)
+    atomic_move_new_file(stage, destination).map_err(|error| {
+      format!(
+        "Cannot atomically publish {} as {}: {error}",
+        stage.display(),
+        destination.display()
+      )
+    })
   }
-}
-
-#[cfg(windows)]
-fn atomic_replace_existing(
-  replacement: &Path,
-  destination: &Path,
-  backup: Option<&Path>,
-) -> Result<(), String> {
-  use std::os::windows::ffi::OsStrExt;
-  use std::ptr;
-
-  #[link(name = "kernel32")]
-  unsafe extern "system" {
-    fn ReplaceFileW(
-      replaced: *const u16,
-      replacement: *const u16,
-      backup: *const u16,
-      flags: u32,
-      exclude: *mut core::ffi::c_void,
-      reserved: *mut core::ffi::c_void,
-    ) -> i32;
-  }
-  const REPLACEFILE_WRITE_THROUGH: u32 = 0x0000_0001;
-  fn wide(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(Some(0)).collect()
-  }
-  let destination_wide = wide(destination);
-  let replacement_wide = wide(replacement);
-  let backup_wide = backup.map(wide);
-  let backup_ptr = backup_wide.as_ref().map_or(ptr::null(), |path| path.as_ptr());
-  // SAFETY: all pointers reference NUL-terminated UTF-16 buffers for the duration of the call.
-  let result = unsafe {
-    ReplaceFileW(
-      destination_wide.as_ptr(),
-      replacement_wide.as_ptr(),
-      backup_ptr,
-      REPLACEFILE_WRITE_THROUGH,
-      ptr::null_mut(),
-      ptr::null_mut(),
-    )
-  };
-  if result != 0 {
-    Ok(())
-  } else {
-    Err(format!(
-      "Cannot atomically replace {} with {}: {}",
-      destination.display(),
-      replacement.display(),
-      io::Error::last_os_error()
-    ))
-  }
-}
-
-#[cfg(windows)]
-fn atomic_move_new(source: &Path, destination: &Path) -> Result<(), String> {
-  use std::os::windows::ffi::OsStrExt;
-
-  #[link(name = "kernel32")]
-  unsafe extern "system" {
-    fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-  }
-  const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
-  fn wide(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(Some(0)).collect()
-  }
-  let source_wide = wide(source);
-  let destination_wide = wide(destination);
-  // SAFETY: both pointers reference NUL-terminated UTF-16 buffers for the duration of the call.
-  let result = unsafe {
-    MoveFileExW(
-      source_wide.as_ptr(),
-      destination_wide.as_ptr(),
-      MOVEFILE_WRITE_THROUGH,
-    )
-  };
-  if result != 0 {
-    Ok(())
-  } else {
-    Err(format!(
-      "Cannot atomically publish {} as {}: {}",
-      source.display(),
-      destination.display(),
-      io::Error::last_os_error()
-    ))
-  }
-}
-
-#[cfg(not(windows))]
-fn atomic_replace_existing(
-  replacement: &Path,
-  destination: &Path,
-  backup: Option<&Path>,
-) -> Result<(), String> {
-  if let Some(backup) = backup {
-    fs::copy(destination, backup)
-      .map_err(|error| format!("Cannot create rollback {}: {error}", backup.display()))?;
-    sync_file(backup)?;
-  }
-  fs::rename(replacement, destination).map_err(|error| {
-    format!(
-      "Cannot atomically replace {} with {}: {error}",
-      destination.display(),
-      replacement.display()
-    )
-  })
-}
-
-#[cfg(not(windows))]
-fn atomic_move_new(source: &Path, destination: &Path) -> Result<(), String> {
-  fs::rename(source, destination).map_err(|error| {
-    format!(
-      "Cannot atomically publish {} as {}: {error}",
-      source.display(),
-      destination.display()
-    )
-  })
-}
-
-#[cfg(not(windows))]
-fn sync_file(path: &Path) -> Result<(), String> {
-  OpenOptions::new()
-    .read(true)
-    .open(path)
-    .and_then(|file| file.sync_all())
-    .map_err(|error| format!("Cannot sync {}: {error}", path.display()))
 }
 
 fn sibling_path(path: &Path, kind: &str, transaction_id: &str) -> Result<PathBuf, String> {
@@ -1601,6 +1511,23 @@ mod tests {
     let mut wrong_depth = bytes;
     wrong_depth[28..30].copy_from_slice(&32u16.to_le_bytes());
     assert!(validate_bmp(&wrong_depth, &bundle.map.base.color_buffer).is_err());
+  }
+
+  #[test]
+  fn province_map_candidate_builds_and_validates_core_files() {
+    let candidate = build_province_map_candidate(&bundle()).unwrap();
+    assert_eq!(
+      candidate.files.keys().cloned().collect::<BTreeSet<_>>(),
+      BTreeSet::from([PathBuf::from("definition.csv"), PathBuf::from("provinces.bmp")])
+    );
+    validate_province_map_candidate(&candidate, |relative| {
+      candidate
+        .files
+        .get(relative)
+        .cloned()
+        .ok_or_else(|| relative.display().to_string())
+    })
+    .unwrap();
   }
 
   #[test]

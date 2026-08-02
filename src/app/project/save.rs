@@ -12,9 +12,11 @@ use serde::{Deserialize, Serialize};
 
 use super::validation::{compare_project_for_save, reload_project_for_save};
 use super::{
-    Hoi4Project, PatchSafety, ProjectPatchPlan, RoundTripStatus, RoundTripValidationReport,
-    SourceFingerprint, StateEditSession,
+    CombinedRoundTripValidationReport, Hoi4Project, PatchSafety, ProjectPatchPlan,
+    RoundTripStatus, RoundTripValidationReport, SourceFingerprint, StateEditSession,
 };
+use super::save_plan::ProjectSavePlan;
+use crate::util::files::{atomic_move_new_file, atomic_replace_file};
 
 static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const INTERNAL_DIRECTORY: &str = ".hoi4-state-editor";
@@ -498,7 +500,7 @@ pub fn execute_state_save(
     authorization: &StateSaveAuthorization,
     cancellation: &StateSaveCancellation,
     fault: StateSaveFault,
-    mut progress: impl FnMut(SaveTransactionState, usize, usize),
+    progress: impl FnMut(SaveTransactionState, usize, usize),
 ) -> StateSaveReport {
     let counts = (
         plan.modified_files.len(),
@@ -511,6 +513,108 @@ pub fn execute_state_save(
     if let Err(error) = verify_source(project, plan) {
         return bare_report(StateSaveOutcome::FailedBeforeCommit, counts, error);
     }
+
+    execute_patch_plan_save(
+        project,
+        Some(edit),
+        plan,
+        authorization,
+        cancellation,
+        fault,
+        progress,
+    )
+}
+
+pub fn authorize_project_save_plan(
+    plan: &ProjectSavePlan,
+    report: &CombinedRoundTripValidationReport,
+    allow_review_required: bool,
+) -> Result<StateSaveAuthorization, String> {
+    let patch_plan = plan.patch_plan();
+    if report.candidate_digest != *plan.candidate_digest()
+        || report.round_trip.plan_generation != patch_plan.generation
+        || !report.round_trip.eligible_for_atomic_save_preparation
+    {
+        return Err("The combined validation does not authorize this project save plan.".to_owned());
+    }
+    match report.round_trip.status {
+        RoundTripStatus::Passed => {}
+        RoundTripStatus::PassedWithReview if allow_review_required => {}
+        RoundTripStatus::PassedWithReview => {
+            return Err("Project warnings require explicit review before saving.".to_owned());
+        }
+        RoundTripStatus::Failed | RoundTripStatus::Cancelled => {
+            return Err("Project validation did not pass.".to_owned());
+        }
+    }
+    if report.project_validation.as_ref().is_some_and(|validation| {
+        validation.blocks_save || validation.errors != 0
+    }) {
+        return Err("Project validation contains blocking errors.".to_owned());
+    }
+    Ok(StateSaveAuthorization {
+        session_revision: patch_plan.generation,
+        patch_plan_generation: patch_plan.generation,
+        patch_plan_digest: patch_plan.content_fingerprint().digest_hex(),
+        validation_report_digest: report.authorization_digest.digest_hex(),
+        allow_review_required,
+        source_fingerprints: patch_plan
+            .source_fingerprints
+            .iter()
+            .map(|(path, fingerprint)| (path.clone(), fingerprint.into()))
+            .collect(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_project_save(
+    project: &Hoi4Project,
+    edit: &StateEditSession,
+    plan: &ProjectSavePlan,
+    report: &CombinedRoundTripValidationReport,
+    allow_review_required: bool,
+    cancellation: &StateSaveCancellation,
+    fault: StateSaveFault,
+    progress: impl FnMut(SaveTransactionState, usize, usize),
+) -> StateSaveReport {
+    let patch_plan = plan.patch_plan();
+    let counts = (
+        patch_plan.modified_files.len(),
+        patch_plan.created_files.len(),
+        patch_plan.removed_files.len(),
+    );
+    let authorization = match authorize_project_save_plan(plan, report, allow_review_required) {
+        Ok(authorization) => authorization,
+        Err(error) => return bare_report(StateSaveOutcome::FailedBeforeCommit, counts, error),
+    };
+    if let Err(error) = verify_source(project, patch_plan) {
+        return bare_report(StateSaveOutcome::FailedBeforeCommit, counts, error);
+    }
+    execute_patch_plan_save(
+        project,
+        Some(edit),
+        patch_plan,
+        &authorization,
+        cancellation,
+        fault,
+        progress,
+    )
+}
+
+fn execute_patch_plan_save(
+    project: &Hoi4Project,
+    edit: Option<&StateEditSession>,
+    plan: &ProjectPatchPlan,
+    authorization: &StateSaveAuthorization,
+    cancellation: &StateSaveCancellation,
+    fault: StateSaveFault,
+    mut progress: impl FnMut(SaveTransactionState, usize, usize),
+) -> StateSaveReport {
+    let counts = (
+        plan.modified_files.len(),
+        plan.created_files.len(),
+        plan.removed_files.len(),
+    );
 
     let root = match canonical_root(&project.paths.root) {
         Ok(root) => root,
@@ -926,6 +1030,14 @@ enum ResolvedOperation {
 }
 
 impl ResolvedOperation {
+    fn final_path(&self) -> &Path {
+        match self {
+            Self::Modify { final_path, .. }
+            | Self::Create { final_path, .. }
+            | Self::Remove { final_path, .. } => final_path,
+        }
+    }
+
     fn relative(&self) -> &Path {
         match self {
             Self::Modify { relative, .. }
@@ -1066,7 +1178,10 @@ fn resolve_operations(
 
 fn validate_plan_path(path: &Path) -> Result<(), String> {
     if path.is_absolute() {
-        return Err(format!("Absolute state path is unsafe: {}", path.display()));
+        return Err(format!("Absolute save path is unsafe: {}", path.display()));
+    }
+    if is_province_map_path(path) {
+        return Ok(());
     }
     let components = path.components().collect::<Vec<_>>();
     if components.len() != 3
@@ -1124,11 +1239,37 @@ fn validate_plan_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn is_province_map_path(path: &Path) -> bool {
+    let components = path.components().collect::<Vec<_>>();
+    components.len() == 2
+        && matches!(components[0], Component::Normal(value) if eq_ascii(value, "map"))
+        && matches!(
+            components[1],
+            Component::Normal(value)
+                if matches!(
+                    value.to_string_lossy().as_ref(),
+                    "provinces.bmp" | "definition.csv" | "adjacencies.csv" | "id_changes.txt"
+                )
+        )
+}
+
 fn eq_ascii(value: &std::ffi::OsStr, expected: &str) -> bool {
     value.to_string_lossy().eq_ignore_ascii_case(expected)
 }
 
 fn resolve_final_path(root: &Path, relative: &Path) -> Result<PathBuf, String> {
+    if is_province_map_path(relative) {
+        let final_path = root.join(relative);
+        let parent = final_path
+            .parent()
+            .ok_or_else(|| format!("Map path has no parent: {}", relative.display()))?;
+        let canonical_map = dunce::canonicalize(root.join("map"))
+            .map_err(|error| format!("Cannot canonicalize map directory: {error}"))?;
+        if parent != canonical_map.as_path() {
+            return Err(format!("Map path escaped map directory: {}", relative.display()));
+        }
+        return Ok(final_path);
+    }
     let states = root.join("history").join("states");
     let canonical_states = dunce::canonicalize(&states)
         .map_err(|error| format!("Cannot canonicalize {}: {error}", states.display()))?;
@@ -1276,11 +1417,13 @@ fn verify_source(project: &Hoi4Project, plan: &ProjectPatchPlan) -> Result<(), S
     for (source, fingerprint) in &plan.source_fingerprints {
         let canonical_source = dunce::canonicalize(source)
             .map_err(|error| format!("Cannot canonicalize {}: {error}", source.display()))?;
-        let canonical_states = dunce::canonicalize(root.join("history").join("states"))
-            .map_err(|error| format!("Cannot canonicalize states directory: {error}"))?;
-        if canonical_source.parent() != Some(canonical_states.as_path()) {
+        let relative = canonical_source
+            .strip_prefix(&root)
+            .map_err(|_| format!("Planned source is outside project root: {}", source.display()))?;
+        validate_plan_path(relative)?;
+        if !planned_paths.contains(&normalized_path(relative).to_ascii_lowercase()) {
             return Err(format!(
-                "Planned source is outside history/states: {}",
+                "Planned source is outside save plan: {}",
                 source.display()
             ));
         }
@@ -1463,13 +1606,9 @@ fn commit_operations(
                 ..
             } => {
                 ensure_absent(rollback_path)?;
-                fs::rename(final_path, rollback_path).map_err(|error| {
-                    rename_error("move destination to rollback", final_path, error)
+                atomic_replace_file(stage_path, final_path, Some(rollback_path)).map_err(|error| {
+                    rename_error("atomically replace destination", stage_path, error)
                 })?;
-                journal.operations[index].progress = FileOperationProgress::DestinationMoved;
-                write_journal(journal_path, journal)?;
-                fs::rename(stage_path, final_path)
-                    .map_err(|error| rename_error("install staged candidate", stage_path, error))?;
                 journal.operations[index].progress = FileOperationProgress::CandidateInstalled;
             }
             ResolvedOperation::Create {
@@ -1483,8 +1622,8 @@ fn commit_operations(
                         final_path.display()
                     ));
                 }
-                fs::rename(stage_path, final_path)
-                    .map_err(|error| rename_error("install created state", stage_path, error))?;
+                atomic_move_new_file(stage_path, final_path)
+                    .map_err(|error| rename_error("install created file", stage_path, error))?;
                 journal.operations[index].progress = FileOperationProgress::CandidateInstalled;
             }
             ResolvedOperation::Remove {
@@ -1542,12 +1681,16 @@ fn verify_operation_source(operation: &ResolvedOperation) -> Result<(), String> 
 fn validate_saved_project(
     root: &Path,
     source: &Hoi4Project,
-    edit: &StateEditSession,
+    edit: Option<&StateEditSession>,
     plan: &ProjectPatchPlan,
     operations: &[ResolvedOperation],
     map_snapshot: &[(PathBuf, Vec<u8>)],
 ) -> Result<Hoi4Project, String> {
-    verify_map_snapshot(map_snapshot)?;
+    for (path, expected) in map_snapshot {
+        if !operations.iter().any(|operation| operation.final_path() == path) {
+            verify_exact_file(path, expected)?;
+        }
+    }
     for operation in operations {
         match operation {
             ResolvedOperation::Modify {
@@ -1573,23 +1716,25 @@ fn validate_saved_project(
         }
     }
     let (candidate, land_provinces) = reload_project_for_save(root)?;
-    let (semantic, diagnostics) =
-        compare_project_for_save(source, edit, plan, &candidate, &land_provinces);
-    if !semantic.states_match
-        || !semantic.indexes_match
-        || !semantic.province_coverage_match
-        || !semantic.victory_points_match
-        || !semantic.buildings_match
-        || !semantic.created_states_match
-        || !semantic.removed_states_match
-        || !semantic.differences.is_empty()
-        || diagnostics.unexpected_diagnostics != 0
-    {
-        return Err(format!(
-            "Post-save reload mismatch: {} semantic difference(s), {} unexpected diagnostic(s)",
-            semantic.differences.len(),
-            diagnostics.unexpected_diagnostics,
-        ));
+    if let Some(edit) = edit {
+        let (semantic, diagnostics) =
+            compare_project_for_save(source, edit, plan, &candidate, &land_provinces);
+        if !semantic.states_match
+            || !semantic.indexes_match
+            || !semantic.province_coverage_match
+            || !semantic.victory_points_match
+            || !semantic.buildings_match
+            || !semantic.created_states_match
+            || !semantic.removed_states_match
+            || !semantic.differences.is_empty()
+            || diagnostics.unexpected_diagnostics != 0
+        {
+            return Err(format!(
+                "Post-save reload mismatch: {} semantic difference(s), {} unexpected diagnostic(s)",
+                semantic.differences.len(),
+                diagnostics.unexpected_diagnostics,
+            ));
+        }
     }
     Ok(candidate)
 }
@@ -2551,7 +2696,10 @@ fn contextual_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::map::{Bundle, ProvinceKind, write_rgb_bmp_image};
+    use crate::app::map::{
+        Bundle, ProvinceKind, build_province_map_candidate, validate_province_map_candidate,
+        write_rgb_bmp_image,
+    };
     use crate::app::project::{
         EditableProvinceData, EditableStateProperties, ProjectPaths, RoundTripCancellation,
         RoundTripValidationPolicy, RoundTripValidator, StateRemovalPolicy, plan_state_patches,
@@ -2588,6 +2736,178 @@ mod tests {
         assert!(fingerprint.matches(b"before"));
         assert!(!fingerprint.matches(b"after"));
         assert_ne!(fingerprint.content_hash, 0);
+    }
+
+    #[test]
+    fn combined_project_save_commits_map_and_state_under_one_transaction() {
+        let (root, project, mut edit) = test_project("combined-project-save");
+        change_manpower(&project, &mut edit, 2);
+        let mut bundle = Bundle::load(
+            &Location::Directory(project.paths.map_directory.clone()),
+            Config { preserve_ids: true, ..Config::default() },
+        )
+        .unwrap();
+        bundle.map.recolor_province([1, 2, 3], [4, 5, 6]);
+        let province = build_province_map_candidate(&bundle).unwrap();
+        let state_plan = plan_state_patches(&project, &edit);
+        let validation = RoundTripValidator {
+            policy: RoundTripValidationPolicy {
+                allow_review_required: true,
+                ..Default::default()
+            },
+        }
+        .validate_combined(
+            &project,
+            &edit,
+            &state_plan,
+            Some(&province.files),
+            |map| validate_province_map_candidate(&province, |path| {
+                fs::read(map.join(path)).map_err(|error| error.to_string())
+            }),
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        assert!(matches!(
+            validation.round_trip.status,
+            RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
+        ));
+        let allow_review = validation.round_trip.status == RoundTripStatus::PassedWithReview;
+        let plan = ProjectSavePlan::new(
+            &project,
+            edit.revision(),
+            Some(&province),
+            Some(&state_plan),
+        )
+        .unwrap();
+        let report = execute_project_save(
+            &project,
+            &edit,
+            &plan,
+            &validation,
+            allow_review,
+            &StateSaveCancellation::default(),
+            StateSaveFault::None,
+            |_, _, _| {},
+        );
+        assert_eq!(report.outcome, StateSaveOutcome::Completed, "{}", report.summary_text());
+        let manifest: BackupManifest = read_toml(
+            &report.backup_path.as_ref().unwrap().join("manifest.toml"),
+        )
+        .unwrap();
+        assert!(manifest.entries.iter().any(|entry| entry.relative_path == Path::new("map/provinces.bmp")));
+        assert!(manifest.entries.iter().any(|entry| entry.relative_path.starts_with("history/states")));
+        assert_eq!(fs::read(root.join("map/provinces.bmp")).unwrap(), province.files[Path::new("provinces.bmp")]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn combined_project_save_rolls_back_both_domains_after_commit_failure() {
+        let (root, project, mut edit) = test_project("combined-project-rollback");
+        let before = snapshot_original(&root);
+        change_manpower(&project, &mut edit, 3);
+        let mut bundle = Bundle::load(
+            &Location::Directory(project.paths.map_directory.clone()),
+            Config { preserve_ids: true, ..Config::default() },
+        )
+        .unwrap();
+        bundle.map.recolor_province([1, 2, 3], [4, 5, 6]);
+        let province = build_province_map_candidate(&bundle).unwrap();
+        let state_plan = plan_state_patches(&project, &edit);
+        let validation = RoundTripValidator {
+            policy: RoundTripValidationPolicy {
+                allow_review_required: true,
+                ..Default::default()
+            },
+        }
+        .validate_combined(
+            &project,
+            &edit,
+            &state_plan,
+            Some(&province.files),
+            |map| validate_province_map_candidate(&province, |path| {
+                fs::read(map.join(path)).map_err(|error| error.to_string())
+            }),
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        let allow_review = validation.round_trip.status == RoundTripStatus::PassedWithReview;
+        let plan = ProjectSavePlan::new(
+            &project,
+            edit.revision(),
+            Some(&province),
+            Some(&state_plan),
+        )
+        .unwrap();
+        let report = execute_project_save(
+            &project,
+            &edit,
+            &plan,
+            &validation,
+            allow_review,
+            &StateSaveCancellation::default(),
+            StateSaveFault::FailAfterCommit(1),
+            |_, _, _| {},
+        );
+        assert_eq!(report.outcome, StateSaveOutcome::RolledBack, "{}", report.summary_text());
+        assert_eq!(snapshot_original(&root), before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn combined_project_save_refuses_external_map_change_before_writing() {
+        let (root, project, mut edit) = test_project("combined-project-external-map");
+        change_manpower(&project, &mut edit, 4);
+        let mut bundle = Bundle::load(
+            &Location::Directory(project.paths.map_directory.clone()),
+            Config { preserve_ids: true, ..Config::default() },
+        )
+        .unwrap();
+        bundle.map.recolor_province([1, 2, 3], [4, 5, 6]);
+        let province = build_province_map_candidate(&bundle).unwrap();
+        let state_plan = plan_state_patches(&project, &edit);
+        let validation = RoundTripValidator {
+            policy: RoundTripValidationPolicy {
+                allow_review_required: true,
+                ..Default::default()
+            },
+        }
+        .validate_combined(
+            &project,
+            &edit,
+            &state_plan,
+            Some(&province.files),
+            |map| validate_province_map_candidate(&province, |path| {
+                fs::read(map.join(path)).map_err(|error| error.to_string())
+            }),
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        let allow_review = validation.round_trip.status == RoundTripStatus::PassedWithReview;
+        let plan = ProjectSavePlan::new(
+            &project,
+            edit.revision(),
+            Some(&province),
+            Some(&state_plan),
+        )
+        .unwrap();
+        let externally_changed = b"external map change";
+        fs::write(&project.paths.provinces_bmp, externally_changed).unwrap();
+
+        let report = execute_project_save(
+            &project,
+            &edit,
+            &plan,
+            &validation,
+            allow_review,
+            &StateSaveCancellation::default(),
+            StateSaveFault::None,
+            |_, _, _| {},
+        );
+
+        assert_eq!(report.outcome, StateSaveOutcome::FailedBeforeCommit);
+        assert_eq!(fs::read(&project.paths.provinces_bmp).unwrap(), externally_changed);
+        assert!(!root.join(INTERNAL_DIRECTORY).exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

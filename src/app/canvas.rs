@@ -30,18 +30,22 @@ use super::inspector_controls::{
 use super::interface::{Interface, StateActionAvailability};
 use super::map::*;
 use super::project::{
-    BrushProvinceClassification, BuildingScope, DiagnosticSeverity, EditableProvinceData,
-    EditableStateProperties, GameDefinitionCatalog, Hoi4Project, LassoSelectionMode, MapViewMode,
-    ProjectPatchPlan, ProvinceDataDraft, ProvinceDataValidationError, ProvinceInclusionMode,
-    RecoveryInfo, RoundTripCancellation, RoundTripStage, RoundTripStatus,
+    BrushProvinceClassification, BuildingScope, CombinedRoundTripValidationReport,
+    DiagnosticSeverity, EditableProvinceData, EditableStateProperties, GameDefinitionCatalog,
+    Hoi4Project, LassoSelectionMode, MapViewMode, ProjectPatchPlan, ProjectSavePlan,
+    ProjectValidationReport, ProjectValidationTarget, ProvinceDataDraft,
+    ProvinceDataValidationError,
+    ProvinceInclusionMode, RecoveryInfo,
+    RoundTripCancellation, RoundTripStage, RoundTripStatus,
     RoundTripValidationPolicy, RoundTripValidationReport, RoundTripValidator, SaveTransactionState,
     StateBrushMode, StateEditSession, StateLassoPhase, StatePropertyDraft, StateRemovalPolicy,
     StateSaveCancellation, StateSaveConditions, StateSaveFault, StateSaveOutcome, StateSaveReport,
     StateSelection, WorkingStateOrigin, boundaries_for_state, classify_state_lasso,
-    detect_state_save_recovery, execute_state_save, generate_state_view, generate_state_view_for,
-    generate_state_view_region_for, plan_state_fill, plan_state_patches, ProvinceAdjacency,
+    detect_state_save_recovery, execute_project_save, execute_state_save, generate_state_view,
+    generate_state_view_for, generate_state_view_region_for, plan_state_fill, plan_state_patches,
+    ProvinceAdjacency,
     format_integer_pt_br, parse_grouped_nonnegative_integer,
-    recover_interrupted_state_save, sample_segment, save_confirmation_text,
+    recover_interrupted_state_save, sample_segment, save_confirmation_text, validate_project,
     select_state_at_for as resolve_state_at_for, selection_overlay_for, state_save_eligibility,
     StateFillMode, StateFillPreview, StateFillProvince, StateFillProvinceKind,
 };
@@ -133,6 +137,9 @@ pub struct Canvas {
     state_save_task: Option<StateSaveTask>,
     state_save_status: Option<String>,
     state_save_recovery: Option<RecoveryInfo>,
+    project_save_plan: Option<ProjectSavePlan>,
+    project_save_validation: Option<CombinedRoundTripValidationReport>,
+    project_validation_report: Option<ProjectValidationReport>,
     province_save_report: Option<ProvinceSaveReport>,
     province_save_task: Option<ProvinceSaveTask>,
     province_save_status: Option<String>,
@@ -211,6 +218,7 @@ struct StateSaveTask {
     receiver: Receiver<StateSaveTaskMessage>,
     cancellation: StateSaveCancellation,
     state: SaveTransactionState,
+    includes_province_map: bool,
 }
 
 enum ProvinceSaveTaskMessage {
@@ -231,12 +239,14 @@ enum StateApplyDialog {
     Blocked,
     Progress,
     Result,
+    ValidationResults,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateApplyDialogAction {
     None,
     ConfirmSave,
+    OpenSource(PathBuf),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -495,6 +505,9 @@ impl Canvas {
                 .as_ref()
                 .map(|recovery| recovery.message.clone()),
             state_save_recovery,
+            project_save_plan: None,
+            project_save_validation: None,
+            project_validation_report: None,
             province_save_report: None,
             province_save_task: None,
             province_save_status: None,
@@ -612,6 +625,14 @@ impl Canvas {
         self.state_edit_session
             .as_ref()
             .is_some_and(StateEditSession::is_dirty)
+    }
+
+    pub fn has_unsaved_province_edits(&self) -> bool {
+        self.history.is_dirty(&self.bundle.map)
+    }
+
+    fn sync_province_dirty(&mut self) {
+        self.modified = self.has_unsaved_province_edits();
     }
 
     pub fn property_editor_is_open(&self) -> bool {
@@ -2925,6 +2946,59 @@ impl Canvas {
                         String::new(),
                         status,
                     ],
+                )
+            }
+            StateApplyDialog::ValidationResults => {
+                let report = self.project_validation_report.as_ref();
+                let mut lines = vec![
+                    match report.map(|report| report.target) {
+                        Some(ProjectValidationTarget::PendingChanges) => {
+                            "Target: pending project changes".to_owned()
+                        }
+                        _ => "Target: current loaded project".to_owned(),
+                    },
+                    format!(
+                        "Errors {} | Warnings {} | Information {}",
+                        report.map_or(0, |report| report.errors),
+                        report.map_or(0, |report| report.warnings),
+                        report.map_or(0, |report| report.information),
+                    ),
+                    "Filter: All | Domain: All".to_owned(),
+                    String::new(),
+                ];
+                lines.extend(
+                    report
+                        .into_iter()
+                        .flat_map(|report| report.diagnostics.iter().take(6))
+                        .map(|diagnostic| {
+                            format!(
+                                "[{:?}] {} — {}",
+                                diagnostic.severity, diagnostic.code, diagnostic.message
+                            )
+                        }),
+                );
+                let navigation = report
+                    .and_then(|report| report.diagnostics.iter().find(|diagnostic| {
+                        diagnostic.province_id.is_some() || diagnostic.state_id.is_some()
+                    }));
+                (
+                    "PROJECT VALIDATION",
+                    if navigation.and_then(|diagnostic| diagnostic.province_id).is_some() {
+                        "Go to Province"
+                    } else if navigation.and_then(|diagnostic| diagnostic.state_id).is_some() {
+                        "Go to State"
+                    } else {
+                        "Validate Again"
+                    },
+                    if report.is_some_and(|report| {
+                        report.diagnostics.iter().any(|diagnostic| diagnostic.path.is_some())
+                    }) {
+                        "Open Source"
+                    } else {
+                        "View Report"
+                    },
+                    "Close",
+                    lines,
                 )
             }
             StateApplyDialog::Result => {
@@ -5334,6 +5408,7 @@ impl Canvas {
                 self.view_mode = commit.view_mode;
             };
             self.refresh();
+            self.sync_province_dirty();
         };
     }
 
@@ -5365,6 +5440,7 @@ impl Canvas {
                 self.view_mode = commit.view_mode;
             };
             self.refresh();
+            self.sync_province_dirty();
         };
     }
 
@@ -5374,6 +5450,7 @@ impl Canvas {
         };
 
         self.history.calculate_coastal_provinces(&mut self.bundle);
+        self.sync_province_dirty();
         self.view_mode = ViewMode::Coastal;
         self.map_layers.base_view = MapBaseView::Coastal;
         self.refresh();
@@ -5385,6 +5462,7 @@ impl Canvas {
         };
 
         self.history.calculate_recolor_map(&mut self.bundle);
+        self.sync_province_dirty();
         self.view_mode = ViewMode::Color;
         self.map_layers.base_view = MapBaseView::ProvinceColors;
         self.tool.color_brush = None;
@@ -5800,12 +5878,63 @@ impl Canvas {
                         alerts.push(Err("The current save stage cannot be cancelled safely"));
                     }
                 }
+                StateApplyDialog::ValidationResults => {
+                    let navigation = self
+                        .project_validation_report
+                        .as_ref()
+                        .and_then(|report| {
+                            report.diagnostics.iter().find_map(|diagnostic| {
+                                diagnostic
+                                    .province_id
+                                    .map(|province_id| (Some(province_id), None))
+                                    .or_else(|| {
+                                        diagnostic
+                                            .state_id
+                                            .map(|state_id| (None, Some(state_id)))
+                                    })
+                            })
+                        });
+                    if let Some((Some(province_id), _)) = navigation {
+                        self.state_apply_dialog = None;
+                        self.select_province_by_id(interface, province_id, alerts);
+                    } else if let Some((_, Some(state_id))) = navigation {
+                        self.state_apply_dialog = None;
+                        self.select_state_by_id(interface, state_id, alerts);
+                    } else {
+                        self.validate_project_for_ui(alerts);
+                    }
+                }
                 StateApplyDialog::Result => self.state_apply_dialog = None,
             }
         } else if point_in_rect(pos, layout.secondary()) {
             match dialog {
                 StateApplyDialog::AdditionalValidation => {
                     self.state_apply_dialog = Some(StateApplyDialog::Review);
+                }
+                StateApplyDialog::ValidationResults => {
+                    let source = self
+                        .project_validation_report
+                        .as_ref()
+                        .and_then(|report| {
+                            report
+                                .diagnostics
+                                .iter()
+                                .find_map(|diagnostic| diagnostic.path.clone())
+                        })
+                        .map(|path| {
+                            if path.is_absolute() {
+                                path
+                            } else {
+                                self.project
+                                    .as_ref()
+                                    .map_or(path.clone(), |project| project.paths.root.join(path))
+                            }
+                        });
+                    if let Some(path) = source {
+                        return StateApplyDialogAction::OpenSource(path);
+                    }
+                    self.print_project_validation_report();
+                    alerts.push(Ok("Printed the project validation report to the console"));
                 }
                 _ if self.state_save_report.is_some() => self.view_state_save_report(alerts),
                 _ if self.round_trip_report.is_some() => self.view_round_trip_report(alerts),
@@ -5817,6 +5946,19 @@ impl Canvas {
             self.state_apply_dialog = None;
         }
         StateApplyDialogAction::None
+    }
+
+    fn print_project_validation_report(&self) {
+        let Some(report) = self.project_validation_report.as_ref() else {
+            return;
+        };
+        println!(
+            "PROJECT VALIDATION: {} error(s), {} warning(s), {} information message(s)",
+            report.errors, report.warnings, report.information
+        );
+        for diagnostic in &report.diagnostics {
+            println!("[{}] {}", diagnostic.code, diagnostic.message);
+        }
     }
 
     fn print_patch_preview_details(&self) {
@@ -6098,6 +6240,7 @@ impl Canvas {
                     receiver,
                     cancellation,
                     state: SaveTransactionState::Preparing,
+                    includes_province_map: false,
                 });
                 self.state_save_status = Some("Apply State Changes: Preparing...".to_owned());
                 self.state_apply_dialog = Some(StateApplyDialog::Progress);
@@ -6109,6 +6252,187 @@ impl Canvas {
             Err(error) => alerts.push(Err(format!(
                 "Failed to start Apply State Changes worker: {error}"
             ))),
+        }
+    }
+
+    pub fn prepare_project_save(&mut self) -> Result<String, String> {
+        if self.save_blocks_editing() {
+            return Err("Finish or recover the active save before starting Save Project.".to_owned());
+        }
+        if self.property_editor_is_open()
+            || self.state_lasso_is_active()
+            || self.state_brush_is_active()
+            || self.state_fill_is_active()
+        {
+            return Err("Apply or cancel the active draft/tool before Save Project.".to_owned());
+        }
+        let project = self.project.as_ref().ok_or_else(|| {
+            "Save Project requires a loaded HOI4 mod project.".to_owned()
+        })?;
+        let edit = self.state_edit_session.as_ref().ok_or_else(|| {
+            "The project state edit session is unavailable.".to_owned()
+        })?;
+        let state_plan = plan_state_patches(project, edit);
+        let province_candidate = self
+            .has_unsaved_province_edits()
+            .then(|| build_province_map_candidate(&self.bundle))
+            .transpose()?;
+        if state_plan.files_len() == 0 && province_candidate.is_none() {
+            self.project_save_plan = None;
+            self.project_save_validation = None;
+            return Err("No changes to save.".to_owned());
+        }
+        if let Some(candidate) = province_candidate.as_ref() {
+            validate_province_map_candidate(candidate, |path| {
+                candidate
+                    .files
+                    .get(path)
+                    .cloned()
+                    .ok_or_else(|| format!("Missing candidate file: {}", path.display()))
+            })?;
+        }
+        let validator = RoundTripValidator {
+            policy: RoundTripValidationPolicy {
+                allow_review_required: true,
+                ..RoundTripValidationPolicy::default()
+            },
+        };
+        let cancellation = RoundTripCancellation::default();
+        let map_files = province_candidate.as_ref().map(|candidate| &candidate.files);
+        let combined = validator.validate_combined(
+            project,
+            edit,
+            &state_plan,
+            map_files,
+            |map_directory| {
+                let Some(candidate) = province_candidate.as_ref() else {
+                    return Ok(());
+                };
+                validate_province_map_candidate(candidate, |path| {
+                    std::fs::read(map_directory.join(path)).map_err(|error| {
+                        format!("Cannot read combined candidate {}: {error}", path.display())
+                    })
+                })
+            },
+            &cancellation,
+            |_| {},
+        );
+        if !matches!(
+            combined.round_trip.status,
+            RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
+        ) {
+            return Err(combined.round_trip.summary_text());
+        }
+        let plan = ProjectSavePlan::new(
+            project,
+            edit.revision(),
+            province_candidate.as_ref(),
+            Some(&state_plan),
+        )?;
+        if combined.candidate_digest != *plan.candidate_digest() {
+            return Err("The validated candidate no longer matches the Save Project plan.".to_owned());
+        }
+        let validation = combined.project_validation.as_ref();
+        let text = format!(
+            "SAVE PROJECT\n\nProvince Map: {} file(s)\nStates: {} file(s)\n\nValidation: {} error(s), {} warning(s), {} information message(s)\nFiles affected: {}\n\nA combined verified backup and journal will be created. Each file replacement is atomic; the coordinated project save is rollback-capable.",
+            plan.dirty().province_files,
+            plan.dirty().state_files,
+            validation.map_or(0, |report| report.errors),
+            validation.map_or(0, |report| report.warnings),
+            validation.map_or(0, |report| report.information),
+            plan.patch_plan().files_len(),
+        );
+        self.project_save_plan = Some(plan);
+        self.project_validation_report = combined.project_validation.clone();
+        self.project_save_validation = Some(combined);
+        Ok(text)
+    }
+
+    pub fn validate_project_for_ui(&mut self, alerts: &mut Alerts) {
+        if self.has_unsaved_province_edits() || self.has_unsaved_state_edits() {
+            match self.prepare_project_save() {
+                Ok(review) => {
+                    println!("{review}");
+                    self.state_apply_dialog = Some(StateApplyDialog::ValidationResults);
+                }
+                Err(error) => alerts.push(Err(error)),
+            }
+            return;
+        }
+        let Some(project) = self.project.as_ref() else {
+            alerts.push(Err("Validate Project requires a loaded HOI4 mod project."));
+            return;
+        };
+        let report = validate_project(&self.bundle, project, ProjectValidationTarget::CurrentProject);
+        let summary = format!(
+            "Validation Results: {} error(s), {} warning(s), {} information message(s)",
+            report.errors, report.warnings, report.information
+        );
+        if report.blocks_save {
+            alerts.push(Err(summary.clone()));
+        } else {
+            alerts.push(Ok(summary.clone()));
+        }
+        self.project_validation_report = Some(report);
+        self.state_apply_dialog = Some(StateApplyDialog::ValidationResults);
+    }
+
+    pub fn start_project_save(&mut self, allow_review_required: bool, alerts: &mut Alerts) {
+        let Some(project) = self.project.as_ref().cloned() else {
+            alerts.push(Err("Save Project requires a loaded HOI4 mod project."));
+            return;
+        };
+        let Some(edit) = self.state_edit_session.as_ref().cloned() else {
+            alerts.push(Err("The project state edit session is unavailable."));
+            return;
+        };
+        let Some(plan) = self.project_save_plan.as_ref().cloned() else {
+            alerts.push(Err("Review Project Changes before saving."));
+            return;
+        };
+        let Some(validation) = self.project_save_validation.as_ref().cloned() else {
+            alerts.push(Err("Validate Project before saving."));
+            return;
+        };
+        if edit.revision() != plan.patch_plan().generation {
+            alerts.push(Err("The project changed in memory after validation. Validate again."));
+            return;
+        }
+        let includes_province_map = plan.dirty().province_files != 0;
+        let (sender, receiver) = mpsc::channel();
+        let cancellation = StateSaveCancellation::default();
+        let worker_cancellation = cancellation.clone();
+        let spawn = thread::Builder::new()
+            .name("hoi4-project-save".to_owned())
+            .spawn(move || {
+                let report = execute_project_save(
+                    &project,
+                    &edit,
+                    &plan,
+                    &validation,
+                    allow_review_required,
+                    &worker_cancellation,
+                    StateSaveFault::None,
+                    |state, current, total| {
+                        let _ = sender.send(StateSaveTaskMessage::Stage(state, current, total));
+                    },
+                );
+                let _ = sender.send(StateSaveTaskMessage::Finished(Box::new(report)));
+            });
+        match spawn {
+            Ok(_) => {
+                self.state_save_task = Some(StateSaveTask {
+                    receiver,
+                    cancellation,
+                    state: SaveTransactionState::Preparing,
+                    includes_province_map,
+                });
+                self.state_save_status = Some("Save Project: Preparing...".to_owned());
+                self.state_apply_dialog = Some(StateApplyDialog::Progress);
+                self.refresh_state_information();
+                alerts.push(Ok("Save Project started; editing is locked until verification finishes"));
+            }
+            Err(error) => alerts.push(Err(format!("Failed to start Save Project: {error}"))),
         }
     }
 
@@ -6177,6 +6501,7 @@ impl Canvas {
                     receiver,
                     cancellation: StateSaveCancellation::default(),
                     state: SaveTransactionState::RollingBack,
+                    includes_province_map: false,
                 });
                 self.state_save_status =
                     Some("Apply State Changes recovery: Rolling back...".to_owned());
@@ -6227,6 +6552,7 @@ impl Canvas {
         }
         if mode.clears_dirty() && self.bundle.config.generate_coastal_on_save {
             self.history.calculate_coastal_provinces(&mut self.bundle);
+            self.sync_province_dirty();
         }
 
         let bundle = self.bundle.clone();
@@ -6411,23 +6737,37 @@ impl Canvas {
             }
         }
         if let Some((state, current, total)) = stages.last().copied() {
+            let action = if self
+                .state_save_task
+                .as_ref()
+                .is_some_and(|task| task.includes_province_map)
+            {
+                "Save Project"
+            } else {
+                "Apply State Changes"
+            };
             if let Some(task) = self.state_save_task.as_mut() {
                 task.state = state;
             }
             self.state_save_status = Some(if total == 0 {
-                format!("Apply State Changes: {}...", state.label())
+                format!("{action}: {}...", state.label())
             } else {
-                format!(
-                    "Apply State Changes: {} {current}/{total}...",
-                    state.label()
-                )
+                format!("{action}: {} {current}/{total}...", state.label())
             });
         }
         if let Some(mut report) = finished {
+            let includes_province_map = self
+                .state_save_task
+                .as_ref()
+                .is_some_and(|task| task.includes_province_map);
             println!("{}", report.summary_text());
             if report.outcome == StateSaveOutcome::Completed {
                 if let Some(reloaded) = report.reloaded_project.take() {
                     self.promote_saved_project(reloaded);
+                }
+                if includes_province_map {
+                    self.history.promote_baseline(&self.bundle.map);
+                    self.sync_province_dirty();
                 }
                 self.state_save_recovery = None;
             } else if report.outcome == StateSaveOutcome::RolledBack {
@@ -6450,13 +6790,23 @@ impl Canvas {
             self.state_save_status = Some(report.summary_text());
             self.state_save_report = Some(report);
             self.state_save_task = None;
+            self.project_save_plan = None;
+            self.project_save_validation = None;
             self.state_apply_dialog = Some(StateApplyDialog::Result);
             self.refresh_state_information();
         } else if disconnected {
-            self.state_save_status = Some(
-                "Apply State Changes worker ended without a report; recovery may be required."
-                    .to_owned(),
-            );
+            let action = if self
+                .state_save_task
+                .as_ref()
+                .is_some_and(|task| task.includes_province_map)
+            {
+                "Save Project"
+            } else {
+                "Apply State Changes"
+            };
+            self.state_save_status = Some(format!(
+                "{action} worker ended without a report; recovery may be required."
+            ));
             self.state_save_task = None;
             self.state_save_recovery = self
                 .project
@@ -6519,7 +6869,8 @@ impl Canvas {
                     let states_pending =
                         report.mode.clears_dirty() && self.has_unsaved_state_edits();
                     if report.mode.clears_dirty() {
-                        self.modified = false;
+                        self.history.promote_baseline(&self.bundle.map);
+                        self.sync_province_dirty();
                     }
                     let mut summary = report.summary_text();
                     if states_pending {
@@ -8168,7 +8519,7 @@ impl Canvas {
             .as_ref()
             .map(|edit| edit.summary().modified_states)
             .unwrap_or_default();
-        workspace_dirty_status(self.modified, states)
+        workspace_dirty_status(self.has_unsaved_province_edits(), states)
     }
 
     fn patch_preview_status_text(&self) -> Option<String> {
@@ -8404,7 +8755,7 @@ impl Canvas {
                     self.tool.brush_mask,
                 ) {
                     self.problems.clear();
-                    self.modified = true;
+                    self.sync_province_dirty();
                     self.refresh_selective(extents);
                 };
             };
@@ -8424,7 +8775,7 @@ impl Canvas {
                     self.tool.id,
                 ) {
                     self.problems.clear();
-                    self.modified = true;
+                    self.sync_province_dirty();
                     self.refresh_selective(extents);
                 };
             } else if let (Some(kind), ViewMode::Kind) = (self.tool.kind_brush, self.view_mode) {
@@ -8432,7 +8783,7 @@ impl Canvas {
                     .history
                     .paint_province_kind(&mut self.bundle, pos, kind)
                 {
-                    self.modified = true;
+                    self.sync_province_dirty();
                     self.refresh_selective(extents);
                 };
             } else if let (Some(terrain), ViewMode::Terrain) =
@@ -8442,7 +8793,7 @@ impl Canvas {
                     self.history
                         .paint_province_terrain(&mut self.bundle, pos, terrain.clone())
                 {
-                    self.modified = true;
+                    self.sync_province_dirty();
                     self.refresh_selective(extents);
                 };
             } else if let (Some(continent), ViewMode::Continent) =
@@ -8452,7 +8803,7 @@ impl Canvas {
                     self.history
                         .paint_province_continent(&mut self.bundle, pos, continent)
                 {
-                    self.modified = true;
+                    self.sync_province_dirty();
                     self.refresh_selective(extents);
                 };
             };
@@ -8485,7 +8836,7 @@ impl Canvas {
 
                 if let Some(extents) = result {
                     self.problems.clear();
-                    self.modified = true;
+                    self.sync_province_dirty();
                     self.refresh_selective(extents);
                 };
             };
@@ -8497,11 +8848,13 @@ impl Canvas {
             let which = self.bundle.map.get_color_at(pos);
             if let Some(kind) = self.tool.adjacency_brush {
                 if let Some(color) = self.tool.adjacency_selection.take() {
-                    self.history.add_or_remove_connection(
+                    if self.history.add_or_remove_connection(
                         &mut self.bundle,
                         UOrd::new([which, color]),
                         kind,
-                    );
+                    ) {
+                        self.sync_province_dirty();
+                    }
                 } else {
                     self.tool.adjacency_selection = Some(which);
                 };

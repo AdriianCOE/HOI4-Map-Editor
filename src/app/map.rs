@@ -27,6 +27,9 @@ pub use self::province_save::{
   ProvinceSaveCancellation, ProvinceSaveMode, ProvinceSaveProgress, ProvinceSaveReport,
   ProvinceSaveStage, execute_province_save,
 };
+pub(crate) use self::province_save::{
+  ProvinceMapCandidate, build_province_map_candidate, validate_province_map_candidate,
+};
 
 use std::convert::TryFrom;
 use std::collections::BTreeMap;
@@ -167,7 +170,7 @@ impl Bundle {
 
 
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MapBase {
   color_buffer: Arc<RgbImage>,
   province_data_map: Arc<AHashMap<Color, Arc<ProvinceData>>>,
