@@ -37,14 +37,23 @@ foreach ($target in @($stage, $zipPath, $checksumPath, $releaseManifestPath)) {
 if (-not $SkipBuild) {
     $previousTarget = $env:CARGO_TARGET_DIR
     $previousDebug = $env:CARGO_PROFILE_RELEASE_DEBUG
+    $previousRustFlags = $env:RUSTFLAGS
+    $previousEncodedRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
     try {
         $env:CARGO_TARGET_DIR = $packageTarget
         $env:CARGO_PROFILE_RELEASE_DEBUG = "0"
+        $env:RUSTFLAGS = $null
+        $env:CARGO_ENCODED_RUSTFLAGS = @(
+            "--remap-path-prefix=$repoRoot=."
+            "--remap-path-prefix=$env:USERPROFILE=<USERPROFILE>"
+        ) -join [char]0x1f
         cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --release
         if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed." }
     } finally {
         $env:CARGO_TARGET_DIR = $previousTarget
         $env:CARGO_PROFILE_RELEASE_DEBUG = $previousDebug
+        $env:RUSTFLAGS = $previousRustFlags
+        $env:CARGO_ENCODED_RUSTFLAGS = $previousEncodedRustFlags
     }
 }
 
