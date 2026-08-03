@@ -21,6 +21,7 @@ pub struct StateEditSession {
     origins_by_state: BTreeMap<u32, WorkingStateOrigin>,
     removed_state_ids: BTreeSet<u32>,
     province_kinds: BTreeMap<u32, ProvinceKind>,
+    removed_provinces: BTreeSet<u32>,
     ambiguous_provinces: BTreeSet<u32>,
     selected_provinces: BTreeSet<u32>,
     target_state_id: Option<u32>,
@@ -64,6 +65,13 @@ pub enum StateRemovalPolicy {
     Unassign,
 }
 
+/// How a province's state-owned data is handled before its map definition is removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvinceRemovalPolicy {
+    TransferToProvince(u32),
+    RemoveReferences,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum StateEditCommand {
     ReassignProvinces {
@@ -86,6 +94,12 @@ enum StateEditCommand {
         state: Box<WorkingStateSnapshot>,
         policy: StateRemovalPolicy,
         deltas: Vec<ProvinceEditDelta>,
+    },
+    RemoveProvince {
+        province_id: u32,
+        state_id: Option<u32>,
+        policy: ProvinceRemovalPolicy,
+        data: EditableProvinceData,
     },
 }
 
@@ -167,6 +181,7 @@ pub enum StateEditError {
     StateIdReserved(u32),
     StateAlreadyRemoved(u32),
     StateRemovalTargetMatches(u32),
+    ProvinceRemovalTargetMatches(u32),
     TargetStateNotFound(u32),
     TargetStateInvalid(u32),
     ProvincialDataConflict {
@@ -241,6 +256,7 @@ impl StateEditSession {
             origins_by_state,
             removed_state_ids: BTreeSet::new(),
             province_kinds,
+            removed_provinces: BTreeSet::new(),
             ambiguous_provinces: project.ambiguous_provinces.keys().copied().collect(),
             selected_provinces: BTreeSet::new(),
             target_state_id: None,
@@ -658,6 +674,43 @@ impl StateEditSession {
         Ok(())
     }
 
+    /// Removes every State-owned reference to a province as one undoable command.
+    /// The caller must remove the matching map pixels in the same user operation.
+    pub fn remove_province_references(
+        &mut self,
+        province_id: u32,
+        policy: ProvinceRemovalPolicy,
+    ) -> Result<(), StateEditError> {
+        self.last_changed_provinces.clear();
+        self.validate_selectable_province(province_id)?;
+        let state_id = self.province_state_id(province_id);
+        let data = self.working.province_data(state_id, province_id);
+        if let ProvinceRemovalPolicy::TransferToProvince(target_id) = policy {
+            if target_id == province_id {
+                return Err(StateEditError::ProvinceRemovalTargetMatches(province_id));
+            }
+            self.validate_selectable_province(target_id)?;
+            let target_state_id = self
+                .province_state_id(target_id)
+                .ok_or(StateEditError::ProvinceUnassigned(target_id))?;
+            let target_data = self.working.province_data(Some(target_state_id), target_id);
+            if (data.victory_point.is_some() && target_data.victory_point.is_some())
+                || (!data.buildings.is_empty() && !target_data.buildings.is_empty())
+            {
+                return Err(StateEditError::ProvincialDataConflict {
+                    province_id: target_id,
+                    target_state_id,
+                });
+            }
+        }
+        self.apply_new_command(StateEditCommand::RemoveProvince {
+            province_id,
+            state_id,
+            policy,
+            data,
+        })
+    }
+
     pub fn update_state_properties(
         &mut self,
         state_id: u32,
@@ -922,6 +975,7 @@ impl StateEditSession {
             })
             .collect();
         self.working = self.baseline.clone();
+        self.removed_provinces.clear();
         self.origins_by_state
             .retain(|_, origin| matches!(origin, WorkingStateOrigin::Loaded { .. }));
         self.valid_state_ids = self.origins_by_state.keys().copied().collect();
@@ -1218,7 +1272,61 @@ impl StateEditSession {
                         .insert(state.state_id, state.province_buildings.clone());
                 }
             },
+            StateEditCommand::RemoveProvince {
+                province_id,
+                state_id,
+                policy,
+                data,
+            } => match direction {
+                Direction::Forward => {
+                    self.working.move_province(*province_id, *state_id, None);
+                    StateWorkingSet::remove_victory_points(
+                        &mut self.working.victory_points_by_state,
+                        &mut self.working.detached_victory_points,
+                        *state_id,
+                        *province_id,
+                    );
+                    StateWorkingSet::remove_province_buildings(
+                        &mut self.working.province_buildings_by_state,
+                        &mut self.working.detached_province_buildings,
+                        *state_id,
+                        *province_id,
+                    );
+                    if let ProvinceRemovalPolicy::TransferToProvince(target_id) = policy {
+                        let target_state_id = self
+                            .working
+                            .state_by_province
+                            .get(target_id)
+                            .copied()
+                            .expect("validated province-removal target");
+                        self.working.set_province_data(target_state_id, *target_id, data);
+                    }
+                    self.removed_provinces.insert(*province_id);
+                }
+                Direction::Backward => {
+                    if let ProvinceRemovalPolicy::TransferToProvince(target_id) = policy {
+                        let target_state_id = self
+                            .working
+                            .state_by_province
+                            .get(target_id)
+                            .copied()
+                            .expect("validated province-removal target");
+                        self.working.set_province_data(
+                            target_state_id,
+                            *target_id,
+                            &EditableProvinceData::default(),
+                        );
+                    }
+                    self.working.move_province(*province_id, None, *state_id);
+                    if let Some(state_id) = state_id {
+                        self.working.set_province_data(*state_id, *province_id, data);
+                    }
+                    self.removed_provinces.remove(province_id);
+                }
+            },
         }
+        self.working
+            .recompute_unassigned_land(&self.province_kinds, &self.removed_provinces);
     }
 
     fn apply_province_deltas(&mut self, deltas: &[ProvinceEditDelta], direction: Direction) {
@@ -1231,7 +1339,8 @@ impl StateEditSession {
             self.working.move_victory_points(delta, from, to);
             self.working.move_province_buildings(delta, from, to);
         }
-        self.working.recompute_unassigned_land(&self.province_kinds);
+        self.working
+            .recompute_unassigned_land(&self.province_kinds, &self.removed_provinces);
     }
 
     fn restore_state(&mut self, state: &WorkingStateSnapshot) {
@@ -1441,6 +1550,24 @@ impl StateEditSession {
                     message,
                 ));
             }
+            StateEditCommand::RemoveProvince {
+                province_id,
+                policy,
+                ..
+            } => self.session_diagnostics.push(ProjectDiagnostic::new(
+                ProjectDiagnosticKind::StateEditSession,
+                DiagnosticSeverity::Info,
+                None,
+                None,
+                match policy {
+                    ProvinceRemovalPolicy::TransferToProvince(target_id) => format!(
+                        "Province {province_id} references were transferred to Province {target_id}."
+                    ),
+                    ProvinceRemovalPolicy::RemoveReferences => {
+                        format!("Province {province_id} references were removed.")
+                    }
+                },
+            )),
         }
     }
 
@@ -1472,7 +1599,7 @@ impl StateEditCommand {
             Self::ReassignProvinces { deltas } => deltas.is_empty(),
             Self::UpdateStateProperties { change } => change.before == change.after,
             Self::UpdateProvinceData { before, after, .. } => before == after,
-            Self::CreateState { .. } | Self::RemoveState { .. } => false,
+            Self::CreateState { .. } | Self::RemoveState { .. } | Self::RemoveProvince { .. } => false,
         }
     }
 
@@ -1486,6 +1613,12 @@ impl StateEditCommand {
             Self::CreateState { deltas, .. } | Self::RemoveState { deltas, .. } => {
                 deltas.iter().map(|delta| delta.province_id).collect()
             }
+            Self::RemoveProvince {
+                province_id, policy, ..
+            } => match policy {
+                ProvinceRemovalPolicy::TransferToProvince(target_id) => vec![*province_id, *target_id],
+                ProvinceRemovalPolicy::RemoveReferences => vec![*province_id],
+            },
         }
     }
 
@@ -1514,6 +1647,16 @@ impl StateEditCommand {
                     deltas.len()
                 )
             }
+            Self::RemoveProvince {
+                province_id, policy, ..
+            } => match policy {
+                ProvinceRemovalPolicy::TransferToProvince(target_id) => format!(
+                    "Removed Province {province_id} and transferred references to Province {target_id}"
+                ),
+                ProvinceRemovalPolicy::RemoveReferences => {
+                    format!("Removed Province {province_id} references")
+                }
+            },
         }
     }
 }
@@ -1560,7 +1703,7 @@ impl StateWorkingSet {
             unassigned_land_provinces: BTreeSet::new(),
             dated_history_states,
         };
-        out.recompute_unassigned_land(province_kinds);
+        out.recompute_unassigned_land(province_kinds, &BTreeSet::new());
         out
     }
 
@@ -1590,11 +1733,17 @@ impl StateWorkingSet {
         data
     }
 
-    fn recompute_unassigned_land(&mut self, province_kinds: &BTreeMap<u32, ProvinceKind>) {
+    fn recompute_unassigned_land(
+        &mut self,
+        province_kinds: &BTreeMap<u32, ProvinceKind>,
+        removed_provinces: &BTreeSet<u32>,
+    ) {
         self.unassigned_land_provinces = province_kinds
             .iter()
             .filter_map(|(&province_id, &kind)| {
-                (kind == ProvinceKind::Land && !self.state_by_province.contains_key(&province_id))
+                (kind == ProvinceKind::Land
+                    && !removed_provinces.contains(&province_id)
+                    && !self.state_by_province.contains_key(&province_id))
                     .then_some(province_id)
             })
             .collect();
@@ -1820,6 +1969,9 @@ impl fmt::Display for StateEditError {
             StateEditError::StateRemovalTargetMatches(id) => {
                 write!(f, "State {id} cannot be its own removal target")
             }
+            StateEditError::ProvinceRemovalTargetMatches(id) => {
+                write!(f, "Province {id} cannot be its own removal target")
+            }
             StateEditError::TargetStateNotFound(id) => write!(f, "State {id} is not indexed"),
             StateEditError::TargetStateInvalid(id) => {
                 write!(f, "State {id} is not a valid edit target")
@@ -1972,6 +2124,7 @@ mod tests {
             ]),
             removed_state_ids: BTreeSet::new(),
             province_kinds,
+            removed_provinces: BTreeSet::new(),
             ambiguous_provinces: BTreeSet::new(),
             selected_provinces: BTreeSet::new(),
             target_state_id: None,
@@ -2915,6 +3068,78 @@ mod tests {
             edit.working.province_buildings_by_state[&1][&11]["bunker"],
             2
         );
+    }
+
+    #[test]
+    fn province_removal_transfers_references_as_one_reversible_command() {
+        let mut edit = session();
+        edit.working
+            .province_buildings_by_state
+            .get_mut(&1)
+            .unwrap()
+            .insert(10, BTreeMap::from([("bunker".into(), 2)]));
+
+        edit.remove_province_references(10, ProvinceRemovalPolicy::TransferToProvince(30))
+            .unwrap();
+
+        assert_eq!(edit.summary().commands, 1);
+        assert!(!edit.state_by_province().contains_key(&10));
+        assert!(!edit.working.unassigned_land_provinces.contains(&10));
+        assert_eq!(edit.working.victory_points_by_state[&2][0].province_id, 30);
+        assert_eq!(edit.working.province_buildings_by_state[&2][&30]["bunker"], 2);
+
+        assert!(edit.undo());
+        assert_eq!(edit.state_by_province().get(&10), Some(&1));
+        assert_eq!(edit.working.victory_points_by_state[&1][0].province_id, 10);
+        assert_eq!(edit.working.province_buildings_by_state[&1][&10]["bunker"], 2);
+
+        assert!(edit.redo());
+        assert!(!edit.state_by_province().contains_key(&10));
+        assert_eq!(edit.working.victory_points_by_state[&2][0].province_id, 30);
+    }
+
+    #[test]
+    fn province_removal_rejects_an_invalid_or_conflicting_target_before_mutation() {
+        let mut edit = session();
+        let before = edit.working.clone();
+        assert_eq!(
+            edit.remove_province_references(10, ProvinceRemovalPolicy::TransferToProvince(10)),
+            Err(StateEditError::ProvinceRemovalTargetMatches(10))
+        );
+        assert_eq!(edit.working, before);
+
+        edit.working
+            .victory_points_by_state
+            .get_mut(&2)
+            .unwrap()
+            .push(VictoryPoint {
+                province_id: 30,
+                value: 1,
+            });
+        let before = edit.working.clone();
+        assert_eq!(
+            edit.remove_province_references(10, ProvinceRemovalPolicy::TransferToProvince(30)),
+            Err(StateEditError::ProvincialDataConflict {
+                province_id: 30,
+                target_state_id: 2,
+            })
+        );
+        assert_eq!(edit.working, before);
+        assert!(edit.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn province_removal_can_drop_references_without_leaving_an_unassigned_province() {
+        let mut edit = session();
+        edit.remove_province_references(11, ProvinceRemovalPolicy::RemoveReferences)
+            .unwrap();
+
+        assert!(!edit.state_by_province().contains_key(&11));
+        assert!(!edit.working.province_buildings_by_state[&1].contains_key(&11));
+        assert!(!edit.working.unassigned_land_provinces.contains(&11));
+        assert!(edit.undo());
+        assert_eq!(edit.state_by_province().get(&11), Some(&1));
+        assert_eq!(edit.working.province_buildings_by_state[&1][&11]["bunker"], 2);
     }
 
     #[test]
