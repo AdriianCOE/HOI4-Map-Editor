@@ -523,6 +523,23 @@ impl EventHandler for App {
                     let result = copy_text_to_clipboard(&text);
                     self.handle_result_none(result);
                 }
+                StateApplyDialogAction::ChooseImageOverlay => {
+                    if let Some(path) = file_dialog_image_overlay()
+                        && let Some(canvas) = self.canvas.as_mut()
+                    {
+                        canvas.load_custom_image_overlay(path, &mut self.alerts);
+                    }
+                }
+                StateApplyDialogAction::UseProjectHeightmap => {
+                    if let Some(canvas) = self.canvas.as_mut() {
+                        canvas.use_project_heightmap(&mut self.alerts);
+                    }
+                }
+                StateApplyDialogAction::ClearImageOverlay => {
+                    if let Some(canvas) = self.canvas.as_mut() {
+                        canvas.clear_image_overlay(&mut self.alerts);
+                    }
+                }
                 StateApplyDialogAction::None => {}
             }
             return;
@@ -1516,6 +1533,7 @@ impl App {
             (Some(canvas), ToolbarViewToggleImageOverlay | SidebarOptionImageOverlay) => {
                 canvas.toggle_image_overlay(&mut self.alerts)
             }
+            (Some(canvas), ToolbarViewImageOverlayPanel) => canvas.open_image_overlay_panel(),
             (Some(canvas), ToolbarImageChoose) => {
                 if let Some(path) = file_dialog_image_overlay() {
                     canvas.load_custom_image_overlay(path, &mut self.alerts);

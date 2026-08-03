@@ -198,6 +198,7 @@ pub fn ui_literal(english: &'static str) -> &'static str {
         "Province Borders" => "view.province_borders",
         "State Borders" => "view.state_borders",
         "Image Overlay" => "view.image",
+        "Panels: Image Overlay" => "view.image",
         "Map View: Province Colors" => "view.map_province_colors",
         "Map View: Province Types" => "view.map_province_types",
         "Map View: Terrain / Biome" => "view.map_terrain",

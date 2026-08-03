@@ -245,6 +245,7 @@ enum StateApplyDialog {
     Progress,
     Result,
     ValidationResults,
+    ImageOverlay,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,6 +255,9 @@ pub enum StateApplyDialogAction {
     ConfirmProjectSave,
     OpenSource(PathBuf),
     CopyDetails(String),
+    ChooseImageOverlay,
+    UseProjectHeightmap,
+    ClearImageOverlay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -388,6 +392,7 @@ struct ValidationProblemsView {
     domain: ValidationDomainFilter,
     selected: usize,
     offset: usize,
+    show_technical_details: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -3055,63 +3060,27 @@ impl Canvas {
             StateApplyDialog::ProjectSaveReview => {
                 let report = self.project_validation_report.as_ref();
                 let baseline = report.and_then(|report| report.baseline_summary.as_ref());
-                let delta = report.map(|report| &report.delta);
                 let files = self
                     .project_save_plan
                     .as_ref()
                     .map_or(0, |plan| plan.patch_plan().files_len());
                 (
                     tr("workspace.save_project"),
-                    tr("project_validation.continue_saving"),
+                    tr("workspace.save_project"),
                     tr("project_validation.view_problems"),
                     tr("project_validation.close"),
                     vec![
-                        if report.is_some_and(|report| {
-                            report.delta.has_preexisting_errors()
-                                && !report.delta.blocks_save()
-                                && !report.delta.requires_warning_review()
-                        }) {
-                            "PASSED WITH PRE-EXISTING ISSUES".to_owned()
-                        } else {
-                            "VALIDATION PASSED".to_owned()
-                        },
-                        format!(
-                            "{}: {} error(s), {} warning(s)",
-                            tr("project_validation.baseline_diagnostics"),
-                            baseline.map_or(0, |summary| summary.errors),
-                            baseline.map_or(0, |summary| summary.warnings),
-                        ),
-                        format!(
-                            "{}: {} error(s), {} warning(s)",
-                            tr("project_validation.candidate_diagnostics"),
-                            report.map_or(0, |report| report.errors),
-                            report.map_or(0, |report| report.warnings),
-                        ),
-                        format!(
-                            "{}: {} {} | {} {} | {} {} | {} {} | {} {}",
-                            tr("project_validation.diagnostic_delta"),
-                            delta.map_or(0, |delta| delta.new.len()),
-                            tr("project_validation.new"),
-                            delta.map_or(0, |delta| delta.aggravated.len()),
-                            tr("project_validation.aggravated"),
-                            delta.map_or(0, |delta| delta.unchanged.len()),
-                            tr("project_validation.unchanged"),
-                            delta.map_or(0, |delta| delta.resolved.len()),
-                            tr("project_validation.resolved"),
-                            delta.map_or(0, |delta| delta.improved.len()),
-                            tr("project_validation.improved"),
-                        ),
-                        String::new(),
-                        format!("Files affected: {files}"),
+                        format!("{files} files will be updated."),
+                        "No new blocking problems were found.".to_owned(),
                         if let Some(baseline) = baseline {
                             format!(
-                                "The project already contains {} errors and {} warnings.",
+                                "The project contains {} pre-existing errors and {} warnings.",
                                 baseline.errors, baseline.warnings
                             )
                         } else {
-                            "No pre-existing blocking errors.".to_owned()
+                            "No pre-existing project issues were found.".to_owned()
                         },
-                        "Your pending changes did not introduce new blocking problems.".to_owned(),
+                        "These issues were not caused by your pending changes.".to_owned(),
                     ],
                 )
             }
@@ -3168,50 +3137,17 @@ impl Canvas {
             StateApplyDialog::ValidationResults => {
                 let report = self.project_validation_report.as_ref();
                 let problems = self.filtered_validation_problems();
+                let baseline = report.and_then(|report| report.baseline_summary.as_ref());
+                let blocked = report.is_some_and(|report| report.delta.blocks_save());
                 let mut lines = vec![
-                    match report.map(|report| report.target) {
-                        Some(ProjectValidationTarget::PendingChanges) => {
-                            tr("project_validation.pending_changes").to_owned()
-                        }
-                        _ => tr("project_validation.current_project").to_owned(),
-                    },
-                    format!(
-                        "{}: Errors {} | Warnings {} | Information {}",
-                        tr("project_validation.baseline_diagnostics"),
-                        report.map_or(0, |report| {
-                            report.baseline_summary.as_ref().unwrap_or(&report.summary).errors
-                        }),
-                        report.map_or(0, |report| {
-                            report.baseline_summary.as_ref().unwrap_or(&report.summary).warnings
-                        }),
-                        report.map_or(0, |report| {
-                            report
-                                .baseline_summary
-                                .as_ref()
-                                .unwrap_or(&report.summary)
-                                .information
-                        }),
-                    ),
-                    format!(
-                        "{}: Errors {} | Warnings {} | Information {}",
-                        tr("project_validation.candidate_diagnostics"),
-                        report.map_or(0, |report| report.errors),
-                        report.map_or(0, |report| report.warnings),
-                        report.map_or(0, |report| report.information),
-                    ),
-                    report.map_or_else(
-                        || tr("project_validation.diagnostic_delta").to_owned(),
-                        |report| format!(
-                            "{}: +{} | !{} | ={} | -{} | ↓{}",
-                            tr("project_validation.diagnostic_delta"),
-                            report.delta.new.len(),
-                            report.delta.aggravated.len(),
-                            report.delta.unchanged.len(),
-                            report.delta.resolved.len(),
-                            report.delta.improved.len(),
-                        ),
-                    ),
-                    String::new(),
+                    if blocked { "SAVE BLOCKED".to_owned() } else { "PROJECT VALIDATION".to_owned() },
+                    if blocked {
+                        format!("{} new errors must be fixed before saving.", report.map_or(0, |report| report.delta.new_errors() + report.delta.aggravated_to_error()))
+                    } else { "No new blocking problems were found.".to_owned() },
+                    baseline.map_or_else(|| "No pre-existing project issues.".to_owned(), |summary| format!("Pre-existing issues: {} errors, {} warnings.", summary.errors, summary.warnings)),
+                    if self.validation_problems_view.show_technical_details {
+                        report.map_or_else(|| "Technical details unavailable.".to_owned(), |report| format!("Baseline: {} | Candidate: {} | Delta: +{} !{} ={} -{} ↓{}", report.baseline_summary.as_ref().map_or(0, |summary| summary.total), report.total, report.delta.new.len(), report.delta.aggravated.len(), report.delta.unchanged.len(), report.delta.resolved.len(), report.delta.improved.len()))
+                    } else { "Technical details are hidden.".to_owned() },
                     String::new(),
                 ];
                 lines.extend(
@@ -3219,10 +3155,10 @@ impl Canvas {
                         .iter()
                         .skip(self.validation_problems_view.offset)
                         .take(4)
-                        .map(|(source, diagnostic)| {
+                        .map(|(_source, diagnostic)| {
                             format!(
-                                "[{} / {:?}] {} — {}",
-                                source.label(), diagnostic.severity, diagnostic.code, diagnostic.message
+                                "{} — {}",
+                                diagnostic.message, validation_display_path(diagnostic, self.project.as_ref())
                             )
                         }),
                 );
@@ -3236,18 +3172,22 @@ impl Canvas {
                     } else {
                         tr("project_validation.validate_again")
                     },
-                    if self
-                        .selected_validation_problem()
-                        .is_some_and(|(_, diagnostic)| diagnostic.path.is_some())
-                    {
-                        tr("project_validation.open_source")
-                    } else {
-                        ""
-                    },
+                    if self.validation_problems_view.show_technical_details { "Hide Technical Details" } else { "Show Technical Details" },
                     tr("project_validation.close"),
                     lines,
                 )
             }
+            StateApplyDialog::ImageOverlay => (
+                "IMAGE OVERLAY",
+                if self.map_layers.image_overlay.enabled { "Hide Image Overlay" } else { "Show Image Overlay" },
+                "Close",
+                "",
+                vec![
+                    format!("Status: {}", if self.map_layers.image_overlay.enabled { "Visible" } else { "Hidden" }),
+                    format!("Source: {}", self.map_layers.image_overlay.source.as_ref().map_or_else(|| "No image selected".to_owned(), |source| match source { ImageOverlaySource::ProjectHeightmap => "Project heightmap".to_owned(), ImageOverlaySource::Custom(path) => path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned()) })),
+                    format!("Opacity: {}%", (self.map_layers.image_overlay.opacity * 100.0).round() as u32),
+                ],
+            ),
             StateApplyDialog::Result => {
                 let (title, lines) = if let Some(report) = self.state_save_report.as_ref() {
                     let title = if report.outcome == StateSaveOutcome::Completed {
@@ -3342,6 +3282,11 @@ impl Canvas {
                 &format!("{}: {}", tr("project_validation.domain"), self.validation_problems_view.domain.label()),
                 true,
             );
+        }
+        if dialog == StateApplyDialog::ImageOverlay {
+            for (index, label) in ["Choose Image...", "Use Project Heightmap", "Opacity (click to set)", "Clear Image"].into_iter().enumerate() {
+                draw_editor_button(ctx, glyph_cache, gl, layout.problem_row(index), label, true);
+            }
         }
         let primary_enabled = dialog != StateApplyDialog::Progress
             || self.round_trip_task.is_some()
@@ -6096,6 +6041,10 @@ impl Canvas {
         self.state_apply_dialog.is_some()
     }
 
+    pub fn open_image_overlay_panel(&mut self) {
+        self.state_apply_dialog = Some(StateApplyDialog::ImageOverlay);
+    }
+
     pub fn validation_results_scroll(&mut self, amount: f64) -> bool {
         if self.state_apply_dialog != Some(StateApplyDialog::ValidationResults) {
             return false;
@@ -6133,6 +6082,22 @@ impl Canvas {
             return StateApplyDialogAction::None;
         };
         let layout = StateApplyDialogLayout::new(interface);
+        if dialog == StateApplyDialog::ImageOverlay {
+            if point_in_rect(pos, layout.problem_row(0)) {
+                return StateApplyDialogAction::ChooseImageOverlay;
+            }
+            if point_in_rect(pos, layout.problem_row(1)) {
+                return StateApplyDialogAction::UseProjectHeightmap;
+            }
+            if point_in_rect(pos, layout.problem_row(2)) {
+                let track = layout.problem_row(2);
+                self.map_layers.image_overlay.opacity = ((pos[0] - track[0]) / track[2]).clamp(0.0, 1.0) as f32;
+                return StateApplyDialogAction::None;
+            }
+            if point_in_rect(pos, layout.problem_row(3)) {
+                return StateApplyDialogAction::ClearImageOverlay;
+            }
+        }
         if dialog == StateApplyDialog::ValidationResults {
             if point_in_rect(pos, layout.severity_filter()) {
                 self.validation_problems_view.severity =
@@ -6244,6 +6209,7 @@ impl Canvas {
                         self.validate_project_for_ui(alerts);
                     }
                 }
+                StateApplyDialog::ImageOverlay => self.toggle_image_overlay(alerts),
                 StateApplyDialog::Result => self.state_apply_dialog = None,
             }
         } else if point_in_rect(pos, layout.secondary()) {
@@ -6255,25 +6221,8 @@ impl Canvas {
                     self.validation_problems_view = ValidationProblemsView::default();
                     self.state_apply_dialog = Some(StateApplyDialog::ValidationResults);
                 }
-                StateApplyDialog::ValidationResults => {
-                    let source = self
-                        .selected_validation_problem()
-                        .and_then(|(_, diagnostic)| diagnostic.path.clone())
-                        .map(|path| {
-                            if path.is_absolute() {
-                                path
-                            } else {
-                                self.project
-                                    .as_ref()
-                                    .map_or(path.clone(), |project| project.paths.root.join(path))
-                            }
-                        });
-                    if let Some(path) = source {
-                        return StateApplyDialogAction::OpenSource(path);
-                    }
-                    self.print_project_validation_report();
-                    alerts.push(Ok("Printed the project validation report to the console"));
-                }
+                StateApplyDialog::ValidationResults => self.validation_problems_view.show_technical_details = !self.validation_problems_view.show_technical_details,
+                StateApplyDialog::ImageOverlay => self.state_apply_dialog = None,
                 _ if self.state_save_report.is_some() => self.view_state_save_report(alerts),
                 _ if self.round_trip_report.is_some() => self.view_round_trip_report(alerts),
                 _ => self.print_patch_preview_details(),
@@ -6295,19 +6244,6 @@ impl Canvas {
         StateApplyDialogAction::None
     }
 
-    fn print_project_validation_report(&self) {
-        let Some(report) = self.project_validation_report.as_ref() else {
-            return;
-        };
-        println!(
-            "PROJECT VALIDATION: {} error(s), {} warning(s), {} information message(s)",
-            report.errors, report.warnings, report.information
-        );
-        for diagnostic in &report.diagnostics {
-            println!("[{}] {}", diagnostic.code, diagnostic.message);
-        }
-    }
-
     fn filtered_validation_problems(
         &self,
     ) -> Vec<(ValidationSourceFilter, &ProjectValidationDiagnostic)> {
@@ -6317,7 +6253,9 @@ impl Canvas {
         validation_delta_items(report)
             .into_iter()
             .filter(|(source, diagnostic)| {
-                self.validation_problems_view.source.matches(*source)
+                (self.validation_problems_view.source != ValidationSourceFilter::All
+                    || *source != ValidationSourceFilter::Unchanged)
+                    && self.validation_problems_view.source.matches(*source)
                     && self
                         .validation_problems_view
                         .severity
@@ -9877,6 +9815,26 @@ fn validation_problem_details(
         diagnostic.province_id.map_or_else(|| "-".to_owned(), |id| id.to_string()),
         diagnostic.state_id.map_or_else(|| "-".to_owned(), |id| id.to_string()),
     )
+}
+
+fn validation_display_path(
+    diagnostic: &ProjectValidationDiagnostic,
+    project: Option<&Hoi4Project>,
+) -> String {
+    let Some(path) = diagnostic.path.as_ref() else {
+        return String::new();
+    };
+    if let Some(project) = project
+        && let Ok(relative) = path.strip_prefix(&project.paths.root)
+    {
+        return format!("File: {}", relative.display());
+    }
+    let parts = path.components().collect::<Vec<_>>();
+    if let Some(index) = parts.iter().position(|part| part.as_os_str().eq_ignore_ascii_case("candidate")) {
+        let relative = parts[index + 1..].iter().collect::<PathBuf>();
+        return format!("File: {}", relative.display());
+    }
+    format!("File: {}", path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned()))
 }
 
 impl StateApplyDialogLayout {

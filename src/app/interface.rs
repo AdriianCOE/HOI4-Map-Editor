@@ -1631,6 +1631,7 @@ pub enum ButtonId {
     ToolbarViewPoliticalMap,
     ToolbarViewToggleAdjacencies,
     ToolbarViewToggleImageOverlay,
+    ToolbarViewImageOverlayPanel,
     ToolbarViewToggleStateBoundaries,
     ToolbarViewToggleProvinceIds,
     ToolbarViewToggleProvinceBoundaries,
@@ -1968,11 +1969,6 @@ const WORKSPACE_DROPDOWNS: &[(
                 "",
                 ButtonId::ToolbarViewToggleStateBoundaries,
             ),
-            (
-                "Image Overlay",
-                "",
-                ButtonId::ToolbarViewToggleImageOverlay,
-            ),
         ],
         false,
         true,
@@ -2135,7 +2131,7 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 "",
                 ButtonId::ToolbarViewToggleStateBoundaries,
             ),
-            ("Image Overlay", "", ButtonId::ToolbarViewToggleImageOverlay),
+            ("Panels: Image Overlay", "", ButtonId::ToolbarViewImageOverlayPanel),
             (
                 "Panels: State Inspector",
                 "",

@@ -446,6 +446,7 @@ fn validate_states(
             continue;
         };
         let state_id = state.id;
+        let state_label = state_id.map_or_else(|| "unknown state".to_owned(), |id| format!("State {id}"));
 
         if state.provinces.is_empty() {
             diagnostics.push(
@@ -460,6 +461,20 @@ fn validate_states(
         }
 
         for &province_id in &state.provinces {
+            if !provinces.contains_key(&province_id) {
+                diagnostics.push(
+                    ProjectValidationDiagnostic::custom(
+                        ProjectDiagnosticKind::UnknownProvince,
+                        DiagnosticSeverity::Error,
+                        Some(document.path.clone()),
+                        format!("{state_label} references removed or missing province {province_id}"),
+                    )
+                    .with_domain(ProjectValidationDomain::CrossDomain)
+                    .with_province_id(province_id)
+                    .with_state_id(state_id),
+                );
+                continue;
+            }
             if matches!(
                 provinces.get(&province_id).map(|(_, kind, _)| kind),
                 Some(ProvinceKind::Sea | ProvinceKind::Lake)
@@ -479,6 +494,19 @@ fn validate_states(
         }
 
         for vp in &state.history.victory_points {
+            if !provinces.contains_key(&vp.province_id) {
+                diagnostics.push(
+                    ProjectValidationDiagnostic::custom(
+                        ProjectDiagnosticKind::UnknownProvince,
+                        DiagnosticSeverity::Error,
+                        Some(document.path.clone()),
+                        format!("{state_label} victory point references removed or missing province {}", vp.province_id),
+                    )
+                    .with_domain(ProjectValidationDomain::CrossDomain)
+                    .with_province_id(vp.province_id)
+                    .with_state_id(state_id),
+                );
+            }
             if !state.provinces.contains(&vp.province_id) {
                 diagnostics.push(
                     ProjectValidationDiagnostic::custom(
@@ -497,6 +525,19 @@ fn validate_states(
         }
 
         for (&province_id, buildings) in &state.history.province_buildings {
+            if !provinces.contains_key(&province_id) {
+                diagnostics.push(
+                    ProjectValidationDiagnostic::custom(
+                        ProjectDiagnosticKind::UnknownProvince,
+                        DiagnosticSeverity::Error,
+                        Some(document.path.clone()),
+                        format!("{state_label} province buildings reference removed or missing province {province_id}"),
+                    )
+                    .with_domain(ProjectValidationDomain::CrossDomain)
+                    .with_province_id(province_id)
+                    .with_state_id(state_id),
+                );
+            }
             if !state.provinces.contains(&province_id) {
                 diagnostics.push(
                     ProjectValidationDiagnostic::custom(
