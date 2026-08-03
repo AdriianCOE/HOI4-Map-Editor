@@ -81,7 +81,7 @@ validation_report = "Validação / Ver relatório"
 validation_clear = "Validação / Limpar resultado"
 save_cancel = "Salvar / Cancelar"
 save_report = "Salvar / Ver relatório"
-save_recover = "Salvar / Recuperar interrupção"
+save_recover = "Recuperação..."
 preview_clear = "Prévia / Limpar"
 
 [view]
@@ -120,8 +120,8 @@ opacity_up = "Camadas: opacidade +10%"
 clear_image = "Camadas: limpar imagem"
 state_inspector = "Painéis: inspetor de estados"
 developer = "Painéis: diagnósticos de desenvolvimento"
-choose_definitions = "Definições: escolher jogo-base..."
-clear_definitions = "Definições: limpar jogo-base"
+choose_definitions = "Dados do jogo-base: escolher..."
+clear_definitions = "Dados do jogo-base: limpar"
 reset_zoom = "Redefinir zoom"
 
 [help]

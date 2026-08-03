@@ -81,7 +81,7 @@ validation_report = "Validación / Ver informe"
 validation_clear = "Validación / Borrar resultado"
 save_cancel = "Guardar / Cancelar"
 save_report = "Guardar / Ver informe"
-save_recover = "Guardar / Recuperar operación interrumpida"
+save_recover = "Recuperación..."
 preview_clear = "Vista previa / Borrar"
 
 [view]
@@ -120,8 +120,8 @@ opacity_up = "Superposiciones: Opacidad +10%"
 clear_image = "Superposiciones: Borrar imagen"
 state_inspector = "Paneles: Inspector de estados"
 developer = "Paneles: Diagnóstico de desarrollador"
-choose_definitions = "Definiciones: Elegir juego base..."
-clear_definitions = "Definiciones: Borrar juego base"
+choose_definitions = "Datos del juego base: Elegir..."
+clear_definitions = "Datos del juego base: Limpiar"
 reset_zoom = "Restablecer zoom"
 
 [help]

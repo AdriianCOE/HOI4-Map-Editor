@@ -2096,17 +2096,17 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 ButtonId::ToolbarPatchValidate,
             ),
             (
-                "Definitions: Choose Base Game...",
+                "Base Game Data: Choose...",
                 "",
                 ButtonId::ToolbarViewChooseBaseGameDefinitions,
             ),
             (
-                "Definitions: Clear Base Game",
+                "Base Game Data: Clear",
                 "",
                 ButtonId::ToolbarViewClearBaseGameDefinitions,
             ),
             (
-                "Save / Recover Interrupted",
+                "Recovery...",
                 "",
                 ButtonId::ToolbarPatchRecoverSave,
             ),
@@ -2411,6 +2411,9 @@ mod tests {
                 ButtonId::ToolbarPatchRecoverSave,
             ]
         );
+        assert!(!menu_entries("Tools").iter().any(|(label, _, _)| {
+            label.starts_with("Save /") || label.starts_with("Definitions:")
+        }));
 
         let view = menu_entries("View");
         assert!(!view.iter().any(|(_, _, id)| matches!(

@@ -81,7 +81,7 @@ validation_report = "Validation / View Report"
 validation_clear = "Validation / Clear Result"
 save_cancel = "Save / Cancel"
 save_report = "Save / View Report"
-save_recover = "Save / Recover Interrupted"
+save_recover = "Recovery..."
 preview_clear = "Preview / Clear"
 
 [view]
@@ -120,8 +120,8 @@ opacity_up = "Overlays: Opacity +10%"
 clear_image = "Overlays: Clear Image"
 state_inspector = "Panels: State Inspector"
 developer = "Panels: Developer Diagnostics"
-choose_definitions = "Definitions: Choose Base Game..."
-clear_definitions = "Definitions: Clear Base Game"
+choose_definitions = "Base Game Data: Choose..."
+clear_definitions = "Base Game Data: Clear"
 reset_zoom = "Reset Zoom"
 
 [help]

@@ -81,7 +81,7 @@ validation_report = "验证/查看报告"
 validation_clear = "验证/清除结果"
 save_cancel = "保存/取消"
 save_report = "保存/查看报告"
-save_recover = "保存/恢复中断的操作"
+save_recover = "恢复..."
 preview_clear = "预览/清除"
 
 [view]
@@ -120,8 +120,8 @@ opacity_up = "叠加层：不透明度 +10%"
 clear_image = "叠加层：清除图像"
 state_inspector = "面板：州检查器"
 developer = "面板：开发者诊断"
-choose_definitions = "定义：选择基础游戏..."
-clear_definitions = "定义：清除基础游戏"
+choose_definitions = "基础游戏数据：选择..."
+clear_definitions = "基础游戏数据：清除"
 reset_zoom = "重置缩放"
 
 [help]

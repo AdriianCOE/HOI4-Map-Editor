@@ -81,7 +81,7 @@ validation_report = "Validation / Voir le rapport"
 validation_clear = "Validation / Effacer le résultat"
 save_cancel = "Enregistrement / Annuler"
 save_report = "Enregistrement / Voir le rapport"
-save_recover = "Enregistrement / Récupérer l'opération interrompue"
+save_recover = "Récupération..."
 preview_clear = "Aperçu / Effacer"
 
 [view]
@@ -120,8 +120,8 @@ opacity_up = "Superpositions : Opacité +10 %"
 clear_image = "Superpositions : Effacer l'image"
 state_inspector = "Panneaux : Inspecteur d'états"
 developer = "Panneaux : Diagnostics développeur"
-choose_definitions = "Définitions : Choisir le jeu de base..."
-clear_definitions = "Définitions : Effacer le jeu de base"
+choose_definitions = "Données du jeu de base : Choisir..."
+clear_definitions = "Données du jeu de base : Effacer"
 reset_zoom = "Réinitialiser le zoom"
 
 [help]
