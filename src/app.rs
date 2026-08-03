@@ -417,7 +417,7 @@ impl EventHandler for App {
                 if !canvas.confirm_state_fill(&mut self.alerts)
                     && !canvas.advance_state_lasso(&mut self.alerts)
                 {
-                    canvas.finish_tool();
+                    canvas.finish_tool(&mut self.alerts);
                 }
             }
             (Some(canvas), true, Key::F) => {
@@ -535,6 +535,16 @@ impl EventHandler for App {
                         canvas.use_project_heightmap(&mut self.alerts);
                     }
                 }
+                StateApplyDialogAction::DecreaseImageOverlayOpacity => {
+                    if let Some(canvas) = self.canvas.as_mut() {
+                        canvas.adjust_image_overlay_opacity(-0.1, &mut self.alerts);
+                    }
+                }
+                StateApplyDialogAction::IncreaseImageOverlayOpacity => {
+                    if let Some(canvas) = self.canvas.as_mut() {
+                        canvas.adjust_image_overlay_opacity(0.1, &mut self.alerts);
+                    }
+                }
                 StateApplyDialogAction::ClearImageOverlay => {
                     if let Some(canvas) = self.canvas.as_mut() {
                         canvas.clear_image_overlay(&mut self.alerts);
@@ -614,7 +624,7 @@ impl EventHandler for App {
                 && canvas.view_mode() != ViewMode::Adjacencies
             {
                 // Mouse movement should not activate the tool for the paint bucket and lasso tools
-                canvas.activate_tool(interface, pos, mods.shift);
+                canvas.activate_tool(interface, pos, mods.shift, &mut self.alerts);
             };
         };
     }
@@ -1751,7 +1761,7 @@ impl App {
             self.alerts.push(Err("No Adjacency brush selected"));
         } else {
             self.painting = true;
-            canvas.activate_tool(interface, pos, mods.shift);
+            canvas.activate_tool(interface, pos, mods.shift, &mut self.alerts);
         };
         if let Some(request) = inspector_request {
             self.handle_inspector_external_request(request);

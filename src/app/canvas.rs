@@ -58,7 +58,7 @@ use crate::localization::tr;
 use crate::util::files::Location;
 use crate::util::stringify_color;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::io::{BufWriter, Read};
 use std::path::{Path, PathBuf};
@@ -257,6 +257,8 @@ pub enum StateApplyDialogAction {
     CopyDetails(String),
     ChooseImageOverlay,
     UseProjectHeightmap,
+    DecreaseImageOverlayOpacity,
+    IncreaseImageOverlayOpacity,
     ClearImageOverlay,
 }
 
@@ -3169,6 +3171,11 @@ impl Canvas {
                         tr("project_validation.go_to_province")
                     } else if navigation.and_then(|diagnostic| diagnostic.state_id).is_some() {
                         tr("project_validation.go_to_state")
+                    } else if navigation
+                        .and_then(|diagnostic| validation_source_path(diagnostic, self.project.as_ref()))
+                        .is_some()
+                    {
+                        "Open File"
                     } else {
                         tr("project_validation.validate_again")
                     },
@@ -3284,7 +3291,14 @@ impl Canvas {
             );
         }
         if dialog == StateApplyDialog::ImageOverlay {
-            for (index, label) in ["Choose Image...", "Use Project Heightmap", "Opacity (click to set)", "Clear Image"].into_iter().enumerate() {
+            for (index, label) in [
+                "Choose Image...",
+                "Use Project Heightmap",
+                &format!("Opacity: {}% (click to set)", (self.map_layers.image_overlay.opacity * 100.0).round() as u32),
+                "Opacity -10%",
+                "Opacity +10%",
+                "Clear Image",
+            ].iter().enumerate() {
                 draw_editor_button(ctx, glyph_cache, gl, layout.problem_row(index), label, true);
             }
         }
@@ -6095,6 +6109,12 @@ impl Canvas {
                 return StateApplyDialogAction::None;
             }
             if point_in_rect(pos, layout.problem_row(3)) {
+                return StateApplyDialogAction::DecreaseImageOverlayOpacity;
+            }
+            if point_in_rect(pos, layout.problem_row(4)) {
+                return StateApplyDialogAction::IncreaseImageOverlayOpacity;
+            }
+            if point_in_rect(pos, layout.problem_row(5)) {
                 return StateApplyDialogAction::ClearImageOverlay;
             }
         }
@@ -6193,7 +6213,8 @@ impl Canvas {
                     }
                 }
                 StateApplyDialog::ValidationResults => {
-                    let navigation = self.selected_validation_problem().and_then(|(_, diagnostic)| {
+                    let selected = self.selected_validation_problem().map(|(_, diagnostic)| diagnostic);
+                    let navigation = selected.and_then(|diagnostic| {
                         diagnostic
                             .province_id
                             .map(|province_id| (Some(province_id), None))
@@ -6205,6 +6226,19 @@ impl Canvas {
                     } else if let Some((_, Some(state_id))) = navigation {
                         self.state_apply_dialog = None;
                         self.select_state_by_id(interface, state_id, alerts);
+                    } else if let Some(path) = selected
+                        .and_then(|diagnostic| validation_source_path(diagnostic, self.project.as_ref()))
+                    {
+                        return StateApplyDialogAction::OpenSource(path);
+                    } else if let Some(diagnostic) = selected
+                        && diagnostic.path.is_some()
+                    {
+                        alerts.push(Ok(format!(
+                            "Pending file: {}",
+                            validation_display_path(diagnostic, self.project.as_ref())
+                                .strip_prefix("File: ")
+                                .unwrap_or_default()
+                        )));
                     } else {
                         self.validate_project_for_ui(alerts);
                     }
@@ -9103,11 +9137,13 @@ impl Canvas {
         interface: &Interface,
         cursor_pos: Vector2<f64>,
         modifier: bool,
+        alerts: &mut Alerts,
     ) {
         if self.map_access_mode == MapAccessMode::ReadOnly {
             return;
         };
 
+        let province_ids = self.bundle.map.province_ids().collect::<BTreeSet<_>>();
         match self.view_mode {
             ViewMode::Color => match self.tool.mode {
                 ToolMode::PaintArea => self.tool_paint_brush(interface, cursor_pos),
@@ -9117,6 +9153,7 @@ impl Canvas {
             ViewMode::Adjacencies => self.tool_connect_activate(interface, cursor_pos),
             _ => self.tool_paint_brush(interface, cursor_pos),
         };
+        self.restore_removed_referenced_provinces(&province_ids, alerts);
     }
 
     /// Deactivates the tool, ie, performs a release-left-click action
@@ -9133,14 +9170,16 @@ impl Canvas {
         };
     }
 
-    pub fn finish_tool(&mut self) {
+    pub fn finish_tool(&mut self, alerts: &mut Alerts) {
         if self.map_access_mode == MapAccessMode::ReadOnly {
             return;
         };
 
         if let ToolMode::Lasso(lasso) = &mut self.tool.mode {
             let lasso = lasso.drain();
+            let province_ids = self.bundle.map.province_ids().collect::<BTreeSet<_>>();
             self.tool_lasso_finish(lasso);
+            self.restore_removed_referenced_provinces(&province_ids, alerts);
         };
     }
 
@@ -9258,6 +9297,35 @@ impl Canvas {
                 };
             };
         };
+    }
+
+    fn restore_removed_referenced_provinces(
+        &mut self,
+        previous_ids: &BTreeSet<u32>,
+        alerts: &mut Alerts,
+    ) {
+        let current_ids = self.bundle.map.province_ids().collect::<BTreeSet<_>>();
+        let referenced = self
+            .state_edit_session
+            .as_ref()
+            .map(|edit| removed_provinces_with_state_references(
+                previous_ids,
+                &current_ids,
+                edit.state_by_province(),
+            ))
+            .unwrap_or_default();
+        let Some((province_id, state_id)) = referenced.first().copied() else {
+            return;
+        };
+        if self.history.undo(&mut self.bundle.map).is_some() {
+            self.bundle.map.recalculate_all_boundaries();
+            self.problems.clear();
+            self.refresh();
+            self.sync_province_dirty();
+        }
+        alerts.push(Err(format!(
+            "Province {province_id} no longer has pixels and is still referenced by State {state_id}. The paint was restored; reassign or remove its references before deleting it."
+        )));
     }
 
     fn tool_connect_activate(&mut self, interface: &Interface, cursor_pos: Vector2<f64>) {
@@ -9797,6 +9865,21 @@ fn validation_delta_items(
     output
 }
 
+fn removed_provinces_with_state_references(
+    before: &BTreeSet<u32>,
+    after: &BTreeSet<u32>,
+    state_by_province: &HashMap<u32, u32>,
+) -> Vec<(u32, u32)> {
+    before
+        .difference(after)
+        .filter_map(|province_id| {
+            state_by_province
+                .get(province_id)
+                .map(|state_id| (*province_id, *state_id))
+        })
+        .collect()
+}
+
 fn validation_problem_details(
     source: ValidationSourceFilter,
     diagnostic: &ProjectValidationDiagnostic,
@@ -9815,6 +9898,25 @@ fn validation_problem_details(
         diagnostic.province_id.map_or_else(|| "-".to_owned(), |id| id.to_string()),
         diagnostic.state_id.map_or_else(|| "-".to_owned(), |id| id.to_string()),
     )
+}
+
+fn validation_source_path(
+    diagnostic: &ProjectValidationDiagnostic,
+    project: Option<&Hoi4Project>,
+) -> Option<PathBuf> {
+    let project = project?;
+    let path = diagnostic.path.as_ref()?;
+    let logical_path = if let Ok(relative) = path.strip_prefix(&project.paths.root) {
+        PathBuf::from(relative)
+    } else {
+        let parts = path.components().collect::<Vec<_>>();
+        let index = parts
+            .iter()
+            .position(|part| part.as_os_str().eq_ignore_ascii_case("candidate"))?;
+        parts[index + 1..].iter().collect::<PathBuf>()
+    };
+    let source = project.paths.root.join(logical_path);
+    source.is_file().then_some(source)
 }
 
 fn validation_display_path(
@@ -11205,11 +11307,24 @@ fn cycle_connection(connection_kind: Option<ConnectionKind>, backwards: bool) ->
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeSet, HashMap};
     use std::io::Cursor;
 
     use image::{DynamicImage, ImageOutputFormat};
 
     use super::*;
+
+    #[test]
+    fn only_newly_removed_provinces_with_state_references_are_blocked() {
+        let before = BTreeSet::from([10, 20, 30]);
+        let after = BTreeSet::from([10, 30]);
+        let state_by_province = HashMap::from([(20, 89), (30, 90)]);
+
+        assert_eq!(
+            removed_provinces_with_state_references(&before, &after, &state_by_province),
+            vec![(20, 89)]
+        );
+    }
 
     #[test]
     fn image_overlay_accepts_matching_image_and_blocks_dimension_mismatch() {
