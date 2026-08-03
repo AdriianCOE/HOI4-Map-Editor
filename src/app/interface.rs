@@ -200,32 +200,32 @@ impl Interface {
             workspace_buttons.push(ButtonElement { base, id });
         }
 
-        let apply_label = if compact {
-            tr("workspace.apply_short")
+        let save_label = if compact {
+            tr("workspace.save_short")
         } else {
-            tr("workspace.apply")
+            tr("workspace.save_project")
         };
-        let apply_width = button_width(apply_label);
-        let mut action_x = window_width.saturating_sub(apply_width);
+        let save_width = button_width(save_label);
+        let mut action_x = window_width.saturating_sub(save_width);
         workspace_buttons.push(ButtonElement {
             base: ButtonBase::new_fit_width(
-                apply_label,
+                save_label,
                 [action_x, bar_y],
                 &PALETTE_BUTTON_TOOLBAR,
             ),
             id: ButtonId::WorkspaceApplyToMod,
         });
         if window_width >= 720 {
-            let review_label = if window_width < 980 {
-                tr("workspace.review_short")
+            let validate_label = if window_width < 980 {
+                tr("workspace.validate_short")
             } else {
-                tr("workspace.review")
+                tr("workspace.validate_project")
             };
-            let review_width = button_width(review_label);
-            action_x = action_x.saturating_sub(review_width);
+            let validate_width = button_width(validate_label);
+            action_x = action_x.saturating_sub(validate_width);
             workspace_buttons.push(ButtonElement {
                 base: ButtonBase::new_fit_width(
-                    review_label,
+                    validate_label,
                     [action_x, bar_y],
                     &PALETTE_BUTTON_TOOLBAR,
                 ),
@@ -484,8 +484,9 @@ impl Interface {
             if button.base.test(pos) {
                 let enabled = match button.id {
                     ButtonId::WorkspaceStates => ictx.states_available,
-                    ButtonId::WorkspaceReviewChanges => ictx.state_actions.state_view,
-                    ButtonId::WorkspaceApplyToMod => ictx.state_actions.state_view,
+                    ButtonId::WorkspaceReviewChanges | ButtonId::WorkspaceApplyToMod => {
+                        ictx.state_actions.project_loaded
+                    }
                     _ => true,
                 };
                 return if enabled {
@@ -664,14 +665,72 @@ impl Interface {
             );
             let enabled = match button.id {
                 ButtonId::WorkspaceStates => ictx.states_available,
-                ButtonId::WorkspaceReviewChanges => ictx.state_actions.state_view,
-                ButtonId::WorkspaceApplyToMod => ictx.state_actions.state_view,
+                ButtonId::WorkspaceReviewChanges | ButtonId::WorkspaceApplyToMod => {
+                    ictx.state_actions.project_loaded
+                }
                 _ => true,
             };
             button.draw(ctx, pos, active, enabled, glyph_cache, gl);
         }
         for dropdown in &self.workspace_dropdowns {
             self.draw_toolbar_button(dropdown, ctx, ictx, pos, glyph_cache, gl);
+        }
+        let status_left = self
+            .workspace_dropdowns
+            .iter()
+            .map(|button| button.base.plate())
+            .chain(
+                self.workspace_buttons
+                    .iter()
+                    .filter(|button| {
+                        !matches!(
+                            button.id,
+                            ButtonId::WorkspaceReviewChanges | ButtonId::WorkspaceApplyToMod
+                        )
+                    })
+                    .map(|button| button.base.plate()),
+            )
+            .map(|plate| plate.pos[0] + plate.size[0])
+            .fold(0.0, f64::max)
+            + 8.0;
+        let status_right = self
+            .workspace_buttons
+            .iter()
+            .filter(|button| {
+                matches!(
+                    button.id,
+                    ButtonId::WorkspaceReviewChanges | ButtonId::WorkspaceApplyToMod
+                )
+            })
+            .map(|button| button.base.plate().pos[0])
+            .fold(self.viewport.window_size[0], f64::min)
+            - 8.0;
+        let full_status = workspace_status_text(ictx.province_modified, ictx.pending_states, false);
+        let compact_status = workspace_status_text(ictx.province_modified, ictx.pending_states, true);
+        let available = (status_right - status_left).max(0.0);
+        let status = if font::get_width_metric_str(&full_status) <= available {
+            Some(full_status)
+        } else if font::get_width_metric_str(&compact_status) <= available {
+            Some(compact_status)
+        } else {
+            None
+        };
+        if let Some(status) = status {
+            let y = self
+                .workspace_buttons
+                .first()
+                .map_or(0.0, |button| button.base.plate().pos[1])
+                + PADDING[1]
+                + font::get_v_metrics().ascent;
+            graphics::text(
+                colors::WHITE_T,
+                FONT_SIZE,
+                &status,
+                glyph_cache,
+                ctx.transform.trans(status_left, y),
+                gl,
+            )
+            .expect("unable to draw workspace status");
         }
         for toolbar_button in &self.toolbar_buttons {
             self.draw_toolbar_button(toolbar_button, ctx, ictx, pos, glyph_cache, gl);
@@ -909,14 +968,10 @@ impl ButtonElement {
                 );
             }
             WorkspaceReviewChanges => {
-                return Some(
-                    "Review State Changes\nInspect the current lossless patch preview before applying it.",
-                );
+                return Some("Validate Project\nCheck the loaded HOI4 mod project.");
             }
             WorkspaceApplyToMod => {
-                return Some(
-                    "Apply State Changes\nValidate, back up and apply state history changes.",
-                );
+                return Some("Save Project\nValidate, back up and save project changes.");
             }
             _ => {}
         }
@@ -1458,6 +1513,23 @@ fn fit_toolbar_label(label: &str, max_width: f64) -> String {
     "…".to_owned()
 }
 
+fn workspace_status_text(province_modified: bool, pending_states: usize, compact: bool) -> String {
+    if !province_modified && pending_states == 0 {
+        return "No unsaved changes".to_owned();
+    }
+    if compact {
+        format!(
+            "Map: {} | States: {pending_states}",
+            if province_modified { "Modified" } else { "Saved" }
+        )
+    } else {
+        format!(
+            "Province Map: {} | States: {pending_states} pending changes",
+            if province_modified { "Modified" } else { "Saved" }
+        )
+    }
+}
+
 fn draw_chevron(ctx: Context, plate: &PlateComponent, open: bool, gl: &mut GlGraphics) {
     let center = [
         plate.pos[0] + plate.size[0] - 11.0,
@@ -1664,7 +1736,6 @@ fn button_visible(id: ButtonId, ictx: InterfaceDrawContext) -> bool {
             | ToolbarPatchRegenerate
             | ToolbarPatchPreviousFile
             | ToolbarPatchNextFile
-            | ToolbarPatchValidate
             | ToolbarPatchValidateReview
             | ToolbarPatchCancelValidation
             | ToolbarPatchViewValidationReport
@@ -1771,7 +1842,7 @@ impl StateActionAvailability {
         use ButtonId::*;
         match id {
             ToolbarFileProjectSettings => self.project_loaded,
-            WorkspaceReviewChanges | WorkspaceApplyToMod => self.state_view,
+            WorkspaceReviewChanges | WorkspaceApplyToMod => self.project_loaded,
             ToolbarEditUndo => self.can_undo,
             ToolbarEditRedo => self.can_redo,
             ToolbarEditNewState => {
@@ -1818,14 +1889,7 @@ impl StateActionAvailability {
             ToolbarPatchPreviousFile | ToolbarPatchNextFile => {
                 self.state_view && self.patch_preview_files > 1
             }
-            ToolbarPatchValidate => {
-                self.state_view
-                    && self.has_patch_preview
-                    && !self.patch_preview_stale
-                    && !self.patch_preview_blocked
-                    && !self.patch_preview_review_required
-                    && !self.validation_running
-            }
+            ToolbarPatchValidate => self.project_loaded && !self.validation_running,
             ToolbarPatchValidateReview => {
                 self.state_view
                     && self.has_patch_preview
@@ -1842,6 +1906,9 @@ impl StateActionAvailability {
             ToolbarPatchCancelSave => self.save_running && self.save_cancellable,
             ToolbarPatchViewSaveReport => self.has_save_report && !self.save_running,
             ToolbarPatchRecoverSave => self.recovery_required && !self.save_running,
+            ToolbarViewChooseBaseGameDefinitions | ToolbarViewClearBaseGameDefinitions => {
+                self.project_loaded
+            }
             ToolbarPatchClear => self.has_patch_preview,
             ToolbarViewStateMap | ToolbarViewPoliticalMap => self.state_view,
             _ => true,
@@ -1925,11 +1992,6 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 "Project Settings...",
                 "",
                 ButtonId::ToolbarFileProjectSettings,
-            ),
-            (
-                "Review Project Changes",
-                "",
-                ButtonId::WorkspaceReviewChanges,
             ),
             (
                 "Save Project",
@@ -2029,241 +2091,9 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
         "Tools",
         &[
             (
-                "Lasso Options: Pixel Snap",
-                "",
-                ButtonId::ToolbarEditToggleLassoSnap,
-            ),
-            (
-                "Lasso Options: Replace Selection",
-                "",
-                ButtonId::ToolbarEditStateLassoReplace,
-            ),
-            (
-                "Lasso Options: Add to Selection",
-                "",
-                ButtonId::ToolbarEditStateLassoAdd,
-            ),
-            (
-                "Lasso Options: Remove from Selection",
-                "",
-                ButtonId::ToolbarEditStateLassoRemove,
-            ),
-            (
-                "Lasso Options: Include Centroid",
-                "",
-                ButtonId::ToolbarEditStateLassoCentroid,
-            ),
-            (
-                "Lasso Options: Include Any Intersection",
-                "",
-                ButtonId::ToolbarEditStateLassoAnyIntersection,
-            ),
-            (
-                "Lasso Options: Include Majority",
-                "",
-                ButtonId::ToolbarEditStateLassoMajority,
-            ),
-            (
-                "Lasso: Confirm Selection",
-                "Enter",
-                ButtonId::ToolbarEditConfirmStateLasso,
-            ),
-            (
-                "Lasso: Cancel",
-                "Esc",
-                ButtonId::ToolbarEditCancelStateLasso,
-            ),
-            (
-                "Brush Options: Next Mask Mode",
-                "Shift+M",
-                ButtonId::ToolbarEditNextMaskMode,
-            ),
-            (
-                "Brush Mode: Assign to Target",
-                "",
-                ButtonId::ToolbarEditActivateStateBrushAssign,
-            ),
-            (
-                "Brush Mode: Unassign",
-                "",
-                ButtonId::ToolbarEditActivateStateBrushUnassign,
-            ),
-            (
-                "Brush: Cancel",
-                "Esc",
-                ButtonId::ToolbarEditCancelStateBrush,
-            ),
-            (
-                "Fill Mode: Hovered Province",
-                "",
-                ButtonId::ToolbarEditActivateStateFillHovered,
-            ),
-            (
-                "Fill Mode: Connected Same State",
-                "",
-                ButtonId::ToolbarEditActivateStateFillConnectedState,
-            ),
-            (
-                "Fill Mode: Connected Unassigned",
-                "",
-                ButtonId::ToolbarEditActivateStateFillConnectedUnassigned,
-            ),
-            (
-                "Fill Mode: Whole Source State",
-                "",
-                ButtonId::ToolbarEditActivateStateFillWholeState,
-            ),
-            (
-                "Fill: Apply Preview",
-                "Enter",
-                ButtonId::ToolbarEditConfirmStateFill,
-            ),
-            (
-                "Fill: Cancel",
-                "Esc",
-                ButtonId::ToolbarEditCancelStateFill,
-            ),
-            (
-                "Preview / Generate",
-                "",
-                ButtonId::ToolbarPatchGenerate,
-            ),
-            (
-                "Preview / Regenerate",
-                "",
-                ButtonId::ToolbarPatchRegenerate,
-            ),
-            (
-                "Preview / Previous File",
-                "",
-                ButtonId::ToolbarPatchPreviousFile,
-            ),
-            (
-                "Preview / Next File",
-                "",
-                ButtonId::ToolbarPatchNextFile,
-            ),
-            (
                 "Validate Project",
                 "",
                 ButtonId::ToolbarPatchValidate,
-            ),
-            (
-                "Validation / Review-Required",
-                "",
-                ButtonId::ToolbarPatchValidateReview,
-            ),
-            (
-                "Validation / Cancel",
-                "",
-                ButtonId::ToolbarPatchCancelValidation,
-            ),
-            (
-                "Validation / View Report",
-                "",
-                ButtonId::ToolbarPatchViewValidationReport,
-            ),
-            (
-                "Validation / Clear Result",
-                "",
-                ButtonId::ToolbarPatchClearValidation,
-            ),
-            (
-                "Save / Cancel",
-                "",
-                ButtonId::ToolbarPatchCancelSave,
-            ),
-            (
-                "Save / View Report",
-                "",
-                ButtonId::ToolbarPatchViewSaveReport,
-            ),
-            (
-                "Save / Recover Interrupted",
-                "",
-                ButtonId::ToolbarPatchRecoverSave,
-            ),
-            (
-                "Preview / Clear",
-                "",
-                ButtonId::ToolbarPatchClear,
-            ),
-        ],
-    ),
-    (
-        "View",
-        &[
-            ("Map View: Province Colors", "1", ButtonId::ToolbarViewMode1),
-            ("Map View: Province Types", "2", ButtonId::ToolbarViewMode2),
-            ("Map View: Terrain / Biome", "3", ButtonId::ToolbarViewMode3),
-            ("Map View: Continents", "4", ButtonId::ToolbarViewMode4),
-            ("Map View: Coastal Provinces", "5", ButtonId::ToolbarViewMode5),
-            ("Map View: States", "6", ButtonId::ToolbarViewStateMap),
-            ("Map View: Political", "7", ButtonId::ToolbarViewPoliticalMap),
-            (
-                "Overlays: Rivers",
-                "",
-                ButtonId::ToolbarViewToggleRiverOverlay,
-            ),
-            (
-                "Overlays: Adjacencies",
-                "",
-                ButtonId::ToolbarViewToggleAdjacencies,
-            ),
-            (
-                "Overlays: Province IDs",
-                "9",
-                ButtonId::ToolbarViewToggleProvinceIds,
-            ),
-            (
-                "Overlays: Province Borders",
-                "",
-                ButtonId::ToolbarViewToggleProvinceBoundaries,
-            ),
-            (
-                "Overlays: State Borders",
-                "",
-                ButtonId::ToolbarViewToggleStateBoundaries,
-            ),
-            (
-                "Overlays: Image Overlay...",
-                "",
-                ButtonId::ToolbarViewToggleImageOverlay,
-            ),
-            (
-                "Overlays: Configure Image...",
-                "",
-                ButtonId::ToolbarImageChoose,
-            ),
-            (
-                "Overlays: Use Project Heightmap",
-                "",
-                ButtonId::ToolbarImageUseProjectHeightmap,
-            ),
-            (
-                "Overlays: Opacity -10%",
-                "",
-                ButtonId::ToolbarImageOpacityDown,
-            ),
-            (
-                "Overlays: Opacity +10%",
-                "",
-                ButtonId::ToolbarImageOpacityUp,
-            ),
-            (
-                "Overlays: Clear Image",
-                "",
-                ButtonId::ToolbarImageClear,
-            ),
-            (
-                "Panels: State Inspector",
-                "",
-                ButtonId::ToolbarViewToggleStateInspector,
-            ),
-            (
-                "Panels: Developer Diagnostics",
-                "F3",
-                ButtonId::ToolbarViewCycleDeveloperDiagnostics,
             ),
             (
                 "Definitions: Choose Base Game...",
@@ -2274,6 +2104,42 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 "Definitions: Clear Base Game",
                 "",
                 ButtonId::ToolbarViewClearBaseGameDefinitions,
+            ),
+            (
+                "Save / Recover Interrupted",
+                "",
+                ButtonId::ToolbarPatchRecoverSave,
+            ),
+        ],
+    ),
+    (
+        "View",
+        &[
+            ("Province Colors", "1", ButtonId::ToolbarViewMode1),
+            ("Province Types", "2", ButtonId::ToolbarViewMode2),
+            ("Terrain / Biome", "3", ButtonId::ToolbarViewMode3),
+            ("Continents", "4", ButtonId::ToolbarViewMode4),
+            ("Coastal Provinces", "5", ButtonId::ToolbarViewMode5),
+            ("States", "6", ButtonId::ToolbarViewStateMap),
+            ("Political", "7", ButtonId::ToolbarViewPoliticalMap),
+            ("Rivers", "", ButtonId::ToolbarViewToggleRiverOverlay),
+            ("Adjacencies", "", ButtonId::ToolbarViewToggleAdjacencies),
+            ("Province IDs", "9", ButtonId::ToolbarViewToggleProvinceIds),
+            (
+                "Province Borders",
+                "",
+                ButtonId::ToolbarViewToggleProvinceBoundaries,
+            ),
+            (
+                "State Borders",
+                "",
+                ButtonId::ToolbarViewToggleStateBoundaries,
+            ),
+            ("Image Overlay", "", ButtonId::ToolbarViewToggleImageOverlay),
+            (
+                "Panels: State Inspector",
+                "",
+                ButtonId::ToolbarViewToggleStateInspector,
             ),
             ("Reset Zoom", "H", ButtonId::ToolbarViewResetZoom),
         ],
@@ -2459,6 +2325,8 @@ mod tests {
                 ..Default::default()
             },
             blocks_tooltips: false,
+            province_modified: false,
+            pending_states: 0,
         }
     }
 
@@ -2522,6 +2390,74 @@ mod tests {
             *label,
             "State Lasso" | "State Brush" | "State Fill" | "Patch Preview" | "Map View"
         )));
+    }
+
+    #[test]
+    fn public_menus_expose_only_project_safe_commands() {
+        let file = menu_entries("File");
+        assert!(!file.iter().any(|(label, _, _)| {
+            *label == "Review Project Changes" || *label == "Review State Changes"
+        }));
+
+        assert_eq!(
+            menu_entries("Tools")
+                .iter()
+                .map(|(_, _, id)| *id)
+                .collect::<Vec<_>>(),
+            vec![
+                ButtonId::ToolbarPatchValidate,
+                ButtonId::ToolbarViewChooseBaseGameDefinitions,
+                ButtonId::ToolbarViewClearBaseGameDefinitions,
+                ButtonId::ToolbarPatchRecoverSave,
+            ]
+        );
+
+        let view = menu_entries("View");
+        assert!(!view.iter().any(|(_, _, id)| matches!(
+            id,
+            ButtonId::ToolbarImageChoose
+                | ButtonId::ToolbarImageUseProjectHeightmap
+                | ButtonId::ToolbarImageOpacityDown
+                | ButtonId::ToolbarImageOpacityUp
+                | ButtonId::ToolbarImageClear
+                | ButtonId::ToolbarViewCycleDeveloperDiagnostics
+        )));
+    }
+
+    #[test]
+    fn project_actions_are_available_in_both_workspaces_and_recovery_only_when_needed() {
+        for state_view in [false, true] {
+            let actions = StateActionAvailability {
+                state_view,
+                project_loaded: true,
+                ..Default::default()
+            };
+            assert!(actions.button_enabled(ButtonId::WorkspaceReviewChanges));
+            assert!(actions.button_enabled(ButtonId::WorkspaceApplyToMod));
+            assert!(actions.button_enabled(ButtonId::ToolbarPatchValidate));
+        }
+
+        assert!(!StateActionAvailability {
+            project_loaded: true,
+            ..Default::default()
+        }
+        .button_enabled(ButtonId::ToolbarPatchRecoverSave));
+        assert!(StateActionAvailability {
+            project_loaded: true,
+            recovery_required: true,
+            ..Default::default()
+        }
+        .button_enabled(ButtonId::ToolbarPatchRecoverSave));
+    }
+
+    #[test]
+    fn workspace_status_keeps_both_dirty_domains_visible() {
+        assert_eq!(workspace_status_text(false, 0, false), "No unsaved changes");
+        assert_eq!(
+            workspace_status_text(true, 4, false),
+            "Province Map: Modified | States: 4 pending changes"
+        );
+        assert_eq!(workspace_status_text(false, 2, true), "Map: Saved | States: 2");
     }
 
     #[test]
@@ -2636,7 +2572,7 @@ mod tests {
         assert!(!label.ends_with('v'));
         assert!(!label.contains('▾'));
         assert!(wrap_tooltip(
-            "Review State Changes\nInspect the current lossless patch preview before applying it.",
+            "Validate Project\nCheck the loaded HOI4 mod project.",
             180.0
         )
         .len()
@@ -2663,6 +2599,9 @@ mod tests {
                 && *id == ButtonId::ToolbarFileSaveAsArchive
         }));
         assert!(!file.iter().any(|(label, _, _)| *label == "Save As..."));
+        assert!(!file
+            .iter()
+            .any(|(label, _, _)| *label == "Review Project Changes"));
     }
 
     #[test]
@@ -2690,6 +2629,14 @@ mod tests {
             ..Default::default()
         }
         .button_enabled(ButtonId::ToolbarFileProjectSettings));
+    }
+
+    fn menu_entries(label: &str) -> &'static [(&'static str, &'static str, ButtonId)] {
+        TOOLBAR_PRIMITIVE
+            .iter()
+            .find(|(actual, _)| *actual == label)
+            .map(|(_, entries)| *entries)
+            .unwrap()
     }
 }
 

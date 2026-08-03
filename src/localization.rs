@@ -347,6 +347,49 @@ mod tests {
         assert!(FR_FR.values().any(|value| value.chars().count() > 60));
     }
 
+    #[test]
+    fn project_validation_modal_keys_exist_in_every_catalog() {
+        let keys = [
+            "baseline_diagnostics",
+            "candidate_diagnostics",
+            "diagnostic_delta",
+            "new",
+            "aggravated",
+            "unchanged",
+            "resolved",
+            "improved",
+            "pre_existing_issues",
+            "view_problems",
+            "continue_saving",
+            "blocked_new_errors",
+            "pending_changes",
+            "current_project",
+            "filter",
+            "source",
+            "domain",
+            "all",
+            "errors",
+            "warnings",
+            "information",
+            "go_to_province",
+            "go_to_state",
+            "open_source",
+            "copy_details",
+            "validate_again",
+            "close",
+            "semantic",
+            "indexes",
+            "bytes",
+            "unexpected_diagnostics",
+        ];
+        for (code, catalog) in catalogs() {
+            for key in keys {
+                let full_key = format!("project_validation.{key}");
+                assert!(catalog.contains_key(&full_key), "{code} missing {full_key}");
+            }
+        }
+    }
+
     fn catalogs() -> [(&'static str, &'static BTreeMap<String, &'static str>); 6] {
         [
             ("en-US", &EN_US),

@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::app::map::{Bundle, Color, ProvinceKind};
 use crate::app::state::TextSpan;
@@ -20,6 +20,7 @@ pub enum ProjectValidationDomain {
     Syntax,
     State,
     Province,
+    Definition,
     Resource,
     Building,
     CrossDomain,
@@ -58,6 +59,8 @@ pub struct ProjectValidationReport {
     pub target: ProjectValidationTarget,
     pub diagnostics: Vec<ProjectValidationDiagnostic>,
     pub summary: ProjectValidationSummary,
+    pub baseline_summary: Option<ProjectValidationSummary>,
+    pub delta: ProjectValidationDelta,
     pub information: usize,
     pub warnings: usize,
     pub errors: usize,
@@ -90,8 +93,202 @@ pub fn validate_project(
         total: summary.total,
         blocks_save: summary.blocks_save > 0,
         requires_warning_review: summary.warnings > 0,
+        baseline_summary: None,
+        delta: match target {
+            ProjectValidationTarget::CurrentProject => {
+                ProjectValidationDelta::from_unchanged_diagnostics(&diagnostics)
+            }
+            ProjectValidationTarget::PendingChanges => {
+                ProjectValidationDelta::from_new_diagnostics(&diagnostics)
+            }
+        },
         diagnostics,
         summary,
+    }
+}
+
+pub fn validate_project_against_baseline(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+    target: ProjectValidationTarget,
+    baseline: &ProjectValidationReport,
+    baseline_root: &Path,
+) -> ProjectValidationReport {
+    let mut report = validate_project(bundle, project, target);
+    report.baseline_summary = Some(baseline.summary.clone());
+    report.delta = ProjectValidationDelta::new(
+        &baseline.diagnostics,
+        &report.diagnostics,
+        baseline_root,
+        &project.paths.root,
+    );
+    report.blocks_save = report.delta.blocks_save();
+    report.requires_warning_review = report.delta.requires_warning_review();
+    report
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProjectValidationDelta {
+    pub new: Vec<ProjectValidationChange>,
+    pub aggravated: Vec<ProjectValidationChange>,
+    pub unchanged: Vec<ProjectValidationChange>,
+    pub resolved: Vec<ProjectValidationChange>,
+    pub improved: Vec<ProjectValidationChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectValidationChange {
+    pub before: Option<ProjectValidationDiagnostic>,
+    pub after: Option<ProjectValidationDiagnostic>,
+}
+
+impl ProjectValidationDelta {
+    pub fn new(
+        baseline: &[ProjectValidationDiagnostic],
+        candidate: &[ProjectValidationDiagnostic],
+        baseline_root: &Path,
+        candidate_root: &Path,
+    ) -> Self {
+        let mut before = grouped_by_identity(baseline, baseline_root);
+        let after = grouped_by_identity(candidate, candidate_root);
+        let mut delta = Self::default();
+        for (identity, mut after_values) in after {
+            let mut before_values = before.remove(&identity).unwrap_or_default();
+            while let Some(after) = after_values.pop() {
+                match before_values.pop() {
+                    Some(before) => {
+                        let change = ProjectValidationChange {
+                            before: Some(before.clone()),
+                            after: Some(after.clone()),
+                        };
+                        match severity_level(after.severity).cmp(&severity_level(before.severity)) {
+                            std::cmp::Ordering::Greater => delta.aggravated.push(change),
+                            std::cmp::Ordering::Less => delta.improved.push(change),
+                            std::cmp::Ordering::Equal => delta.unchanged.push(change),
+                        }
+                    }
+                    None => delta.new.push(ProjectValidationChange {
+                        before: None,
+                        after: Some(after),
+                    }),
+                }
+            }
+            for before in before_values {
+                delta.resolved.push(ProjectValidationChange {
+                    before: Some(before),
+                    after: None,
+                });
+            }
+        }
+        for before_values in before.into_values() {
+            for before in before_values {
+                delta.resolved.push(ProjectValidationChange {
+                    before: Some(before),
+                    after: None,
+                });
+            }
+        }
+        delta.sort();
+        delta
+    }
+
+    pub fn from_new_diagnostics(diagnostics: &[ProjectValidationDiagnostic]) -> Self {
+        let mut delta = Self {
+            new: diagnostics
+                .iter()
+                .cloned()
+                .map(|diagnostic| ProjectValidationChange {
+                    before: None,
+                    after: Some(diagnostic),
+                })
+                .collect(),
+            ..Self::default()
+        };
+        delta.sort();
+        delta
+    }
+
+    pub fn from_unchanged_diagnostics(diagnostics: &[ProjectValidationDiagnostic]) -> Self {
+        let mut delta = Self {
+            unchanged: diagnostics
+                .iter()
+                .cloned()
+                .map(|diagnostic| ProjectValidationChange {
+                    before: Some(diagnostic.clone()),
+                    after: Some(diagnostic),
+                })
+                .collect(),
+            ..Self::default()
+        };
+        delta.sort();
+        delta
+    }
+
+    pub fn new_errors(&self) -> usize {
+        self.new.iter().filter(|change| change.after_is_error()).count()
+    }
+
+    pub fn new_warnings(&self) -> usize {
+        self.new.iter().filter(|change| change.after_is_warning()).count()
+    }
+
+    pub fn aggravated_to_error(&self) -> usize {
+        self.aggravated
+            .iter()
+            .filter(|change| change.after_is_error())
+            .count()
+    }
+
+    pub fn blocks_save(&self) -> bool {
+        self.new_errors() != 0 || self.aggravated_to_error() != 0
+    }
+
+    pub fn requires_warning_review(&self) -> bool {
+        self.new_warnings() != 0
+            || self
+                .aggravated
+                .iter()
+                .any(|change| !change.after_is_error())
+    }
+
+    pub fn has_preexisting_errors(&self) -> bool {
+        self.unchanged.iter().any(|change| change.after_is_error())
+            || self.improved.iter().any(|change| {
+                change
+                    .before
+                    .as_ref()
+                    .is_some_and(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+            })
+    }
+
+    pub fn has_review_items(&self) -> bool {
+        self.requires_warning_review() || self.has_preexisting_errors()
+    }
+
+    fn sort(&mut self) {
+        for values in [
+            &mut self.new,
+            &mut self.aggravated,
+            &mut self.unchanged,
+            &mut self.resolved,
+            &mut self.improved,
+        ] {
+            values.sort_by_key(change_key);
+        }
+    }
+}
+
+impl ProjectValidationChange {
+    fn after_is_error(&self) -> bool {
+        self.after
+            .as_ref()
+            .is_some_and(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+    }
+
+    fn after_is_warning(&self) -> bool {
+        self.after
+            .as_ref()
+            .is_some_and(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning)
     }
 }
 
@@ -146,7 +343,8 @@ impl ProjectValidationDomain {
     fn from_project(domain: DiagnosticDomain) -> Self {
         match domain {
             DiagnosticDomain::Project => Self::Project,
-            DiagnosticDomain::ProvinceMap | DiagnosticDomain::Definition => Self::Province,
+            DiagnosticDomain::ProvinceMap => Self::Province,
+            DiagnosticDomain::Definition => Self::Definition,
             DiagnosticDomain::States => Self::State,
             DiagnosticDomain::CrossDomain => Self::CrossDomain,
             DiagnosticDomain::Transaction => Self::Transaction,
@@ -389,7 +587,6 @@ fn summarize(diagnostics: &[ProjectValidationDiagnostic]) -> ProjectValidationSu
 
 fn same_identity(left: &ProjectValidationDiagnostic, right: &ProjectValidationDiagnostic) -> bool {
     left.kind == right.kind
-        && left.severity == right.severity
         && left.domain == right.domain
         && left.code == right.code
         && left.message_key == right.message_key
@@ -398,7 +595,83 @@ fn same_identity(left: &ProjectValidationDiagnostic, right: &ProjectValidationDi
         && left.span == right.span
         && left.province_id == right.province_id
         && left.state_id == right.state_id
-        && left.blocks_save == right.blocks_save
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DiagnosticIdentity {
+    kind: ProjectDiagnosticKind,
+    domain: ProjectValidationDomain,
+    code: String,
+    message_key: String,
+    path: Option<String>,
+    related_path: Option<String>,
+    span: Option<(usize, usize)>,
+    province_id: Option<u32>,
+    state_id: Option<u32>,
+}
+
+fn grouped_by_identity(
+    diagnostics: &[ProjectValidationDiagnostic],
+    root: &Path,
+) -> BTreeMap<DiagnosticIdentity, Vec<ProjectValidationDiagnostic>> {
+    let mut groups = BTreeMap::<DiagnosticIdentity, Vec<ProjectValidationDiagnostic>>::new();
+    for diagnostic in diagnostics {
+        groups
+            .entry(identity(diagnostic, root))
+            .or_default()
+            .push(diagnostic.clone());
+    }
+    for values in groups.values_mut() {
+        values.sort_by(cmp_stable);
+        values.reverse();
+    }
+    groups
+}
+
+fn identity(diagnostic: &ProjectValidationDiagnostic, root: &Path) -> DiagnosticIdentity {
+    DiagnosticIdentity {
+        kind: diagnostic.kind,
+        domain: diagnostic.domain,
+        code: diagnostic.code.clone(),
+        message_key: diagnostic.message_key.clone(),
+        path: diagnostic.path.as_ref().map(|path| normalized_path(root, path)),
+        related_path: diagnostic
+            .related_path
+            .as_ref()
+            .map(|path| normalized_path(root, path)),
+        span: span_key(diagnostic.span),
+        province_id: diagnostic.province_id,
+        state_id: diagnostic.state_id,
+    }
+}
+
+fn normalized_path(root: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+        .to_lowercase()
+}
+
+fn change_key(change: &ProjectValidationChange) -> DiagnosticIdentity {
+    if let Some(after) = &change.after {
+        identity(after, Path::new(""))
+    } else {
+        identity(change.before.as_ref().expect("change has before or after"), Path::new(""))
+    }
+}
+
+fn severity_level(severity: DiagnosticSeverity) -> u8 {
+    match severity {
+        DiagnosticSeverity::Info => 0,
+        DiagnosticSeverity::Warning => 1,
+        DiagnosticSeverity::Error => 2,
+    }
 }
 
 fn cmp_stable(
@@ -668,5 +941,162 @@ mod tests {
         assert_eq!(report.warnings, 1);
         assert_eq!(report.summary.blocks_save, 0);
         assert_eq!(report.diagnostics[0].path, Some(PathBuf::from("b.txt")));
+    }
+
+    #[test]
+    fn current_project_delta_marks_existing_diagnostics_unchanged() {
+        let temp = valid_fixture("current-delta");
+        let bundle = temp.bundle();
+        let project = project(&temp, vec![document("1.txt", state(1, &[]), Vec::new())]);
+
+        let report = validate_project(&bundle, &project, ProjectValidationTarget::CurrentProject);
+
+        assert_eq!(report.delta.unchanged.len(), 1);
+        assert_eq!(report.delta.new.len(), 0);
+        assert!(!report.delta.requires_warning_review());
+    }
+
+    #[test]
+    fn diagnostic_delta_ignores_message_order_severity_and_normalizes_paths() {
+        let source = Path::new(r"C:\mod");
+        let candidate = Path::new(r"C:\temp\candidate");
+        let before = validation_diagnostic(
+            ProjectDiagnosticKind::MissingOwner,
+            DiagnosticSeverity::Warning,
+            source.join("history/states/1-Test.txt"),
+            "missing owner",
+        );
+        let after = validation_diagnostic(
+            ProjectDiagnosticKind::MissingOwner,
+            DiagnosticSeverity::Error,
+            candidate.join("history/states/1-Test.txt"),
+            "proprietario ausente",
+        );
+
+        let delta = ProjectValidationDelta::new(&[before], &[after], source, candidate);
+
+        assert_eq!(delta.aggravated.len(), 1);
+        assert_eq!(delta.aggravated_to_error(), 1);
+        assert!(delta.blocks_save());
+        assert_eq!(delta.new_errors(), 0);
+        assert_eq!(delta.resolved.len(), 0);
+    }
+
+    #[test]
+    fn diagnostic_delta_classifies_bulk_unchanged_baseline_counts() {
+        let root = Path::new("root");
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for index in 0..14 {
+            let path = format!("history/states/{}-Error.txt", index + 1);
+            before.push(validation_diagnostic(
+                ProjectDiagnosticKind::MissingOwner,
+                DiagnosticSeverity::Error,
+                PathBuf::from(&path),
+                format!("error {index}"),
+            ));
+            after.push(validation_diagnostic(
+                ProjectDiagnosticKind::MissingOwner,
+                DiagnosticSeverity::Error,
+                PathBuf::from(path),
+                format!("localized error {index}"),
+            ));
+        }
+        for index in 0..128 {
+            let path = format!("history/states/{}-Warning.txt", index + 100);
+            before.push(validation_diagnostic(
+                ProjectDiagnosticKind::EmptyProvinces,
+                DiagnosticSeverity::Warning,
+                PathBuf::from(&path),
+                format!("warning {index}"),
+            ));
+            after.push(validation_diagnostic(
+                ProjectDiagnosticKind::EmptyProvinces,
+                DiagnosticSeverity::Warning,
+                PathBuf::from(path),
+                format!("localized warning {index}"),
+            ));
+        }
+
+        let delta = ProjectValidationDelta::new(&before, &after, root, root);
+
+        assert_eq!(delta.unchanged.len(), 142);
+        assert_eq!(delta.new.len(), 0);
+        assert_eq!(delta.new_warnings(), 0);
+        assert!(!delta.blocks_save());
+        assert!(!delta.requires_warning_review());
+        assert!(delta.has_preexisting_errors());
+        assert!(delta.has_review_items());
+    }
+
+    #[test]
+    fn diagnostic_delta_handles_severity_improvement_and_new_warning_review() {
+        let root = Path::new("root");
+        let before = vec![validation_diagnostic(
+            ProjectDiagnosticKind::MissingOwner,
+            DiagnosticSeverity::Error,
+            PathBuf::from("history/states/1-Test.txt"),
+            "missing owner",
+        )];
+        let after = vec![
+            validation_diagnostic(
+                ProjectDiagnosticKind::MissingOwner,
+                DiagnosticSeverity::Warning,
+                PathBuf::from("history/states/1-Test.txt"),
+                "missing owner",
+            ),
+            validation_diagnostic(
+                ProjectDiagnosticKind::EmptyProvinces,
+                DiagnosticSeverity::Warning,
+                PathBuf::from("history/states/2-Test.txt"),
+                "empty",
+            ),
+        ];
+
+        let delta = ProjectValidationDelta::new(&before, &after, root, root);
+
+        assert_eq!(delta.improved.len(), 1);
+        assert_eq!(delta.new_warnings(), 1);
+        assert!(!delta.blocks_save());
+        assert!(delta.requires_warning_review());
+    }
+
+    #[test]
+    fn diagnostic_delta_classifies_new_error_and_resolved_diagnostic() {
+        let root = Path::new("root");
+        let before = validation_diagnostic(
+            ProjectDiagnosticKind::EmptyProvinces,
+            DiagnosticSeverity::Warning,
+            PathBuf::from("history/states/1-Resolved.txt"),
+            "resolved",
+        );
+        let after = validation_diagnostic(
+            ProjectDiagnosticKind::MissingOwner,
+            DiagnosticSeverity::Error,
+            PathBuf::from("history/states/2-New.txt"),
+            "new error",
+        );
+
+        let delta = ProjectValidationDelta::new(&[before], &[after], root, root);
+
+        assert_eq!(delta.new.len(), 1);
+        assert_eq!(delta.resolved.len(), 1);
+        assert_eq!(delta.new_errors(), 1);
+        assert!(delta.blocks_save());
+    }
+
+    fn validation_diagnostic(
+        kind: ProjectDiagnosticKind,
+        severity: DiagnosticSeverity,
+        path: PathBuf,
+        message: impl Into<String>,
+    ) -> ProjectValidationDiagnostic {
+        ProjectValidationDiagnostic::from_project(&ProjectDiagnostic::new(
+            kind,
+            severity,
+            Some(path),
+            None,
+            message,
+        ))
     }
 }

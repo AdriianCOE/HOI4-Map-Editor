@@ -16,8 +16,9 @@ use crate::util::files::Location;
 use super::patch::apply_operations;
 use super::{
   DiagnosticSeverity, Hoi4Project, PatchSafety, ProjectDiagnosticKind, ProjectPatchPlan,
-  ProjectPaths, ProjectValidationReport, ProjectValidationTarget, SourceFingerprint,
-  StateEditSession, validate_project,
+  ProjectPaths, ProjectValidationChange, ProjectValidationDiagnostic, ProjectValidationReport,
+  ProjectValidationTarget, SourceFingerprint, StateEditSession, validate_project,
+  validate_project_against_baseline,
 };
 
 static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -891,16 +892,33 @@ impl RoundTripValidator {
     let started = Instant::now();
     report.diagnostics_comparison =
       compare_diagnostics(project, edit, plan, &candidate_project);
-    let project_validation = validate_project(
+    let source_bundle = gate!(Bundle::load(
+      &Location::Directory(project.paths.map_directory.clone()),
+      Config {
+        preserve_ids: true,
+        ..Config::default()
+      },
+    ).map_err(|err| Failure::new(
+      RoundTripStage::DiagnosticComparison,
+      Some(project.paths.map_directory.clone()),
+      None,
+      format!("The source map could not be validated for diagnostic comparison: {err}"),
+      "Reload the source project and run validation again.",
+    )));
+    let baseline_validation = validate_project(
+      &source_bundle,
+      project,
+      ProjectValidationTarget::CurrentProject,
+    );
+    let project_validation = validate_project_against_baseline(
       &candidate_bundle,
       &candidate_project,
       ProjectValidationTarget::PendingChanges,
+      &baseline_validation,
+      &project.paths.root,
     );
     report.timings.diagnostic_comparison_ms = started.elapsed().as_millis();
-    if report.diagnostics_comparison.unexpected_diagnostics != 0
-      || project_validation.blocks_save
-      || project_validation.errors != 0
-    {
+    if project_validation.delta.blocks_save() {
       report.status = RoundTripStatus::Failed;
       report.diagnostics.push(Failure::new(
         RoundTripStage::DiagnosticComparison,
@@ -922,7 +940,7 @@ impl RoundTripValidator {
 
     gate!(verify_source_unchanged(project, &snapshot));
     report.source_verification.source_unchanged_after_validation = true;
-    report.status = if plan_sets.has_review_required || project_validation.requires_warning_review {
+    report.status = if plan_sets.has_review_required || project_validation.delta.has_review_items() {
       RoundTripStatus::PassedWithReview
     } else {
       RoundTripStatus::Passed
@@ -952,6 +970,37 @@ fn combined_authorization_digest(
     bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
     bytes.extend_from_slice(value);
   }
+  fn append_diagnostic(bytes: &mut Vec<u8>, diagnostic: &ProjectValidationDiagnostic) {
+    append(bytes, diagnostic.code.as_bytes());
+    append(bytes, diagnostic.message_key.as_bytes());
+    append(
+      bytes,
+      diagnostic.path.as_ref()
+        .map(|path| path.to_string_lossy())
+        .unwrap_or_default()
+        .as_bytes(),
+    );
+    bytes.extend_from_slice(&diagnostic.province_id.unwrap_or_default().to_le_bytes());
+    bytes.extend_from_slice(&diagnostic.state_id.unwrap_or_default().to_le_bytes());
+    bytes.push(match diagnostic.severity {
+      DiagnosticSeverity::Info => 0,
+      DiagnosticSeverity::Warning => 1,
+      DiagnosticSeverity::Error => 2,
+    });
+  }
+  fn append_delta(bytes: &mut Vec<u8>, tag: u8, changes: &[ProjectValidationChange]) {
+    for change in changes {
+      bytes.push(tag);
+      bytes.push(u8::from(change.before.is_some()));
+      if let Some(before) = &change.before {
+        append_diagnostic(bytes, before);
+      }
+      bytes.push(u8::from(change.after.is_some()));
+      if let Some(after) = &change.after {
+        append_diagnostic(bytes, after);
+      }
+    }
+  }
 
   let round_trip_fingerprint = round_trip.content_fingerprint();
   let mut bytes = b"HOI4_STATE_EDITOR_COMBINED_ROUND_TRIP_V1".to_vec();
@@ -965,10 +1014,26 @@ fn combined_authorization_digest(
     bytes.extend_from_slice(&(project_validation.warnings as u64).to_le_bytes());
     bytes.push(u8::from(project_validation.blocks_save));
     bytes.push(u8::from(project_validation.requires_warning_review));
+    for count in [
+      project_validation.delta.new.len(),
+      project_validation.delta.aggravated.len(),
+      project_validation.delta.unchanged.len(),
+      project_validation.delta.resolved.len(),
+      project_validation.delta.improved.len(),
+      project_validation.delta.new_errors(),
+      project_validation.delta.new_warnings(),
+      project_validation.delta.aggravated_to_error(),
+    ] {
+      bytes.extend_from_slice(&(count as u64).to_le_bytes());
+    }
+    append_delta(&mut bytes, 0, &project_validation.delta.new);
+    append_delta(&mut bytes, 1, &project_validation.delta.aggravated);
+    append_delta(&mut bytes, 2, &project_validation.delta.unchanged);
+    append_delta(&mut bytes, 3, &project_validation.delta.resolved);
+    append_delta(&mut bytes, 4, &project_validation.delta.improved);
     for diagnostic in &project_validation.diagnostics {
       append(&mut bytes, diagnostic.code.as_bytes());
       append(&mut bytes, diagnostic.message_key.as_bytes());
-      append(&mut bytes, diagnostic.message.as_bytes());
       append(
         &mut bytes,
         diagnostic.path.as_ref()

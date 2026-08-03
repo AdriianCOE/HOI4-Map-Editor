@@ -40,6 +40,9 @@ uord = { git = "https://github.com/ScottyThePilot/uord" }
 vecmath = { version = "1.0" }
 zip = { version = "0.6" }
 
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
 [profile.dev]
 opt-level = 1
 debug = "full"

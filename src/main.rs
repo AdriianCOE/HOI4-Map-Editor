@@ -11,6 +11,7 @@ pub mod localization;
 
 use glutin_window::GlutinWindow;
 use glutin::dpi::{LogicalSize, PhysicalPosition};
+use glutin::window::Icon;
 use opengl_graphics::{GlGraphics, OpenGL};
 use piston::window::WindowSettings;
 
@@ -28,6 +29,7 @@ pub const PRODUCT_NAME: &str = "HOI4 Map Editor";
 pub const PRODUCT_SUBTITLE: &str = "Province and State Editing Toolkit";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const APPNAME: &str = concat!("HOI4 Map Editor v", env!("CARGO_PKG_VERSION"));
+const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app-icon-256.png");
 
 fn main() {
   install_handler();
@@ -47,6 +49,8 @@ fn main() {
   let mut window: GlutinWindow = WindowSettings::new(APPNAME, screen)
     .graphics_api(opengl).resizable(true).vsync(true)
     .build().expect("unable to initialize window");
+  let icon = application_icon().expect("assets/app-icon-256.png must decode as a window icon");
+  window.ctx.window().set_window_icon(Some(icon));
   if let (Some(x), Some(y)) = (global_config.window.x, global_config.window.y) {
     let visible = window.ctx.window().available_monitors().any(|monitor| {
       let position = monitor.position();
@@ -65,6 +69,15 @@ fn main() {
   window.ctx.window().set_min_inner_size(Some(screen_min));
   let mut gl = GlGraphics::new(opengl);
   launch::<App>(&mut window, &mut gl);
+}
+
+fn application_icon() -> Result<Icon, String> {
+  let image = image::load_from_memory(APP_ICON_PNG)
+    .map_err(|err| format!("decode assets/app-icon-256.png: {err}"))?
+    .into_rgba8();
+  let (width, height) = image.dimensions();
+  Icon::from_rgba(image.into_raw(), width, height)
+    .map_err(|err| format!("create window icon from assets/app-icon-256.png: {err}"))
 }
 
 fn root_dir() -> io::Result<PathBuf> {
@@ -157,7 +170,16 @@ fn install_handler() {
 
 #[cfg(test)]
 mod branding_tests {
-  use super::{APPNAME, APP_VERSION, PRODUCT_NAME, diagnostic_summary, log_directory};
+  use super::{APP_ICON_PNG, APPNAME, APP_VERSION, PRODUCT_NAME, diagnostic_summary, log_directory};
+
+  #[test]
+  fn embedded_application_icon_is_valid_png() {
+    let icon = image::load_from_memory(APP_ICON_PNG)
+      .expect("assets/app-icon-256.png should be a valid embedded PNG")
+      .into_rgba8();
+    assert_eq!(icon.dimensions(), (256, 256));
+    assert_eq!(icon.as_raw().len(), 256 * 256 * 4);
+  }
 
   #[test]
   fn public_window_title_uses_map_editor_branding_without_version_bump() {

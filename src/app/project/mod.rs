@@ -63,8 +63,9 @@ pub use validation::{
     TemporaryProjectManifest, TemporaryWorkspaceSummary, resolve_candidate_path,
 };
 pub use validation_core::{
-    ProjectValidationDiagnostic, ProjectValidationDomain, ProjectValidationReport,
-    ProjectValidationSummary, ProjectValidationTarget, validate_project,
+    ProjectValidationChange, ProjectValidationDelta, ProjectValidationDiagnostic,
+    ProjectValidationDomain, ProjectValidationReport, ProjectValidationSummary,
+    ProjectValidationTarget, validate_project, validate_project_against_baseline,
 };
 pub use view::{
     AMBIGUOUS_PROVINCE_COLOR, MapViewMode, SELECTED_STATE_COLOR, STATE_BOUNDARY_COLOR,

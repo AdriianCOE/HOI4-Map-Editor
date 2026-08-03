@@ -537,9 +537,14 @@ pub fn authorize_project_save_plan(
     {
         return Err("The combined validation does not authorize this project save plan.".to_owned());
     }
+    let needs_explicit_review = patch_plan.summary.review_required_files != 0
+        || report
+            .project_validation
+            .as_ref()
+            .is_some_and(|validation| validation.delta.requires_warning_review());
     match report.round_trip.status {
         RoundTripStatus::Passed => {}
-        RoundTripStatus::PassedWithReview if allow_review_required => {}
+        RoundTripStatus::PassedWithReview if allow_review_required || !needs_explicit_review => {}
         RoundTripStatus::PassedWithReview => {
             return Err("Project warnings require explicit review before saving.".to_owned());
         }
@@ -547,9 +552,11 @@ pub fn authorize_project_save_plan(
             return Err("Project validation did not pass.".to_owned());
         }
     }
-    if report.project_validation.as_ref().is_some_and(|validation| {
-        validation.blocks_save || validation.errors != 0
-    }) {
+    if report
+        .project_validation
+        .as_ref()
+        .is_some_and(|validation| validation.delta.blocks_save())
+    {
         return Err("Project validation contains blocking errors.".to_owned());
     }
     Ok(StateSaveAuthorization {
@@ -2971,6 +2978,40 @@ mod tests {
     }
 
     #[test]
+    fn combined_project_save_authorizes_unchanged_baseline_errors_without_warning_approval() {
+        let (root, project, mut edit) = test_project_with_definition(
+            "combined-existing-error",
+            "0;0;0;0;land;false;unknown;0\n1;1;2;3;land;false;unknown;1\n",
+        );
+        change_manpower(&project, &mut edit, 2);
+        let state_plan = plan_state_patches(&project, &edit);
+        let validation = RoundTripValidator::default().validate_combined(
+            &project,
+            &edit,
+            &state_plan,
+            None,
+            |_| Ok(()),
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        assert_eq!(
+            validation.round_trip.status,
+            RoundTripStatus::PassedWithReview,
+            "{}",
+            validation.round_trip.full_text()
+        );
+        let project_validation = validation.project_validation.as_ref().unwrap();
+        assert!(!project_validation.delta.unchanged.is_empty());
+        assert!(project_validation.delta.has_preexisting_errors());
+        assert!(!project_validation.delta.blocks_save());
+        assert!(!project_validation.delta.requires_warning_review());
+        let plan = ProjectSavePlan::new(&project, edit.revision(), None, Some(&state_plan)).unwrap();
+
+        assert!(authorize_project_save_plan(&plan, &validation, false).is_ok());
+        cleanup(&root);
+    }
+
+    #[test]
     fn net_zero_plan_creates_no_save_metadata() {
         let (root, project, edit) = test_project("net-zero");
         let plan = plan_state_patches(&project, &edit);
@@ -3799,6 +3840,16 @@ mod tests {
     }
 
     fn test_project(name: &str) -> (PathBuf, Hoi4Project, StateEditSession) {
+        test_project_with_definition(
+            name,
+            "0;0;0;0;land;false;unknown;0\n1;1;2;3;land;false;plains;1\n",
+        )
+    }
+
+    fn test_project_with_definition(
+        name: &str,
+        definition: &str,
+    ) -> (PathBuf, Hoi4Project, StateEditSession) {
         let root = std::env::temp_dir().join(format!(
             "phase4c-{name}-{}-{}",
             std::process::id(),
@@ -3811,11 +3862,7 @@ mod tests {
         let mut bmp = Vec::new();
         write_rgb_bmp_image(&mut bmp, &image).unwrap();
         fs::write(root.join("map/provinces.bmp"), bmp).unwrap();
-        fs::write(
-            root.join("map/definition.csv"),
-            "0;0;0;0;land;false;unknown;0\n1;1;2;3;land;false;plains;1\n",
-        )
-        .unwrap();
+        fs::write(root.join("map/definition.csv"), definition).unwrap();
         fs::write(
             root.join("history/states/1-Test.txt"),
             "state={id=1 state_category=rural provinces={1} manpower=1 history={owner=TAG}}",

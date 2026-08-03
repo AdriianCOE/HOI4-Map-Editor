@@ -464,6 +464,7 @@ impl EventHandler for App {
             (Some(canvas), true, Key::D9) => {
                 canvas.cycle_province_label_mode(&mut self.alerts);
             }
+            #[cfg(any(debug_assertions, feature = "debug-mode"))]
             (Some(canvas), true, Key::F3) => {
                 canvas.cycle_developer_diagnostics(&mut self.alerts);
             }
@@ -509,8 +510,17 @@ impl EventHandler for App {
             };
             match action {
                 StateApplyDialogAction::ConfirmSave => self.action_save_map(),
+                StateApplyDialogAction::ConfirmProjectSave => {
+                    if let Some(canvas) = self.canvas.as_mut() {
+                        canvas.start_project_save(true, &mut self.alerts);
+                    }
+                }
                 StateApplyDialogAction::OpenSource(path) => {
                     let result = open_source_with(&path, |path| open_file_default(path));
+                    self.handle_result_none(result);
+                }
+                StateApplyDialogAction::CopyDetails(text) => {
+                    let result = copy_text_to_clipboard(&text);
                     self.handle_result_none(result);
                 }
                 StateApplyDialogAction::None => {}
@@ -606,6 +616,9 @@ impl EventHandler for App {
             return;
         };
 
+        if canvas.validation_results_scroll(y) {
+            return;
+        }
         if !canvas.inspector_scroll(interface, cursor_pos, y)
             && mods.shift
             && !canvas.state_lasso_is_active()
@@ -1140,24 +1153,29 @@ impl App {
 
     fn get_interface_draw_context(&self) -> InterfaceDrawContext {
         match &self.canvas {
-            Some(canvas) => InterfaceDrawContext {
-                map_view_mode: Some(canvas.map_view_mode()),
-                view_mode: (!canvas.is_state_workspace()).then_some(canvas.view_mode()),
-                selected_tool: (!canvas.is_state_workspace()).then_some(
-                    match &canvas.tool.mode {
-                        ToolMode::PaintArea => 0,
-                        ToolMode::PaintBucket => 1,
-                        ToolMode::Lasso(_) => 2,
-                    },
-                ),
-                state_tool: canvas
-                    .is_state_workspace()
-                    .then_some(canvas.state_toolbar_tool()),
-                enabled_options: canvas.enabled_options(),
-                available_options: canvas.available_options(),
-                states_available: canvas.has_state_workspace(),
-                state_actions: canvas.state_action_availability(),
-                blocks_tooltips: canvas.blocks_interface_tooltips(),
+            Some(canvas) => {
+                let (province_modified, pending_states) = canvas.workspace_dirty_summary();
+                InterfaceDrawContext {
+                    map_view_mode: Some(canvas.map_view_mode()),
+                    view_mode: (!canvas.is_state_workspace()).then_some(canvas.view_mode()),
+                    selected_tool: (!canvas.is_state_workspace()).then_some(
+                        match &canvas.tool.mode {
+                            ToolMode::PaintArea => 0,
+                            ToolMode::PaintBucket => 1,
+                            ToolMode::Lasso(_) => 2,
+                        },
+                    ),
+                    state_tool: canvas
+                        .is_state_workspace()
+                        .then_some(canvas.state_toolbar_tool()),
+                    enabled_options: canvas.enabled_options(),
+                    available_options: canvas.available_options(),
+                    states_available: canvas.has_state_workspace(),
+                    state_actions: canvas.state_action_availability(),
+                    blocks_tooltips: canvas.blocks_interface_tooltips(),
+                    province_modified,
+                    pending_states,
+                }
             },
             None => InterfaceDrawContext {
                 map_view_mode: None,
@@ -1169,6 +1187,8 @@ impl App {
                 states_available: false,
                 state_actions: StateActionAvailability::default(),
                 blocks_tooltips: false,
+                province_modified: false,
+                pending_states: 0,
             },
         }
     }
@@ -1202,18 +1222,12 @@ impl App {
             }
             WorkspaceReviewChanges => {
                 if let Some(canvas) = self.canvas.as_mut() {
-                    canvas.open_patch_review(&mut self.alerts);
+                    canvas.validate_project_for_ui(&mut self.alerts);
                 }
                 return;
             }
             WorkspaceApplyToMod => {
-                let ready = self
-                    .canvas
-                    .as_mut()
-                    .is_some_and(|canvas| canvas.prepare_state_apply(&mut self.alerts));
-                if ready {
-                    self.action_save_map();
-                }
+                self.action_save_map();
                 return;
             }
             _ => {}
@@ -1811,14 +1825,7 @@ impl App {
                 .expect("loaded project has a canvas")
                 .prepare_project_save();
             match confirmation {
-                Ok(message) if msg_dialog_confirm_state_save(&message) => {
-                    if let Some(canvas) = self.canvas.as_mut() {
-                        canvas.start_project_save(true, &mut self.alerts);
-                    }
-                }
-                Ok(_) => self
-                    .alerts
-                    .push(Ok("Save Project cancelled before it started")),
+                Ok(message) => println!("{message}"),
                 Err(message) if message == "No changes to save." => {
                     self.alerts.push(Ok(message));
                 }
@@ -2244,6 +2251,8 @@ pub struct InterfaceDrawContext {
     pub states_available: bool,
     pub state_actions: StateActionAvailability,
     pub blocks_tooltips: bool,
+    pub province_modified: bool,
+    pub pending_states: usize,
 }
 
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
@@ -2416,18 +2425,6 @@ mod workspace_shortcut_tests {
 }
 
 fn msg_dialog_confirm_state_batch(description: &str) -> bool {
-    matches!(
-        MessageDialog::new()
-            .set_title(crate::APPNAME)
-            .set_description(description)
-            .set_level(MessageLevel::Warning)
-            .set_buttons(MessageButtons::YesNo)
-            .show(),
-        MessageDialogResult::Yes
-    )
-}
-
-fn msg_dialog_confirm_state_save(description: &str) -> bool {
     matches!(
         MessageDialog::new()
             .set_title(crate::APPNAME)
