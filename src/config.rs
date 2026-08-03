@@ -113,6 +113,7 @@ pub struct OverlayPreferences {
 pub struct ProjectConfig {
     pub preserve_ids: bool,
     pub generate_coastal_on_save: bool,
+    pub image_overlay: ImageOverlayProjectSettings,
     pub terrains: AHashMap<String, Terrain>,
     pub extra_warnings: ExtraWarnings,
 }
@@ -122,6 +123,7 @@ impl Default for ProjectConfig {
         Self {
             preserve_ids: true,
             generate_coastal_on_save: true,
+            image_overlay: ImageOverlayProjectSettings::default(),
             terrains: default_terrains(),
             extra_warnings: ExtraWarnings {
                 enabled: false,
@@ -129,6 +131,25 @@ impl Default for ProjectConfig {
                 few_shared_borders: false,
                 few_shared_borders_threshold: 3,
             },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageOverlayProjectSettings {
+    pub visible: bool,
+    pub opacity_percent: u8,
+    pub use_project_heightmap: bool,
+    pub source_path: Option<PathBuf>,
+}
+
+impl Default for ImageOverlayProjectSettings {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            opacity_percent: 50,
+            use_project_heightmap: true,
+            source_path: None,
         }
     }
 }
@@ -592,6 +613,24 @@ fn parse_project(document: &DocumentMut) -> Result<ProjectConfig, String> {
     config.extra_warnings.enabled =
         config.extra_warnings.lone_pixels || config.extra_warnings.few_shared_borders;
 
+    let overlay = table(document, "image-overlay")?;
+    config.image_overlay.visible = bool_or(overlay, "visible", config.image_overlay.visible)?;
+    let opacity = usize_or(
+        overlay,
+        "opacity-percent",
+        usize::from(config.image_overlay.opacity_percent),
+    )?;
+    config.image_overlay.opacity_percent = u8::try_from(opacity)
+        .ok()
+        .filter(|opacity| *opacity <= 100)
+        .ok_or_else(|| "Field 'opacity-percent' must be between 0 and 100.".to_owned())?;
+    config.image_overlay.use_project_heightmap = bool_or(
+        overlay,
+        "use-project-heightmap",
+        config.image_overlay.use_project_heightmap,
+    )?;
+    config.image_overlay.source_path = optional_string(overlay, "source-path")?.map(PathBuf::from);
+
     if let Some(terrains) = document.get("terrain") {
         let terrains = terrains
             .as_table()
@@ -909,6 +948,29 @@ fn update_project(document: &mut DocumentMut, config: &ProjectConfig) {
         "few-shared-borders-threshold",
         config.extra_warnings.few_shared_borders_threshold as i64,
     );
+    set_bool(document, "image-overlay", "visible", config.image_overlay.visible);
+    set_integer(
+        document,
+        "image-overlay",
+        "opacity-percent",
+        i64::from(config.image_overlay.opacity_percent),
+    );
+    set_bool(
+        document,
+        "image-overlay",
+        "use-project-heightmap",
+        config.image_overlay.use_project_heightmap,
+    );
+    set_optional_string(
+        document,
+        "image-overlay",
+        "source-path",
+        config
+            .image_overlay
+            .source_path
+            .as_deref()
+            .and_then(Path::to_str),
+    );
 }
 
 fn table<'a>(document: &'a DocumentMut, name: &str) -> Result<Option<&'a Table>, String> {
@@ -1012,6 +1074,14 @@ fn set_optional_integer(
 ) {
     if let Some(setting) = setting {
         set_integer(document, table, key, setting);
+    } else if let Some(table) = document[table].as_table_mut() {
+        table.remove(key);
+    }
+}
+
+fn set_optional_string(document: &mut DocumentMut, table: &str, key: &str, setting: Option<&str>) {
+    if let Some(setting) = setting {
+        set_string(document, table, key, setting);
     } else if let Some(table) = document[table].as_table_mut() {
         table.remove(key);
     }
@@ -1145,6 +1215,40 @@ type = "land"
         assert_eq!(loaded.value.terrains["plains"].color, [1, 2, 3]);
         assert_eq!(loaded.value.terrains["volcanic"].color, [55, 44, 33]);
         assert!(loaded.value.terrains.contains_key("forest"));
+    }
+
+    #[test]
+    fn project_image_overlay_settings_roundtrip() {
+        let root = root("image-overlay");
+        let loaded = ProjectConfig::load(&root).unwrap();
+        let mut config = loaded.value;
+        config.image_overlay = ImageOverlayProjectSettings {
+            visible: true,
+            opacity_percent: 60,
+            use_project_heightmap: false,
+            source_path: Some(PathBuf::from("reference-map.png")),
+        };
+        config
+            .save(&root, loaded.fingerprint.as_ref(), false, false)
+            .unwrap();
+
+        let saved = ProjectConfig::load(&root).unwrap();
+        assert_eq!(saved.value.image_overlay, config.image_overlay);
+    }
+
+    #[test]
+    fn project_image_overlay_rejects_opacity_outside_percentage_range() {
+        let root = root("image-overlay-opacity");
+        let path = ProjectConfig::path(&root);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"[image-overlay]\nopacity-percent = 101\n").unwrap();
+
+        let loaded = ProjectConfig::load(&root).unwrap();
+        assert!(loaded
+            .issue
+            .unwrap()
+            .to_string()
+            .contains("opacity-percent' must be between 0 and 100"));
     }
 
     #[test]

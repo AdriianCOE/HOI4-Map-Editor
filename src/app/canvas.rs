@@ -51,7 +51,7 @@ use super::project::{
     StateFillMode, StateFillPreview, StateFillProvince, StateFillProvinceKind,
 };
 use super::{FontGlyphCache, colors};
-use crate::config::Config;
+use crate::config::{Config, ImageOverlayProjectSettings, ProjectConfig};
 use crate::error::Error;
 use crate::font::{self, FONT_SIZE};
 use crate::localization::tr;
@@ -493,17 +493,20 @@ impl Canvas {
             None,
             MapAccessMode::EditableProvinceMap,
             Config::load()?,
+            None,
         )
     }
 
     pub fn load_project(project: Hoi4Project) -> Result<Canvas, Error> {
         let location = Location::Directory(project.paths.map_directory.clone());
+        let overlay_settings = ProjectConfig::load(&project.paths.root)?.value.image_overlay;
         let config = Config::load_for_project(&project.paths.root)?;
         Self::load_with_access(
             location,
             Some(project),
             MapAccessMode::EditableProvinceMap,
             config,
+            Some(overlay_settings),
         )
     }
 
@@ -512,6 +515,7 @@ impl Canvas {
         mut project: Option<Hoi4Project>,
         map_access_mode: MapAccessMode,
         config: Config,
+        overlay_settings: Option<ImageOverlayProjectSettings>,
     ) -> Result<Canvas, Error> {
         let bundle = Bundle::load(&location, config)?;
         if let Some(project) = project.as_mut() {
@@ -571,8 +575,15 @@ impl Canvas {
         } else {
             MapViewMode::ProvinceColors
         };
-        let (image_overlay_texture, image_overlay_status, image_overlay_dimensions) =
-            load_project_image_overlay(&location, bundle.map.dimensions(), &texture_settings);
+        let overlay_settings = overlay_settings.unwrap_or_default();
+        let (image_overlay_source, image_overlay_texture, image_overlay_status, image_overlay_dimensions) =
+            load_configured_image_overlay(
+                &location,
+                project.as_ref(),
+                &overlay_settings,
+                bundle.map.dimensions(),
+                &texture_settings,
+            );
         let state_edit_session = project
             .as_ref()
             .map(|project| StateEditSession::new(project, &bundle.map));
@@ -610,10 +621,12 @@ impl Canvas {
         let camera = Camera::new(&texture);
         let mut map_layers = MapLayerState::default().with_base_view(map_view_mode);
         map_layers.show_province_ids = show_province_ids;
+        map_layers.image_overlay.opacity = f32::from(overlay_settings.opacity_percent) / 100.0;
+        map_layers.image_overlay.source = image_overlay_source;
         if image_overlay_texture.is_some() {
-            map_layers.image_overlay.source = Some(ImageOverlaySource::ProjectHeightmap);
             map_layers.image_overlay.dimensions = image_overlay_dimensions;
             map_layers.image_overlay.content_revision = 1;
+            map_layers.image_overlay.enabled = overlay_settings.visible;
         }
 
         Ok(Canvas {
@@ -3193,6 +3206,7 @@ impl Canvas {
                     format!("Status: {}", if self.map_layers.image_overlay.enabled { "Visible" } else { "Hidden" }),
                     format!("Source: {}", self.map_layers.image_overlay.source.as_ref().map_or_else(|| "No image selected".to_owned(), |source| match source { ImageOverlaySource::ProjectHeightmap => "Project heightmap".to_owned(), ImageOverlaySource::Custom(path) => path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned()) })),
                     format!("Opacity: {}%", (self.map_layers.image_overlay.opacity * 100.0).round() as u32),
+                    self.image_overlay_status.clone(),
                 ],
             ),
             StateApplyDialog::Result => {
@@ -6106,6 +6120,7 @@ impl Canvas {
             if point_in_rect(pos, layout.problem_row(2)) {
                 let track = layout.problem_row(2);
                 self.map_layers.image_overlay.opacity = ((pos[0] - track[0]) / track[2]).clamp(0.0, 1.0) as f32;
+                self.persist_image_overlay_settings(alerts);
                 return StateApplyDialogAction::None;
             }
             if point_in_rect(pos, layout.problem_row(3)) {
@@ -8537,6 +8552,7 @@ impl Canvas {
             return;
         }
         self.map_layers.image_overlay.enabled = !self.map_layers.image_overlay.enabled;
+        self.persist_image_overlay_settings(alerts);
         alerts.push(Ok(format!(
             "Image Overlay: {} at {}%",
             if self.map_layers.image_overlay.enabled { "on" } else { "off" },
@@ -8547,6 +8563,7 @@ impl Canvas {
     pub fn adjust_image_overlay_opacity(&mut self, delta: f32, alerts: &mut Alerts) {
         self.map_layers.image_overlay.opacity =
             (self.map_layers.image_overlay.opacity + delta).clamp(0.0, 1.0);
+        self.persist_image_overlay_settings(alerts);
         alerts.push(Ok(format!(
             "Image Overlay opacity: {}%",
             (self.map_layers.image_overlay.opacity * 100.0).round() as u32
@@ -8568,6 +8585,7 @@ impl Canvas {
         self.map_layers.image_overlay.content_revision =
             self.map_layers.image_overlay.content_revision.wrapping_add(1);
         self.map_layers.image_overlay.enabled = true;
+        self.persist_image_overlay_settings(alerts);
         alerts.push(Ok(status));
     }
 
@@ -8598,6 +8616,7 @@ impl Canvas {
                 self.map_layers.image_overlay.content_revision =
                     self.map_layers.image_overlay.content_revision.wrapping_add(1);
                 self.map_layers.image_overlay.enabled = true;
+                self.persist_image_overlay_settings(alerts);
                 alerts.push(Ok(status));
             }
             Err(error) => alerts.push(Err(error)),
@@ -8612,7 +8631,57 @@ impl Canvas {
         self.map_layers.image_overlay.dimensions = None;
         self.map_layers.image_overlay.content_revision =
             self.map_layers.image_overlay.content_revision.wrapping_add(1);
+        self.persist_image_overlay_settings(alerts);
         alerts.push(Ok("Image Overlay cleared"));
+    }
+
+    fn persist_image_overlay_settings(&self, alerts: &mut Alerts) {
+        let Some(project) = self.project.as_ref() else {
+            return;
+        };
+        let loaded = match ProjectConfig::load(&project.paths.root) {
+            Ok(loaded) if loaded.issue.is_none() => loaded,
+            Ok(loaded) => {
+                alerts.push(Err(format!(
+                    "Image Overlay settings were not saved: {}",
+                    loaded.issue.expect("checked above")
+                )));
+                return;
+            }
+            Err(error) => {
+                alerts.push(Err(format!(
+                    "Image Overlay settings were not saved: {error}"
+                )));
+                return;
+            }
+        };
+        let mut settings = loaded.value;
+        settings.image_overlay.visible = self.map_layers.image_overlay.enabled;
+        settings.image_overlay.opacity_percent =
+            (self.map_layers.image_overlay.opacity * 100.0).round().clamp(0.0, 100.0) as u8;
+        let (use_project_heightmap, source_path) = match self.map_layers.image_overlay.source.as_ref() {
+            Some(ImageOverlaySource::ProjectHeightmap) => (true, None),
+            Some(ImageOverlaySource::Custom(path)) => (
+                false,
+                Some(
+                    path.strip_prefix(&project.paths.root)
+                        .map_or_else(|_| path.clone(), PathBuf::from),
+                ),
+            ),
+            None => (false, None),
+        };
+        settings.image_overlay.use_project_heightmap = use_project_heightmap;
+        settings.image_overlay.source_path = source_path;
+        if let Err(error) = settings.save(
+            &project.paths.root,
+            loaded.fingerprint.as_ref(),
+            false,
+            false,
+        ) {
+            alerts.push(Err(format!(
+                "Image Overlay settings were not saved: {error}"
+            )));
+        }
     }
 
     pub fn toggle_state_boundaries(&mut self, alerts: &mut Alerts) {
@@ -10334,6 +10403,60 @@ fn append_unique_csv(field: &mut String, value: &str) {
         field.push_str(", ");
     }
     field.push_str(value);
+}
+
+fn load_configured_image_overlay(
+    location: &Location,
+    project: Option<&Hoi4Project>,
+    settings: &ImageOverlayProjectSettings,
+    map_dimensions: Vector2<u32>,
+    texture_settings: &TextureSettings,
+) -> (
+    Option<ImageOverlaySource>,
+    Option<Texture>,
+    String,
+    Option<[u32; 2]>,
+) {
+    if settings.use_project_heightmap {
+        let (texture, status, dimensions) =
+            load_project_image_overlay(location, map_dimensions, texture_settings);
+        return (
+            Some(ImageOverlaySource::ProjectHeightmap),
+            texture,
+            status,
+            dimensions,
+        );
+    }
+    let Some(source_path) = settings.source_path.as_ref() else {
+        return (
+            None,
+            None,
+            "Image Overlay unavailable: no image selected.".to_owned(),
+            None,
+        );
+    };
+    let path = project
+        .map(|project| project.paths.root.join(source_path))
+        .filter(|_| !source_path.is_absolute())
+        .unwrap_or_else(|| source_path.clone());
+    let source = ImageOverlaySource::Custom(path.clone());
+    match fs_err::read(&path) {
+        Ok(bytes) => match decode_image_overlay(
+            &bytes,
+            map_dimensions,
+            texture_settings,
+            &path.display().to_string(),
+        ) {
+            Ok((texture, dimensions, status)) => (Some(source), Some(texture), status, Some(dimensions)),
+            Err(error) => (Some(source), None, error, None),
+        },
+        Err(error) => (
+            Some(source),
+            None,
+            format!("Image Overlay unavailable: failed to read {}: {error}", path.display()),
+            None,
+        ),
+    }
 }
 
 fn load_project_image_overlay(
