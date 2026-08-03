@@ -512,6 +512,19 @@ impl Map {
     self.replace_color_raw(which, color)
   }
 
+  /// Merges every pixel of a province into an existing province, preserving the target metadata.
+  pub fn merge_province_into(&mut self, which: Color, target: Color) -> Extents {
+    assert_ne!(which, target, "Attempted to merge a province into itself");
+    let pixels = self.base.color_buffer.enumerate_pixels()
+      .filter_map(|(x, y, &Rgb(color))| (color == which).then_some([x, y]))
+      .collect::<Vec<_>>();
+    let extents = pixels.iter().copied().fold(None, |out: Option<Extents>, pos| {
+      Some(out.map_or_else(|| Extents::new_point(pos), |current| current.join_point(pos)))
+    }).expect("province not found in map");
+    self.put_many_pixels(target, &pixels);
+    extents
+  }
+
   pub fn flood_fill_province(&mut self, pos: Vector2<u32>, color: Color) -> Extents {
     let which = self.get_color_at(pos);
     assert_ne!(which, color, "Attempted to flood-fill a province when it is already the desired color");

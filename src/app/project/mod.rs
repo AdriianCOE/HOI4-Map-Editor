@@ -21,7 +21,7 @@ pub use catalog::{
 };
 pub use diagnostics::{DiagnosticSeverity, ProjectDiagnostic, ProjectDiagnosticKind};
 pub use edit::{
-    StateEditError, StateEditSession, StateEditSummary, StateEditTimings, StateRemovalPolicy,
+    ProvinceRemovalPolicy, StateEditError, StateEditSession, StateEditSummary, StateEditTimings, StateRemovalPolicy,
     WorkingStateLifecycle, WorkingStateOrigin,
 };
 pub use indexes::{StateIndexes, index_state_documents};

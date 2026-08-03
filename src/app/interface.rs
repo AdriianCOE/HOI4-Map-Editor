@@ -1577,6 +1577,7 @@ pub enum ButtonId {
     ToolbarEditRemoveState,
     ToolbarEditStateProperties,
     ToolbarEditProvinceData,
+    ToolbarEditRemoveProvince,
     ToolbarEditSelectTargetStateProvinces,
     ToolbarEditActivateStateLasso,
     ToolbarEditStateLassoReplace,
@@ -1729,6 +1730,7 @@ fn button_visible(id: ButtonId, ictx: InterfaceDrawContext) -> bool {
             | ToolbarEditRemoveState
             | ToolbarEditStateProperties
             | ToolbarEditProvinceData
+            | ToolbarEditRemoveProvince
             | ToolbarEditSelectTargetStateProvinces
             | ToolbarEditMoveSelectedToTarget
             | ToolbarEditUnassignSelected
@@ -1858,6 +1860,7 @@ impl StateActionAvailability {
             ToolbarEditProvinceData => {
                 self.state_view && self.can_edit_province_data && !self.property_editor_open
             }
+            ToolbarEditRemoveProvince => self.state_view && !self.property_editor_open,
             ToolbarEditSelectTargetStateProvinces => self.state_view && self.has_target,
             ToolbarEditActivateStateLasso => self.state_view && !self.lasso_active,
             ToolbarEditStateLassoReplace
@@ -2036,6 +2039,7 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 ButtonId::ToolbarEditStateProperties,
             ),
             ("Edit province data", "", ButtonId::ToolbarEditProvinceData),
+            ("Delete province...", "", ButtonId::ToolbarEditRemoveProvince),
             (
                 "Select All Provinces in Target State",
                 "",

@@ -39,7 +39,7 @@ use super::project::{
     ProvinceInclusionMode, RecoveryInfo,
     RoundTripCancellation, RoundTripStage, RoundTripStatus,
     RoundTripValidationPolicy, RoundTripValidationReport, RoundTripValidator, SaveTransactionState,
-    StateBrushMode, StateEditSession, StateLassoPhase, StatePropertyDraft, StateRemovalPolicy,
+    ProvinceRemovalPolicy, StateBrushMode, StateEditSession, StateLassoPhase, StatePropertyDraft, StateRemovalPolicy,
     StateSaveCancellation, StateSaveConditions, StateSaveFault, StateSaveOutcome, StateSaveReport,
     StateSelection, WorkingStateOrigin, boundaries_for_state, classify_state_lasso,
     detect_state_save_recovery, execute_project_save, execute_state_save, generate_state_view,
@@ -151,6 +151,9 @@ pub struct Canvas {
     state_apply_after_validation: bool,
     state_apply_ready_for_confirmation: bool,
     review_required_apply_approved: bool,
+    province_removal_draft: Option<ProvinceRemovalDraft>,
+    province_removal_undo: Vec<ProvinceRemovalTransaction>,
+    province_removal_redo: Vec<ProvinceRemovalTransaction>,
     state_lifecycle_draft: Option<StateLifecycleDraft>,
     state_property_draft: Option<StatePropertyDraft>,
     province_data_draft: Option<ProvinceDataDraft>,
@@ -246,6 +249,7 @@ enum StateApplyDialog {
     Result,
     ValidationResults,
     ImageOverlay,
+    ProvinceRemoval,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,6 +264,8 @@ pub enum StateApplyDialogAction {
     DecreaseImageOverlayOpacity,
     IncreaseImageOverlayOpacity,
     ClearImageOverlay,
+    ConfirmProvinceTransfer,
+    ConfirmProvinceReferenceRemoval,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -395,6 +401,20 @@ struct ValidationProblemsView {
     selected: usize,
     offset: usize,
     show_technical_details: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ProvinceRemovalDraft {
+    province_id: u32,
+    target_id: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProvinceRemovalTransaction {
+    map_before: usize,
+    map_after: usize,
+    state_before: usize,
+    state_after: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -689,6 +709,9 @@ impl Canvas {
             state_apply_after_validation: false,
             state_apply_ready_for_confirmation: false,
             review_required_apply_approved: false,
+            province_removal_draft: None,
+            province_removal_undo: Vec::new(),
+            province_removal_redo: Vec::new(),
             state_lifecycle_draft: None,
             state_property_draft: None,
             province_data_draft: None,
@@ -1009,6 +1032,153 @@ impl Canvas {
         self.refresh_state_information();
         alerts.push(Ok(format!(
             "Preparing to remove State {state_id} from the in-memory session only"
+        )));
+    }
+
+    pub fn open_province_removal_dialog(&mut self, alerts: &mut Alerts) {
+        let Some(province_id) = self.active_province_id else {
+            alerts.push(Err("Select a land province before deleting it"));
+            return;
+        };
+        if !self
+            .bundle
+            .map
+            .iter_province_data()
+            .any(|(_, province)| province.preserved_id == Some(province_id) && province.kind == ProvinceKind::Land)
+        {
+            alerts.push(Err("Only land provinces can be removed from a State project"));
+            return;
+        }
+        let result = self
+            .state_edit_session
+            .as_ref()
+            .ok_or_else(|| "Province removal is available only for loaded state projects".to_owned())
+            .and_then(|edit| {
+                edit.province_data(province_id)
+                    .map(|_| ())
+                    .ok_or_else(|| format!("Province {province_id} is not a selectable land province"))
+            });
+        if let Err(error) = result {
+            alerts.push(Err(error));
+            return;
+        }
+        self.province_removal_draft = Some(ProvinceRemovalDraft {
+            province_id,
+            target_id: String::new(),
+        });
+        self.state_apply_dialog = Some(StateApplyDialog::ProvinceRemoval);
+    }
+
+    pub fn input_province_removal_text(&mut self, text: &str) {
+        let Some(draft) = self.province_removal_draft.as_mut() else {
+            return;
+        };
+        draft
+            .target_id
+            .extend(text.chars().filter(|character| character.is_ascii_digit()));
+    }
+
+    pub fn province_removal_backspace(&mut self) {
+        if let Some(draft) = self.province_removal_draft.as_mut() {
+            draft.target_id.pop();
+        }
+    }
+
+    pub fn confirm_province_removal(&mut self, transfer: bool, alerts: &mut Alerts) {
+        let Some(draft) = self.province_removal_draft.clone() else {
+            return;
+        };
+        let target_id = match draft.target_id.trim().parse::<u32>() {
+            Ok(id) if id != 0 && id != draft.province_id => id,
+            _ => {
+                alerts.push(Err("Enter a different existing target Province ID"));
+                return;
+            }
+        };
+        let Some(target_color) = self
+            .bundle
+            .map
+            .iter_province_data()
+            .find_map(|(color, province)| (province.preserved_id == Some(target_id)).then_some(color))
+        else {
+            alerts.push(Err(format!("Province {target_id} does not exist in the map")));
+            return;
+        };
+        let Some(source_pos) = (0..self.bundle.map.height()).find_map(|y| {
+            (0..self.bundle.map.width()).find_map(|x| {
+                (self.bundle.map.get_province_at([x, y]).preserved_id == Some(draft.province_id))
+                    .then_some([x, y])
+            })
+        }) else {
+            alerts.push(Err(format!("Province {} no longer has pixels", draft.province_id)));
+            return;
+        };
+        if transfer && !self.province_is_coastal(target_id) {
+            let has_naval_base = self
+                .state_edit_session
+                .as_ref()
+                .and_then(|edit| edit.province_data(draft.province_id))
+                .is_some_and(|data| data.buildings.keys().any(|name| is_coastal_only_building(name)));
+            if has_naval_base {
+                alerts.push(Err(format!(
+                    "Province {target_id} is not coastal, so it cannot receive a naval base"
+                )));
+                return;
+            }
+        }
+        let policy = if transfer {
+            ProvinceRemovalPolicy::TransferToProvince(target_id)
+        } else {
+            ProvinceRemovalPolicy::RemoveReferences
+        };
+        let map_before = self.history.position();
+        let state_before = self
+            .state_edit_session
+            .as_ref()
+            .map_or(0, |edit| edit.summary().commands);
+        let result = self
+            .state_edit_session
+            .as_mut()
+            .ok_or_else(|| "Province removal is unavailable".to_owned())
+            .and_then(|edit| edit.remove_province_references(draft.province_id, policy).map_err(|error| error.to_string()));
+        if let Err(error) = result {
+            alerts.push(Err(error));
+            return;
+        }
+        if self
+            .history
+            .merge_entire_province(&mut self.bundle, source_pos, target_color)
+            .is_none()
+        {
+            if let Some(edit) = self.state_edit_session.as_mut() {
+                edit.undo();
+            }
+            alerts.push(Err("Province removal could not update the map; references were restored"));
+            return;
+        }
+        self.bundle.map.recalculate_all_boundaries();
+        let state_after = self
+            .state_edit_session
+            .as_ref()
+            .map_or(state_before, |edit| edit.summary().commands);
+        self.province_removal_undo.push(ProvinceRemovalTransaction {
+            map_before,
+            map_after: self.history.position(),
+            state_before,
+            state_after,
+        });
+        self.province_removal_redo.clear();
+        self.problems.clear();
+        self.refresh();
+        self.sync_province_dirty();
+        self.refresh_state_visuals();
+        self.active_province_id = Some(target_id);
+        self.state_apply_dialog = None;
+        self.province_removal_draft = None;
+        alerts.push(Ok(format!(
+            "Province {} was removed and its references were {}.",
+            draft.province_id,
+            if transfer { "transferred" } else { "removed" }
         )));
     }
 
@@ -3209,6 +3379,32 @@ impl Canvas {
                     self.image_overlay_status.clone(),
                 ],
             ),
+            StateApplyDialog::ProvinceRemoval => {
+                let draft = self.province_removal_draft.as_ref();
+                let province_id = draft.map_or(0, |draft| draft.province_id);
+                let data = self
+                    .state_edit_session
+                    .as_ref()
+                    .and_then(|edit| edit.province_data(province_id))
+                    .unwrap_or_default();
+                (
+                    "DELETE PROVINCE",
+                    "Transfer References",
+                    "Remove Dependent References",
+                    "Cancel",
+                    vec![
+                        format!("Delete Province {province_id}?"),
+                        format!(
+                            "Dependencies: {} victory point(s), {} province building(s).",
+                            usize::from(data.victory_point.is_some()),
+                            data.buildings.len()
+                        ),
+                        "Target Province ID (pixels will merge into this province):".to_owned(),
+                        draft.map_or_else(String::new, |draft| draft.target_id.clone()),
+                        "Transfer keeps compatible data; remove drops State, VP and building references.".to_owned(),
+                    ],
+                )
+            }
             StateApplyDialog::Result => {
                 let (title, lines) = if let Some(report) = self.state_save_report.as_ref() {
                     let title = if report.outcome == StateSaveOutcome::Completed {
@@ -3315,6 +3511,25 @@ impl Canvas {
             ].iter().enumerate() {
                 draw_editor_button(ctx, glyph_cache, gl, layout.problem_row(index), label, true);
             }
+        }
+        if dialog == StateApplyDialog::ProvinceRemoval {
+            let target = layout.problem_row(0);
+            graphics::rectangle(
+                editor_field_color(true, false),
+                target,
+                ctx.transform,
+                gl,
+            );
+            draw_canvas_text(
+                ctx,
+                glyph_cache,
+                gl,
+                colors::WHITE,
+                [target[0] + 6.0, target[1] + 17.0],
+                self.province_removal_draft
+                    .as_ref()
+                    .map_or("Target Province ID", |draft| draft.target_id.as_str()),
+            );
         }
         let primary_enabled = dialog != StateApplyDialog::Progress
             || self.round_trip_task.is_some()
@@ -5645,7 +5860,39 @@ impl Canvas {
         };
     }
 
-    pub fn undo(&mut self) {
+    pub fn undo(&mut self, alerts: &mut Alerts) {
+        if let Some(transaction) = self.province_removal_undo.last().copied()
+            && self.history.position() == transaction.map_after
+            && self
+                .state_edit_session
+                .as_ref()
+                .is_some_and(|edit| edit.summary().commands == transaction.state_after)
+        {
+            let map_undone = self.history.undo(&mut self.bundle.map).is_some();
+            let state_undone = self
+                .state_edit_session
+                .as_mut()
+                .is_some_and(StateEditSession::undo);
+            if map_undone && state_undone {
+                self.province_removal_undo.pop();
+                self.province_removal_redo.push(transaction);
+                self.bundle.map.recalculate_all_boundaries();
+                self.problems.clear();
+                self.refresh();
+                self.sync_province_dirty();
+                self.repair_active_state_after_history();
+                self.refresh_state_visuals();
+                return;
+            }
+            if map_undone {
+                self.history.redo(&mut self.bundle.map);
+            }
+            if state_undone {
+                self.state_edit_session.as_mut().unwrap().redo();
+            }
+            alerts.push(Err("Province removal undo could not restore both map and State data"));
+            return;
+        }
         if self.is_state_workspace() {
             if self.property_draft_is_modified() {
                 return;
@@ -5677,7 +5924,39 @@ impl Canvas {
         };
     }
 
-    pub fn redo(&mut self) {
+    pub fn redo(&mut self, alerts: &mut Alerts) {
+        if let Some(transaction) = self.province_removal_redo.last().copied()
+            && self.history.position() == transaction.map_before
+            && self
+                .state_edit_session
+                .as_ref()
+                .is_some_and(|edit| edit.summary().commands == transaction.state_before)
+        {
+            let map_redone = self.history.redo(&mut self.bundle.map).is_some();
+            let state_redone = self
+                .state_edit_session
+                .as_mut()
+                .is_some_and(StateEditSession::redo);
+            if map_redone && state_redone {
+                self.province_removal_redo.pop();
+                self.province_removal_undo.push(transaction);
+                self.bundle.map.recalculate_all_boundaries();
+                self.problems.clear();
+                self.refresh();
+                self.sync_province_dirty();
+                self.repair_active_state_after_history();
+                self.refresh_state_visuals();
+                return;
+            }
+            if map_redone {
+                self.history.undo(&mut self.bundle.map);
+            }
+            if state_redone {
+                self.state_edit_session.as_mut().unwrap().undo();
+            }
+            alerts.push(Err("Province removal redo could not restore both map and State data"));
+            return;
+        }
         if self.is_state_workspace() {
             if self.property_draft_is_modified() {
                 return;
@@ -6092,6 +6371,9 @@ impl Canvas {
 
     pub fn close_state_apply_dialog(&mut self) {
         if self.state_apply_dialog != Some(StateApplyDialog::Progress) {
+            if self.state_apply_dialog == Some(StateApplyDialog::ProvinceRemoval) {
+                self.province_removal_draft = None;
+            }
             self.state_apply_dialog = None;
         }
     }
@@ -6132,6 +6414,9 @@ impl Canvas {
             if point_in_rect(pos, layout.problem_row(5)) {
                 return StateApplyDialogAction::ClearImageOverlay;
             }
+        }
+        if dialog == StateApplyDialog::ProvinceRemoval && point_in_rect(pos, layout.problem_row(0)) {
+            return StateApplyDialogAction::None;
         }
         if dialog == StateApplyDialog::ValidationResults {
             if point_in_rect(pos, layout.severity_filter()) {
@@ -6259,6 +6544,9 @@ impl Canvas {
                     }
                 }
                 StateApplyDialog::ImageOverlay => self.toggle_image_overlay(alerts),
+                StateApplyDialog::ProvinceRemoval => {
+                    return StateApplyDialogAction::ConfirmProvinceTransfer;
+                }
                 StateApplyDialog::Result => self.state_apply_dialog = None,
             }
         } else if point_in_rect(pos, layout.secondary()) {
@@ -6272,6 +6560,9 @@ impl Canvas {
                 }
                 StateApplyDialog::ValidationResults => self.validation_problems_view.show_technical_details = !self.validation_problems_view.show_technical_details,
                 StateApplyDialog::ImageOverlay => self.state_apply_dialog = None,
+                StateApplyDialog::ProvinceRemoval => {
+                    return StateApplyDialogAction::ConfirmProvinceReferenceRemoval;
+                }
                 _ if self.state_save_report.is_some() => self.view_state_save_report(alerts),
                 _ if self.round_trip_report.is_some() => self.view_round_trip_report(alerts),
                 _ => self.print_patch_preview_details(),
@@ -6288,6 +6579,9 @@ impl Canvas {
                 }
             } else {
                 self.state_apply_dialog = None;
+                if dialog == StateApplyDialog::ProvinceRemoval {
+                    self.province_removal_draft = None;
+                }
             }
         }
         StateApplyDialogAction::None

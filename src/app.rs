@@ -230,6 +230,12 @@ impl EventHandler for App {
                 .as_ref()
                 .is_some_and(Canvas::state_apply_dialog_is_open)
         {
+            if key == Key::Backspace
+                && let Some(canvas) = self.canvas.as_mut()
+            {
+                canvas.province_removal_backspace();
+                return;
+            }
             if key == Key::Escape
                 && let Some(canvas) = self.canvas.as_mut()
             {
@@ -373,8 +379,8 @@ impl EventHandler for App {
             }
             (Some(_), true, Key::S) if mods.ctrl => self.action_save_map(),
             (Some(_), true, Key::R) if mods.ctrl && mods.alt => self.action_reveal_map(),
-            (Some(canvas), true, Key::Z) if mods.ctrl => canvas.undo(),
-            (Some(canvas), true, Key::Y) if mods.ctrl => canvas.redo(),
+            (Some(canvas), true, Key::Z) if mods.ctrl => canvas.undo(&mut self.alerts),
+            (Some(canvas), true, Key::Y) if mods.ctrl => canvas.redo(&mut self.alerts),
             (Some(canvas), true, Key::D) if mods.ctrl && mods.shift => {
                 if (!canvas.has_unsaved_state_edits() && !canvas.property_draft_is_modified())
                     || msg_dialog_discard_state_edits()
@@ -474,6 +480,7 @@ impl EventHandler for App {
 
     fn on_text(&mut self, text: String) {
         if let Some(canvas) = self.canvas.as_mut() {
+            canvas.input_province_removal_text(&text);
             canvas.input_state_property_text(&text);
         }
     }
@@ -548,6 +555,16 @@ impl EventHandler for App {
                 StateApplyDialogAction::ClearImageOverlay => {
                     if let Some(canvas) = self.canvas.as_mut() {
                         canvas.clear_image_overlay(&mut self.alerts);
+                    }
+                }
+                StateApplyDialogAction::ConfirmProvinceTransfer => {
+                    if let Some(canvas) = self.canvas.as_mut() {
+                        canvas.confirm_province_removal(true, &mut self.alerts);
+                    }
+                }
+                StateApplyDialogAction::ConfirmProvinceReferenceRemoval => {
+                    if let Some(canvas) = self.canvas.as_mut() {
+                        canvas.confirm_province_removal(false, &mut self.alerts);
                     }
                 }
                 StateApplyDialogAction::None => {}
@@ -1367,8 +1384,8 @@ impl App {
             (Some(_), ToolbarFileReveal) => self.action_reveal_map(),
             (Some(_), ToolbarFileExportLandMap) => self.action_export_land_map(),
             (Some(_), ToolbarFileExportTerrainMap) => self.action_export_terrain_map(),
-            (Some(canvas), ToolbarEditUndo) => canvas.undo(),
-            (Some(canvas), ToolbarEditRedo) => canvas.redo(),
+            (Some(canvas), ToolbarEditUndo) => canvas.undo(&mut self.alerts),
+            (Some(canvas), ToolbarEditRedo) => canvas.redo(&mut self.alerts),
             (Some(canvas), ToolbarEditFindMap) => canvas.focus_map_search(),
             (Some(canvas), ToolbarEditNewState) => {
                 canvas.open_new_state_editor(&mut self.alerts);
@@ -1381,6 +1398,9 @@ impl App {
             }
             (Some(canvas), ToolbarEditProvinceData) => {
                 canvas.open_province_data_editor(&mut self.alerts);
+            }
+            (Some(canvas), ToolbarEditRemoveProvince) => {
+                canvas.open_province_removal_dialog(&mut self.alerts);
             }
             (Some(canvas), ToolbarEditCoastal) => canvas.calculate_coastal_provinces(),
             (Some(canvas), ToolbarEditRecolor) => canvas.calculate_recolor_map(),

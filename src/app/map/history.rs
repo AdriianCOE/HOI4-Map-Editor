@@ -55,6 +55,10 @@ impl History {
     })
   }
 
+  pub fn position(&self) -> usize {
+    self.position
+  }
+
   pub fn redo(&mut self, map: &mut Map) -> Option<Commit> {
     // Apply the next state
     self.position.checked_add(1).and_then(|position| {
@@ -200,6 +204,17 @@ impl History {
     let which = bundle.map.get_color_at(pos);
     if which != fill_color {
       let extents = bundle.map.recolor_province(which, fill_color);
+      self.push_map_state(&bundle.map, StepOrigin::PaintEntireProvince, ViewMode::Color);
+      Some(extents)
+    } else {
+      None
+    }
+  }
+
+  pub fn merge_entire_province(&mut self, bundle: &mut Bundle, pos: Vector2<u32>, target_color: Color) -> Option<Extents> {
+    let which = bundle.map.get_color_at(pos);
+    if which != target_color {
+      let extents = bundle.map.merge_province_into(which, target_color);
       self.push_map_state(&bundle.map, StepOrigin::PaintEntireProvince, ViewMode::Color);
       Some(extents)
     } else {
