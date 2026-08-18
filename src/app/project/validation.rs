@@ -181,6 +181,13 @@ pub enum SemanticDifference {
         expected: Option<u32>,
         actual: Option<u32>,
     },
+    DerivedIndexMismatch {
+        index: &'static str,
+        expected_count: usize,
+        actual_count: usize,
+        expected_sample: Vec<u32>,
+        actual_sample: Vec<u32>,
+    },
 }
 
 impl SemanticDifference {
@@ -202,6 +209,17 @@ impl SemanticDifference {
                 actual,
             } => {
                 format!("Province {province_id}: expected State {expected:?}, got {actual:?}")
+            }
+            Self::DerivedIndexMismatch {
+                index,
+                expected_count,
+                actual_count,
+                expected_sample,
+                actual_sample,
+            } => {
+                format!(
+                    "Derived {index} index: expected {expected_count} ({expected_sample:?}), got {actual_count} ({actual_sample:?})"
+                )
             }
         }
     }
@@ -688,7 +706,7 @@ impl RoundTripValidator {
         ));
         let started = Instant::now();
         report.diagnostics_comparison =
-            compare_diagnostics(project, edit, plan, &candidate_project);
+            compare_diagnostics(project, edit, plan, &candidate_project, &land_province_ids);
         report.timings.diagnostic_comparison_ms = started.elapsed().as_millis();
         if report.diagnostics_comparison.unexpected_diagnostics != 0 {
             gate!(Err(Failure::new(
@@ -943,7 +961,7 @@ impl RoundTripValidator {
         ));
         let started = Instant::now();
         report.diagnostics_comparison =
-            compare_diagnostics(project, edit, plan, &candidate_project);
+            compare_diagnostics(project, edit, plan, &candidate_project, &land_province_ids);
         let source_bundle = gate!(
             Bundle::load(
                 &Location::Directory(project.paths.map_directory.clone()),
@@ -2033,9 +2051,28 @@ fn compare_semantics(
             });
         }
     }
-    let indexes_match = edit.state_by_province() == &candidate.state_by_province
-        && edit.unassigned_land_provinces() == &candidate.unassigned_land_provinces
-        && source.ambiguous_provinces == candidate.ambiguous_provinces;
+    let expected_unassigned_land_provinces =
+        expected_unassigned_land_provinces(edit, land_province_ids);
+    let state_assignments_match = edit.state_by_province() == &candidate.state_by_province;
+    let unassigned_land_match =
+        expected_unassigned_land_provinces == candidate.unassigned_land_provinces;
+    let ambiguous_provinces_match = source.ambiguous_provinces == candidate.ambiguous_provinces;
+    if !unassigned_land_match {
+        differences.push(derived_index_mismatch(
+            "unassigned land provinces",
+            &expected_unassigned_land_provinces,
+            &candidate.unassigned_land_provinces,
+        ));
+    }
+    if !ambiguous_provinces_match {
+        differences.push(derived_index_mismatch(
+            "ambiguous provinces",
+            &source.ambiguous_provinces.keys().copied().collect(),
+            &candidate.ambiguous_provinces.keys().copied().collect(),
+        ));
+    }
+    let indexes_match =
+        state_assignments_match && unassigned_land_match && ambiguous_provinces_match;
     let assigned_land = edit
         .state_by_province()
         .keys()
@@ -2043,7 +2080,7 @@ fn compare_semantics(
         .copied()
         .collect::<BTreeSet<_>>();
     let coverage = assigned_land
-        .union(edit.unassigned_land_provinces())
+        .union(&expected_unassigned_land_provinces)
         .copied()
         .collect::<BTreeSet<_>>();
     let source_non_land = source
@@ -2110,8 +2147,34 @@ pub(crate) fn compare_project_for_save(
 ) -> (ProjectSemanticComparison, DiagnosticComparison) {
     (
         compare_semantics(source, edit, plan, candidate, land_province_ids),
-        compare_diagnostics(source, edit, plan, candidate),
+        compare_diagnostics(source, edit, plan, candidate, land_province_ids),
     )
+}
+
+fn expected_unassigned_land_provinces(
+    edit: &StateEditSession,
+    land_province_ids: &BTreeSet<u32>,
+) -> BTreeSet<u32> {
+    land_province_ids
+        .iter()
+        .filter(|province_id| !edit.state_by_province().contains_key(province_id))
+        .copied()
+        .collect()
+}
+
+fn derived_index_mismatch(
+    index: &'static str,
+    expected: &BTreeSet<u32>,
+    actual: &BTreeSet<u32>,
+) -> SemanticDifference {
+    const SAMPLE_LIMIT: usize = 8;
+    SemanticDifference::DerivedIndexMismatch {
+        index,
+        expected_count: expected.len(),
+        actual_count: actual.len(),
+        expected_sample: expected.iter().take(SAMPLE_LIMIT).copied().collect(),
+        actual_sample: actual.iter().take(SAMPLE_LIMIT).copied().collect(),
+    }
 }
 
 fn compare_state(
@@ -2344,6 +2407,7 @@ fn compare_diagnostics(
     edit: &StateEditSession,
     plan: &ProjectPatchPlan,
     candidate: &Hoi4Project,
+    land_province_ids: &BTreeSet<u32>,
 ) -> DiagnosticComparison {
     let source_structural = diagnostic_counts(source, true);
     let candidate_structural = diagnostic_counts(candidate, true);
@@ -2356,7 +2420,7 @@ fn compare_diagnostics(
         .iter()
         .filter(|diagnostic| diagnostic.kind == ProjectDiagnosticKind::LandProvinceWithoutState)
         .count();
-    let expected_unassigned = edit.unassigned_land_provinces().len();
+    let expected_unassigned = expected_unassigned_land_provinces(edit, land_province_ids).len();
     let unassigned_difference = usize::from(candidate_unassigned != expected_unassigned);
     let planned_paths = plan
         .modified_files
@@ -3014,6 +3078,63 @@ mod tests {
             fs::read(&source_definition_path).unwrap(),
             source_definition_before
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn combined_new_land_province_roundtrips_with_candidate_derived_indexes() {
+        let (root, project, edit) = test_project("combined-new-land-province");
+        let image = image::RgbImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                image::Rgb([1, 2, 3])
+            } else {
+                image::Rgb([4, 5, 6])
+            }
+        });
+        let mut provinces_bmp = Vec::new();
+        crate::app::map::write_rgb_bmp_image(&mut provinces_bmp, &image).unwrap();
+        let map_files = BTreeMap::from([
+            (PathBuf::from("provinces.bmp"), provinces_bmp),
+            (
+                PathBuf::from("definition.csv"),
+                b"0;0;0;0;land;false;unknown;0\n1;1;2;3;land;false;plains;1\n2;4;5;6;land;false;plains;1\n"
+                    .to_vec(),
+            ),
+        ]);
+
+        let report = RoundTripValidator::default().validate_combined(
+            &project,
+            &edit,
+            &empty_plan(),
+            Some(&map_files),
+            |_| Ok(()),
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+
+        assert!(
+            matches!(
+                report.round_trip.status,
+                RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
+            ),
+            "{}",
+            report.round_trip.full_text()
+        );
+        assert!(report.round_trip.semantic_comparison.indexes_match);
+        assert!(
+            report
+                .round_trip
+                .semantic_comparison
+                .province_coverage_match
+        );
+        assert_eq!(
+            report
+                .round_trip
+                .diagnostics_comparison
+                .unexpected_diagnostics,
+            0
+        );
+        assert!(report.round_trip.workspace.cleaned);
         fs::remove_dir_all(root).unwrap();
     }
 
