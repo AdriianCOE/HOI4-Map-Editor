@@ -34,6 +34,7 @@ pub struct ProjectSavePlan {
     domains: BTreeSet<SaveDomain>,
     dirty: ProjectDirtyState,
     candidate_digest: SourceFingerprint,
+    coastal_flags_recalculated: usize,
 }
 
 impl ProjectSavePlan {
@@ -86,6 +87,7 @@ impl ProjectSavePlan {
                 state_files,
             },
             candidate_digest,
+            coastal_flags_recalculated: 0,
         })
     }
 
@@ -103,6 +105,14 @@ impl ProjectSavePlan {
 
     pub fn candidate_digest(&self) -> &SourceFingerprint {
         &self.candidate_digest
+    }
+
+    pub fn coastal_flags_recalculated(&self) -> usize {
+        self.coastal_flags_recalculated
+    }
+
+    pub(crate) fn set_coastal_flags_recalculated(&mut self, count: usize) {
+        self.coastal_flags_recalculated = count;
     }
 
     pub fn into_patch_plan(self) -> ProjectPatchPlan {

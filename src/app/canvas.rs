@@ -7058,9 +7058,17 @@ impl Canvas {
             .as_ref()
             .ok_or_else(|| "The project state edit session is unavailable.".to_owned())?;
         let state_plan = plan_state_patches(project, edit);
+        let geometry_changed = self.history.has_geometry_changes(&self.bundle.map);
+        let mut candidate_bundle = self.bundle.clone();
+        let coastal_flags_recalculated =
+            if geometry_changed && self.bundle.config.generate_coastal_on_save {
+                candidate_bundle.map.recalculate_coastal_flags()
+            } else {
+                0
+            };
         let province_candidate = self
             .has_unsaved_province_edits()
-            .then(|| build_province_map_candidate(&self.bundle))
+            .then(|| build_province_map_candidate(&candidate_bundle))
             .transpose()?;
         if state_plan.files_len() == 0 && province_candidate.is_none() {
             self.project_save_plan = None;
@@ -7111,12 +7119,13 @@ impl Canvas {
             self.remember_combined_validation(&combined, StateApplyDialog::ValidationResults);
             return Err(combined.round_trip.summary_text());
         }
-        let plan = ProjectSavePlan::new(
+        let mut plan = ProjectSavePlan::new(
             project,
             edit.revision(),
             province_candidate.as_ref(),
             Some(&state_plan),
         )?;
+        plan.set_coastal_flags_recalculated(coastal_flags_recalculated);
         if combined.candidate_digest != *plan.candidate_digest() {
             return Err(
                 "The validated candidate no longer matches the Save Project plan.".to_owned(),
@@ -7124,9 +7133,10 @@ impl Canvas {
         }
         let validation = combined.project_validation.as_ref();
         let text = format!(
-            "SAVE PROJECT\n\nProvince Map: {} file(s)\nStates: {} file(s)\n\nValidation: {} error(s), {} warning(s), {} information message(s)\nFiles affected: {}\n\nA combined verified backup and journal will be created. Each file replacement is atomic; the coordinated project save is rollback-capable.",
+            "SAVE PROJECT\n\nProvince Map: {} file(s)\nStates: {} file(s)\nCoastal flags recalculated: {}\n\nValidation: {} error(s), {} warning(s), {} information message(s)\nFiles affected: {}\n\nA combined verified backup and journal will be created. Each file replacement is atomic; the coordinated project save is rollback-capable.",
             plan.dirty().province_files,
             plan.dirty().state_files,
+            plan.coastal_flags_recalculated(),
             validation.map_or(0, |report| report.errors),
             validation.map_or(0, |report| report.warnings),
             validation.map_or(0, |report| report.information),
@@ -7618,12 +7628,20 @@ impl Canvas {
                 .state_save_task
                 .as_ref()
                 .is_some_and(|task| task.includes_province_map);
+            let coastal_flags_recalculated = self
+                .project_save_plan
+                .as_ref()
+                .map_or(0, ProjectSavePlan::coastal_flags_recalculated);
             println!("{}", report.summary_text());
             if report.outcome == StateSaveOutcome::Completed {
                 if let Some(reloaded) = report.reloaded_project.take() {
                     self.promote_saved_project(reloaded);
                 }
                 if includes_province_map {
+                    if coastal_flags_recalculated != 0 {
+                        let applied = self.bundle.map.recalculate_coastal_flags();
+                        debug_assert_eq!(applied, coastal_flags_recalculated);
+                    }
                     self.history.promote_baseline(&self.bundle.map);
                     self.sync_province_dirty();
                 }
@@ -7645,7 +7663,13 @@ impl Canvas {
                     .as_ref()
                     .and_then(|project| detect_state_save_recovery(&project.paths.root));
             }
-            self.state_save_status = Some(report.summary_text());
+            let mut summary = report.summary_text();
+            if includes_province_map {
+                summary.push_str(&format!(
+                    "\nCoastal flags recalculated: {coastal_flags_recalculated}"
+                ));
+            }
+            self.state_save_status = Some(summary);
             self.state_save_report = Some(report);
             self.state_save_task = None;
             self.project_save_plan = None;

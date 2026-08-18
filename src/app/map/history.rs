@@ -9,7 +9,7 @@ use crate::app::map::{
 };
 use crate::util::XYIter;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -78,6 +78,10 @@ impl History {
         self.baseline != map.base
     }
 
+    pub fn has_geometry_changes(&self, map: &Map) -> bool {
+        !map.geometry_matches(&self.baseline)
+    }
+
     pub fn promote_baseline(&mut self, map: &Map) {
         self.baseline = map.base.clone();
     }
@@ -114,24 +118,12 @@ impl History {
     }
 
     pub fn calculate_coastal_provinces(&mut self, bundle: &mut Bundle) -> bool {
-        let coastal_provinces = bundle.map.calculate_coastal_provinces();
-        let is_not_pointless = coastal_provinces
-            .iter()
-            .any(|(&which, &coastal)| bundle.map.get_province(which).coastal != coastal);
-        if is_not_pointless {
-            for (&color, province_data) in
-                Arc::make_mut(&mut bundle.map.base.province_data_map).iter_mut()
-            {
-                let province_data = Arc::make_mut(province_data);
-                province_data.coastal = coastal_provinces[&color];
-            }
-
+        if bundle.map.recalculate_coastal_flags() != 0 {
             self.push_map_state(
                 &bundle.map,
                 StepOrigin::CalculateCoastalProvinces,
                 ViewMode::Coastal,
             );
-
             true
         } else {
             false
@@ -528,6 +520,50 @@ mod tests {
         }
     }
 
+    fn map_with_pixels(pixels: &[Color], provinces: &[(Color, u32, ProvinceKind, bool)]) -> Map {
+        let mut province_data_map = AHashMap::default();
+        for &(color, id, kind, coastal) in provinces {
+            province_data_map.insert(
+                color,
+                Arc::new(ProvinceData {
+                    preserved_id: Some(id),
+                    kind,
+                    terrain: kind.default_terrain().to_owned(),
+                    continent: 1,
+                    coastal: Some(coastal),
+                    pixel_count: pixels.iter().filter(|&&pixel| pixel == color).count() as u64,
+                    pixel_sum: [
+                        pixels
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(x, &pixel)| (pixel == color).then_some(x as u64))
+                            .sum(),
+                        0,
+                    ],
+                }),
+            );
+        }
+        Map {
+            base: MapBase {
+                color_buffer: Arc::new(
+                    RgbImage::from_raw(pixels.len() as u32, 1, pixels.concat())
+                        .expect("fixture pixels match the image dimensions"),
+                ),
+                province_data_map: Arc::new(province_data_map),
+                province_id_index: Arc::new(
+                    crate::app::map::ProvinceIdIndex::from_pairs(
+                        provinces.iter().map(|&(color, id, _, _)| (id, color)),
+                    )
+                    .expect("fixture province IDs are unique"),
+                ),
+                connection_data_map: Arc::new(AHashMap::default()),
+                rivers_overlay: None,
+            },
+            boundaries: AHashMap::default(),
+            preserved_unsupported_adjacencies: Vec::new(),
+        }
+    }
+
     fn edit_pixel(history: &mut History, map: &mut Map, color: Color, id: u32) {
         map.put_pixel([0, 0], color);
         history.push_map_state(map, StepOrigin::PaintPixel(id), ViewMode::Color);
@@ -566,5 +602,72 @@ mod tests {
 
         history.promote_baseline(&map);
         assert!(!history.is_dirty(&map));
+    }
+
+    #[test]
+    fn geometry_tracking_ignores_metadata_and_recolor_but_detects_pixel_moves_and_undo() {
+        let land = [1, 2, 3];
+        let sea = [4, 5, 6];
+        let mut map = map_with_pixels(
+            &[land, sea],
+            &[
+                (land, 7, ProvinceKind::Land, false),
+                (sea, 900_001, ProvinceKind::Sea, false),
+            ],
+        );
+        let history = History::new(8, &map);
+        map.get_province_mut(land).terrain = "hills".to_owned();
+        assert!(!history.has_geometry_changes(&map));
+        map.recolor_province(land, [7, 8, 9]);
+        assert!(!history.has_geometry_changes(&map));
+
+        let mut map = map_with_pixels(
+            &[land, sea],
+            &[
+                (land, 7, ProvinceKind::Land, false),
+                (sea, 900_001, ProvinceKind::Sea, false),
+            ],
+        );
+        let mut history = History::new(8, &map);
+        map.put_pixel([0, 0], sea);
+        history.push_map_state(&map, StepOrigin::PaintPixel(1), ViewMode::Color);
+        assert!(history.has_geometry_changes(&map));
+        history.undo(&mut map).unwrap();
+        assert!(!history.has_geometry_changes(&map));
+        assert_eq!(map.get_color_at([0, 0]), land);
+    }
+
+    #[test]
+    fn shared_coastal_algorithm_updates_land_after_geometry_changes() {
+        let land = [1, 2, 3];
+        let sea = [4, 5, 6];
+        let mut map = map_with_pixels(
+            &[land, sea],
+            &[
+                (land, 7, ProvinceKind::Land, false),
+                (sea, 900_001, ProvinceKind::Sea, false),
+            ],
+        );
+        assert_eq!(map.recalculate_coastal_flags(), 2);
+        assert_eq!(map.get_province(land).coastal, Some(true));
+
+        map.put_pixel([1, 0], land);
+        map.recalculate_coastal_flags();
+        assert_eq!(map.get_province(land).coastal, Some(false));
+    }
+
+    #[test]
+    fn new_painted_color_gets_a_stable_next_id_and_source_metadata() {
+        let source = [1, 2, 3];
+        let target = [9, 8, 7];
+        let mut map = map_with_pixels(&[source], &[(source, 42, ProvinceKind::Land, false)]);
+
+        map.put_pixel([0, 0], target);
+
+        assert_eq!(map.province_id_for_color(target), Some(43));
+        let province = map.get_province(target);
+        assert_eq!(province.preserved_id, Some(43));
+        assert_eq!(province.kind, ProvinceKind::Land);
+        assert_eq!(province.terrain, "plains");
     }
 }

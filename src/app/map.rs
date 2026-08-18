@@ -298,6 +298,8 @@ impl Map {
     /// pixel counts of all relevant provinces, returning Some(Color) if the
     /// province whos pixel was replaced no longer has any pixels left
     fn put_pixel_raw(&mut self, pos: Vector2<u32>, color: Color) -> Option<Color> {
+        let previous_color = self.get_color_at(pos);
+        self.ensure_created_province(color, previous_color);
         let pixel = Arc::make_mut(&mut self.base.color_buffer).get_pixel_mut(pos[0], pos[1]);
         let Rgb(previous_color) = std::mem::replace(pixel, Rgb(color));
 
@@ -315,6 +317,39 @@ impl Map {
         } else {
             None
         }
+    }
+
+    /// Gives a newly painted province its final, stable identity immediately.
+    ///
+    /// The first pixel inherits only safe map metadata from the province it
+    /// splits from.  This keeps a new land split usable by the State editor
+    /// before saving, while its generated ID remains the same through undo,
+    /// redo, candidate creation, and the final write.
+    fn ensure_created_province(&mut self, color: Color, source_color: Color) {
+        if self.base.province_data_map.contains_key(&color) {
+            return;
+        }
+
+        // The writer will surface the typed allocation error during its normal
+        // preflight if an imported map has exhausted u32::MAX.  Do not panic
+        // while the user is painting such a pathological map.
+        let Ok(id) = self.base.province_id_index.next_allocatable_id() else {
+            return;
+        };
+        let source = self.get_province(source_color);
+        let province = ProvinceData {
+            preserved_id: Some(id),
+            kind: source.kind,
+            terrain: source.terrain.clone(),
+            continent: source.continent,
+            coastal: source.coastal,
+            pixel_count: 0,
+            pixel_sum: [0, 0],
+        };
+        Arc::make_mut(&mut self.base.province_data_map).insert(color, Arc::new(province));
+        Arc::make_mut(&mut self.base.province_id_index)
+            .insert(id, color)
+            .expect("new province identity must be unique");
     }
 
     /// Sets the color of a single pixel in `color_buffer`, checks included
@@ -392,6 +427,52 @@ impl Map {
         }
 
         coastal_provinces
+    }
+
+    /// Applies the established land--sea neighbor calculation to the working
+    /// metadata and returns only the number of flags that actually changed.
+    pub fn recalculate_coastal_flags(&mut self) -> usize {
+        let coastal_provinces = self.calculate_coastal_provinces();
+        let mut changed = 0;
+        for (&color, province_data) in Arc::make_mut(&mut self.base.province_data_map).iter_mut() {
+            let province_data = Arc::make_mut(province_data);
+            let coastal = coastal_provinces[&color];
+            if province_data.coastal != coastal {
+                province_data.coastal = coastal;
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    pub fn geometry_matches(&self, baseline: &MapBase) -> bool {
+        if self.base.color_buffer.dimensions() != baseline.color_buffer.dimensions() {
+            return false;
+        }
+        // Color values may be regenerated for metadata edits. Geometry is the
+        // partition of pixels into provinces, so compare that partition via a
+        // bidirectional color mapping rather than comparing RGB values.
+        let mut baseline_to_current = AHashMap::default();
+        let mut current_to_baseline = AHashMap::default();
+        for (current, saved) in self
+            .base
+            .color_buffer
+            .pixels()
+            .zip(baseline.color_buffer.pixels())
+        {
+            let current = current.0;
+            let saved = saved.0;
+            if baseline_to_current
+                .insert(saved, current)
+                .is_some_and(|mapped| mapped != current)
+                || current_to_baseline
+                    .insert(current, saved)
+                    .is_some_and(|mapped| mapped != saved)
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Returns a hashset of uords describing which provinces are touching each other
