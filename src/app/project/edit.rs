@@ -21,6 +21,10 @@ pub struct StateEditSession {
     origins_by_state: BTreeMap<u32, WorkingStateOrigin>,
     removed_state_ids: BTreeSet<u32>,
     province_kinds: BTreeMap<u32, ProvinceKind>,
+    /// Provinces created after the project was loaded. Their State assignment
+    /// is intentionally kept outside the loaded baseline so it becomes a
+    /// normal State patch, while map undo/redo can safely suspend/restore it.
+    created_provinces: BTreeMap<u32, (ProvinceKind, Option<u32>)>,
     removed_provinces: BTreeSet<u32>,
     ambiguous_provinces: BTreeSet<u32>,
     selected_provinces: BTreeSet<u32>,
@@ -257,6 +261,7 @@ impl StateEditSession {
             origins_by_state,
             removed_state_ids: BTreeSet::new(),
             province_kinds,
+            created_provinces: BTreeMap::new(),
             removed_provinces: BTreeSet::new(),
             ambiguous_provinces: project.ambiguous_provinces.keys().copied().collect(),
             selected_provinces: BTreeSet::new(),
@@ -277,6 +282,69 @@ impl StateEditSession {
 
     pub fn unassigned_land_provinces(&self) -> &BTreeSet<u32> {
         &self.working.unassigned_land_provinces
+    }
+
+    pub fn knows_province(&self, province_id: u32) -> bool {
+        self.province_kinds.contains_key(&province_id)
+    }
+
+    /// Registers an in-memory map province so State editing can use it before
+    /// the first Save Project. `inherited_state` is supplied only when every
+    /// painted source province belonged to the same State.
+    pub fn register_created_province(
+        &mut self,
+        province_id: u32,
+        kind: ProvinceKind,
+        inherited_state: Option<u32>,
+    ) {
+        if self.province_kinds.contains_key(&province_id) {
+            return;
+        }
+        let inherited_state = inherited_state.filter(|id| self.valid_state_ids.contains(id));
+        self.province_kinds.insert(province_id, kind);
+        self.created_provinces
+            .insert(province_id, (kind, inherited_state));
+        self.working
+            .move_province(province_id, None, inherited_state);
+        self.working
+            .recompute_unassigned_land(&self.province_kinds, &self.removed_provinces);
+        self.last_changed_provinces.insert(province_id);
+        self.recompute_dirty();
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Mirrors only session-created identities after map undo/redo. Removing
+    /// pixels cannot leave a State reference behind; recreating the same map
+    /// snapshot restores its original automatic State assignment.
+    pub fn synchronize_created_provinces(&mut self, map: &Map) {
+        let current = map.province_ids().collect::<BTreeSet<_>>();
+        let created = self.created_provinces.clone();
+        let mut changed = false;
+        for (&province_id, &(kind, inherited_state)) in &created {
+            if current.contains(&province_id) {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    self.province_kinds.entry(province_id)
+                {
+                    entry.insert(kind);
+                    self.working
+                        .move_province(province_id, None, inherited_state);
+                    self.last_changed_provinces.insert(province_id);
+                    changed = true;
+                }
+            } else if self.province_kinds.remove(&province_id).is_some() {
+                let state_id = self.working.state_by_province.get(&province_id).copied();
+                self.working.move_province(province_id, state_id, None);
+                self.selected_provinces.remove(&province_id);
+                self.last_changed_provinces.insert(province_id);
+                changed = true;
+            }
+        }
+        if changed {
+            self.working
+                .recompute_unassigned_land(&self.province_kinds, &self.removed_provinces);
+            self.recompute_dirty();
+            self.revision = self.revision.wrapping_add(1);
+        }
     }
 
     pub fn selected_provinces(&self) -> &BTreeSet<u32> {
@@ -2135,6 +2203,7 @@ mod tests {
             ]),
             removed_state_ids: BTreeSet::new(),
             province_kinds,
+            created_provinces: BTreeMap::new(),
             removed_provinces: BTreeSet::new(),
             ambiguous_provinces: BTreeSet::new(),
             selected_provinces: BTreeSet::new(),
@@ -2222,6 +2291,29 @@ mod tests {
         edit.reassign_provinces(&[20], Some(2)).unwrap();
         assert_eq!(edit.working.state_by_province.get(&20), Some(&2));
         assert!(!edit.working.unassigned_land_provinces.contains(&20));
+    }
+
+    #[test]
+    fn created_land_province_is_editable_before_save_and_inherits_one_state() {
+        let mut edit = session();
+        edit.register_created_province(99, ProvinceKind::Land, Some(1));
+
+        assert!(edit.knows_province(99));
+        assert_eq!(edit.province_state_id(99), Some(1));
+        assert_eq!(edit.editable_province_state(99), Ok(1));
+        assert!(edit.is_state_dirty(1));
+    }
+
+    #[test]
+    fn created_land_province_without_unambiguous_source_is_unassigned_not_invalid() {
+        let mut edit = session();
+        edit.register_created_province(99, ProvinceKind::Land, None);
+
+        assert!(edit.unassigned_land_provinces().contains(&99));
+        assert_eq!(
+            edit.editable_province_state(99),
+            Err(StateEditError::ProvinceUnassigned(99))
+        );
     }
 
     #[test]

@@ -20,6 +20,15 @@ pub struct History {
     max_undo_states: usize,
 }
 
+/// Geometry affected by a colour paint, including the stable identities that
+/// were replaced before the pixels changed. Canvas uses this provenance to
+/// inherit a State only when the split has one unambiguous source State.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColorPaintResult {
+    pub extents: Extents,
+    pub replaced_province_ids: BTreeSet<u32>,
+}
+
 impl History {
     pub fn new(max_undo_states: usize, map: &Map) -> Self {
         assert!(
@@ -238,16 +247,24 @@ impl History {
         bundle: &mut Bundle,
         pos: Vector2<u32>,
         fill_color: Color,
-    ) -> Option<Extents> {
+    ) -> Option<ColorPaintResult> {
         let which = bundle.map.get_color_at(pos);
         if which != fill_color {
+            let replaced_province_ids = bundle
+                .map
+                .province_id_for_color(which)
+                .into_iter()
+                .collect();
             let extents = bundle.map.recolor_province(which, fill_color);
             self.push_map_state(
                 &bundle.map,
                 StepOrigin::PaintEntireProvince,
                 ViewMode::Color,
             );
-            Some(extents)
+            Some(ColorPaintResult {
+                extents,
+                replaced_province_ids,
+            })
         } else {
             None
         }
@@ -279,12 +296,24 @@ impl History {
         lasso: Vec<Vector2<f64>>,
         color: Color,
         mask: Option<BrushMask>,
-    ) -> Option<Extents> {
+    ) -> Option<ColorPaintResult> {
         let (extents, pixels) = pixel_lasso(&bundle.map, lasso, color, mask);
         if !pixels.is_empty() {
+            let replaced_province_ids = pixels
+                .iter()
+                .filter_map(|&pos| {
+                    let source = bundle.map.get_color_at(pos);
+                    (source != color)
+                        .then(|| bundle.map.province_id_for_color(source))
+                        .flatten()
+                })
+                .collect();
             bundle.map.put_many_pixels(color, &pixels);
             self.push_map_state(&bundle.map, StepOrigin::PaintPixelLasso, ViewMode::Color);
-            Some(extents)
+            Some(ColorPaintResult {
+                extents,
+                replaced_province_ids,
+            })
         } else {
             None
         }
@@ -296,14 +325,22 @@ impl History {
         pos: Vector2<u32>,
         color: Color,
         mask: Option<BrushMask>,
-    ) -> Option<Extents> {
+    ) -> Option<ColorPaintResult> {
         let which = bundle.map.get_color_at(pos);
         let previous_kind = bundle.map.get_province(which).kind;
         let masked = mask.map_or(true, |mask| mask.includes(previous_kind));
         if masked && which != color {
+            let replaced_province_ids = bundle
+                .map
+                .province_id_for_color(which)
+                .into_iter()
+                .collect();
             let extents = bundle.map.flood_fill_province(pos, color);
             self.push_map_state(&bundle.map, StepOrigin::PaintPixelBucket, ViewMode::Color);
-            Some(extents)
+            Some(ColorPaintResult {
+                extents,
+                replaced_province_ids,
+            })
         } else {
             None
         }
@@ -317,12 +354,24 @@ impl History {
         color: Color,
         mask: Option<BrushMask>,
         id: u32,
-    ) -> Option<Extents> {
+    ) -> Option<ColorPaintResult> {
         let (extents, pixels) = pixel_area(&bundle.map, pos, radius, color, mask);
         if !pixels.is_empty() {
+            let replaced_province_ids = pixels
+                .iter()
+                .filter_map(|&pos| {
+                    let source = bundle.map.get_color_at(pos);
+                    (source != color)
+                        .then(|| bundle.map.province_id_for_color(source))
+                        .flatten()
+                })
+                .collect();
             bundle.map.put_many_pixels(color, &pixels);
             self.push_map_state(&bundle.map, StepOrigin::PaintPixelArea(id), ViewMode::Color);
-            Some(extents)
+            Some(ColorPaintResult {
+                extents,
+                replaced_province_ids,
+            })
         } else {
             None
         }

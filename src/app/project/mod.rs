@@ -206,6 +206,13 @@ impl Hoi4Project {
             .and_then(|&index| self.states.get(index))
     }
 
+    pub fn diagnostics_for_province(
+        &self,
+        province_id: u32,
+    ) -> impl Iterator<Item = &ProjectDiagnostic> {
+        ProjectDiagnostic::for_province(&self.diagnostics, province_id)
+    }
+
     pub fn diagnostic_report(&self) -> String {
         self.diagnostics
             .iter()

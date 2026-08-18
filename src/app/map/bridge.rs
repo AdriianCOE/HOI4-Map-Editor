@@ -857,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn new_provinces_are_assigned_above_sparse_maximum_in_color_order() {
+    fn newly_painted_provinces_keep_the_ids_assigned_during_editing() {
         let colors = [[10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]];
         let image_colors = [
             colors[0], colors[1], colors[0], colors[2], colors[0], colors[3],
@@ -919,24 +919,11 @@ mod tests {
                 (1, colors[0]),
                 (42, colors[2]),
                 (500, colors[3]),
-                (501, lower_color),
-                (502, higher_color),
+                (501, higher_color),
+                (502, lower_color),
             ]
         );
-        let changes = changes.unwrap();
-        assert_eq!(
-            changes.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            vec![
-                "Assigned ID 501 to new province",
-                "Assigned ID 502 to new province"
-            ]
-        );
-        let mut output = Vec::new();
-        super::write_id_changes(&mut output, changes).unwrap();
-        assert_eq!(
-            String::from_utf8(output).unwrap(),
-            "ID Changes\n- Assigned ID 501 to new province\n- Assigned ID 502 to new province\n"
-        );
+        assert_eq!(changes, None);
     }
 
     #[test]

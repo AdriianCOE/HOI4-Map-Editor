@@ -204,6 +204,14 @@ pub struct ProjectDiagnostic {
 }
 
 impl ProjectDiagnostic {
+    /// Returns diagnostics explicitly associated with one province.  Callers
+    /// should use this instead of matching human-readable message text.
+    pub fn for_province(diagnostics: &[Self], province_id: u32) -> impl Iterator<Item = &Self> {
+        diagnostics
+            .iter()
+            .filter(move |diagnostic| diagnostic.province_id == Some(province_id))
+    }
+
     pub fn new(
         kind: ProjectDiagnosticKind,
         severity: DiagnosticSeverity,

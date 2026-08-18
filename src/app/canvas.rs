@@ -4879,6 +4879,29 @@ impl Canvas {
                         })
                         .collect()
                 }));
+                if let Some(province_id) = self.active_province_id {
+                    lines.extend([String::new(), format!("PROVINCE {province_id} CONTEXT")]);
+                    let state_id = self
+                        .state_edit_session
+                        .as_ref()
+                        .and_then(|edit| edit.province_state_id(province_id));
+                    lines.push(state_id.map_or_else(
+                        || "~Unassigned land province; Save Project is allowed.".to_owned(),
+                        |state_id| format!("State assignment: {state_id}"),
+                    ));
+                    lines.extend(self.project.as_ref().into_iter().flat_map(|project| {
+                        project
+                            .diagnostics_for_province(province_id)
+                            .map(|diagnostic| {
+                                let marker = match diagnostic.severity {
+                                    DiagnosticSeverity::Error => "!",
+                                    DiagnosticSeverity::Warning => "~",
+                                    DiagnosticSeverity::Info => "i",
+                                };
+                                format!("{marker}{:?}: {}", diagnostic.kind, diagnostic.message)
+                            })
+                    }));
+                }
                 if let Some(catalog) = self.definition_catalog.as_ref() {
                     lines.extend(catalog.diagnostics.iter().take(12).map(|diagnostic| {
                         format!("Catalog {:?}: {}", diagnostic.severity, diagnostic.message)
@@ -6025,6 +6048,7 @@ impl Canvas {
         }
 
         if let Some(commit) = self.history.undo(&mut self.bundle.map) {
+            self.synchronize_created_state_provinces();
             self.bundle.map.recalculate_all_boundaries();
             self.problems.clear();
             if self.bundle.config.change_view_mode_on_undo {
@@ -6091,6 +6115,7 @@ impl Canvas {
         }
 
         if let Some(commit) = self.history.redo(&mut self.bundle.map) {
+            self.synchronize_created_state_provinces();
             self.bundle.map.recalculate_all_boundaries();
             self.problems.clear();
             if self.bundle.config.change_view_mode_on_undo {
@@ -7154,19 +7179,26 @@ impl Canvas {
         dialog: StateApplyDialog,
     ) {
         self.project_validation_report = combined.project_validation.clone();
-        let result = combined.project_validation.as_ref().map_or_else(
-            || combined.round_trip.status.label().to_owned(),
-            |report| {
-                if report.delta.has_preexisting_errors()
-                    && !report.delta.blocks_save()
-                    && !report.delta.requires_warning_review()
-                {
-                    "PASSED WITH PRE-EXISTING ISSUES".to_owned()
-                } else {
-                    combined.round_trip.status.label().to_owned()
-                }
-            },
-        );
+        let result = if !matches!(
+            combined.round_trip.status,
+            RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
+        ) {
+            combined.round_trip.status.label().to_owned()
+        } else {
+            combined.project_validation.as_ref().map_or_else(
+                || combined.round_trip.status.label().to_owned(),
+                |report| {
+                    if report.delta.has_preexisting_errors()
+                        && !report.delta.blocks_save()
+                        && !report.delta.requires_warning_review()
+                    {
+                        "PASSED WITH PRE-EXISTING ISSUES".to_owned()
+                    } else {
+                        combined.round_trip.status.label().to_owned()
+                    }
+                },
+            )
+        };
         self.last_validation = Some(LastValidationState {
             target: ProjectValidationTarget::PendingChanges,
             result,
@@ -9894,15 +9926,16 @@ impl Canvas {
     fn tool_lasso_finish(&mut self, lasso: Vec<Vector2<f64>>) {
         if let (Some(color), ViewMode::Color) = (self.tool.color_brush, self.view_mode) {
             if lasso.len() > 2 {
-                if let Some(extents) = self.history.paint_pixel_lasso(
+                if let Some(result) = self.history.paint_pixel_lasso(
                     &mut self.bundle,
                     lasso,
                     color,
                     self.tool.brush_mask,
                 ) {
+                    self.register_new_provinces_for_state_edit(&result.replaced_province_ids);
                     self.problems.clear();
                     self.sync_province_dirty();
-                    self.refresh_selective(extents);
+                    self.refresh_selective(result.extents);
                 };
             };
         };
@@ -9912,7 +9945,7 @@ impl Canvas {
         if let Some(pos) = self.camera.relative_position_int(interface, cursor_pos) {
             if let (Some(color), ViewMode::Color) = (self.tool.color_brush, self.view_mode) {
                 let pos = self.camera.relative_position(interface, cursor_pos);
-                if let Some(extents) = self.history.paint_pixel_area(
+                if let Some(result) = self.history.paint_pixel_area(
                     &mut self.bundle,
                     pos,
                     self.tool.radius,
@@ -9920,9 +9953,10 @@ impl Canvas {
                     self.tool.brush_mask,
                     self.tool.id,
                 ) {
+                    self.register_new_provinces_for_state_edit(&result.replaced_province_ids);
                     self.problems.clear();
                     self.sync_province_dirty();
-                    self.refresh_selective(extents);
+                    self.refresh_selective(result.extents);
                 };
             } else if let (Some(kind), ViewMode::Kind) = (self.tool.kind_brush, self.view_mode) {
                 if let Some(extents) = self
@@ -9980,10 +10014,11 @@ impl Canvas {
                     )
                 };
 
-                if let Some(extents) = result {
+                if let Some(result) = result {
+                    self.register_new_provinces_for_state_edit(&result.replaced_province_ids);
                     self.problems.clear();
                     self.sync_province_dirty();
-                    self.refresh_selective(extents);
+                    self.refresh_selective(result.extents);
                 };
             };
         };
@@ -10018,6 +10053,40 @@ impl Canvas {
         alerts.push(Err(format!(
             "Province {province_id} no longer has pixels and is still referenced by State {state_id}. The paint was restored; reassign or remove its references before deleting it."
         )));
+    }
+
+    fn synchronize_created_state_provinces(&mut self) {
+        if let Some(edit) = self.state_edit_session.as_mut() {
+            edit.synchronize_created_provinces(&self.bundle.map);
+        }
+    }
+
+    fn register_new_provinces_for_state_edit(&mut self, replaced_province_ids: &BTreeSet<u32>) {
+        let Some(edit) = self.state_edit_session.as_ref() else {
+            return;
+        };
+        let source_states = replaced_province_ids
+            .iter()
+            .filter_map(|id| edit.province_state_id(*id))
+            .collect::<BTreeSet<_>>();
+        let inherited_state = (source_states.len() == 1)
+            .then(|| *source_states.first().expect("one inherited State"));
+        let additions = self
+            .bundle
+            .map
+            .province_id_index()
+            .iter()
+            .filter(|(id, _)| !edit.knows_province(*id))
+            .filter_map(|(id, color)| {
+                let province = self.bundle.map.get_province(color);
+                (province.kind == ProvinceKind::Land).then_some((id, province.kind))
+            })
+            .collect::<Vec<_>>();
+        if let Some(edit) = self.state_edit_session.as_mut() {
+            for (province_id, kind) in additions {
+                edit.register_created_province(province_id, kind, inherited_state);
+            }
+        }
     }
 
     fn tool_connect_activate(&mut self, interface: &Interface, cursor_pos: Vector2<f64>) {
@@ -11614,17 +11683,38 @@ fn active_province_information(
         Ok(state_id) => format!("Editable in State {state_id} | Action: Edit > Edit province data"),
         Err(error) => error.to_string(),
     };
+    let mut diagnostics = project
+        .diagnostics_for_province(province_id)
+        .map(|diagnostic| {
+            let marker = match diagnostic.severity {
+                DiagnosticSeverity::Error => "!",
+                DiagnosticSeverity::Warning => "~",
+                DiagnosticSeverity::Info => "i",
+            };
+            format!("{marker}{}", diagnostic.message)
+        })
+        .collect::<Vec<_>>();
+    if state_id.is_none() {
+        diagnostics.push(
+            "~Land province has no State assignment (Save Project is still allowed).".to_owned(),
+        );
+    }
+    if diagnostics.is_empty() {
+        diagnostics.push("No contextual problems.".to_owned());
+    }
     Some(format!(
         "PROVINCE {province_id}\n\
      {state}\n\
      Overview: active province | Selected provinces for Move: {}\n\
      Victory point: {}\n\
      Province Buildings: {}\n\
-     Diagnostics: {}",
+     State editing: {}\n\
+     Problems: {}",
         edit.selected_provinces().len(),
         option_display(data.victory_point),
         format_named_values(&data.buildings),
         edit_status,
+        diagnostics.join(" | "),
     ))
 }
 
