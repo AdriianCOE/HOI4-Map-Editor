@@ -45,8 +45,9 @@ game and needs no playset entry.
 - The Workshop staging flow currently packages the Windows executable only.
   Linux x86_64 previews are distributed as portable tarballs through GitHub
   Releases, not through Workshop content.
-- Game localization/metadata, flags, and icons (`.gfx`/`.dds`) are not yet
-  loaded; the editor shows raw identifiers.
+- Political View loads country colors, localized names, and normal flags from
+  the user's local mod/base-game files when available. Other game metadata and
+  icons (`.gfx`/`.dds`) are not yet loaded.
 - Adjacencies, Strategic Regions, and Continents do not yet have complete
   dedicated editing workspaces.
 

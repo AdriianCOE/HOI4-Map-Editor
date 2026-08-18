@@ -66,6 +66,16 @@ Switch between:
 - States
 - Political
 
+Political View resolves country colors, localized country names, and available
+normal flags from the user's mod/base-game installation. It remains read-only:
+missing metadata falls back safely to country tags and deterministic colors.
+Country metadata is loaded once per project/base-game/language change, not per
+frame. Resolution is layer-first: the mod's `common/countries/colors.txt`, then
+its per-country definitions, then the equivalent base-game sources. The
+`color` entry is used (never `color_ui`). Localization scans every
+`localisation/<language>/**/*.yml` file; it prefers `TAG`, then the country's
+initial ruling-ideology key, and uses the raw tag only as a final fallback.
+
 Optional overlays include:
 
 - Rivers
@@ -236,8 +246,9 @@ Map shortcuts are suspended while typing in a field, picker, or search box.
   supported.
 - The Validation Results window currently offers basic all-domain results;
   advanced report export and persistent ignore policies are planned.
-- Country names, state localizations, and other game-data localizations are not loaded from the game yet.
-- Country flags and game icons are not displayed yet.
+- State localizations, game icons, and broader game-data localization are not
+  loaded yet. Political View loads only the country presentation metadata it
+  needs at runtime.
 - Adjacencies can be inspected and preserved, but the full editing workspace is
   still planned; invalid references require external repair.
 - Strategic Regions and Continents do not yet have complete dedicated editing workspaces.
@@ -250,15 +261,13 @@ The project does not distribute proprietary Hearts of Iron IV assets.
 
 ### Game data integration
 
-- Load localized country, state, building, resource, terrain, and category names.
+- Load localized state, building, resource, terrain, and category names.
 - Resolve data from both the mod and the local Hearts of Iron IV installation.
 - Use mod files as overrides over vanilla data.
-- Display real country colors in the Political Map View.
 - Search using localized names and technical identifiers.
 
 ### Flags and interface assets
 
-- Read country flags from the local game or mod.
 - Resolve `.gfx` definitions and `.dds` textures.
 - Display game icons without distributing Paradox assets.
 - Add a local asset cache for faster project loading.

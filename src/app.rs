@@ -6,6 +6,7 @@ pub mod inspector_controls;
 pub mod interface;
 pub mod map;
 pub mod map_layers;
+pub mod political;
 pub mod project;
 pub mod state;
 

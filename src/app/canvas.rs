@@ -29,6 +29,11 @@ use super::map_layers::{
     ImageOverlaySource, MapBaseView, MapLayerState, WorkspaceMode, WorkspaceViewPreferences,
     political_fallback_color,
 };
+use super::political::{
+    PoliticalCountryCatalog, PoliticalLabel, PoliticalLabelVisibility, PoliticalProvince,
+    PoliticalStateOwnership, political_label_visibility, political_labels_visible_in_view,
+    prepare_country_labels,
+};
 use super::project::{
     BrushProvinceClassification, BuildingScope, CombinedRoundTripValidationReport,
     DiagnosticSeverity, EditableProvinceData, EditableStateProperties, GameDefinitionCatalog,
@@ -98,6 +103,11 @@ pub struct Canvas {
     texture: Texture,
     state_texture: Option<Texture>,
     political_texture: Option<Texture>,
+    political_country_catalog: Option<PoliticalCountryCatalog>,
+    political_labels: Vec<PoliticalLabel>,
+    political_flag_textures: BTreeMap<String, Texture>,
+    political_adjacency_pairs: Vec<(u32, u32)>,
+    political_language: String,
     image_overlay_texture: Option<Texture>,
     image_overlay_status: String,
     state_boundaries: Vec<UOrd<Vector2<u32>>>,
@@ -552,6 +562,9 @@ impl Canvas {
         let definition_catalog = project
             .as_ref()
             .map(|project| GameDefinitionCatalog::build(project, base_game_root.as_deref()));
+        let political_country_catalog = project.as_ref().map(|project| {
+            PoliticalCountryCatalog::load(&project.paths.root, base_game_root.as_deref())
+        });
         let history = History::new(bundle.config.max_undo_states, &bundle.map);
         let texture_settings = TextureSettings::new().mag(Filter::Nearest);
         let texture = Texture::from_image(&bundle.texture_buffer_color(), &texture_settings);
@@ -651,12 +664,17 @@ impl Canvas {
             map_layers.image_overlay.enabled = overlay_settings.visible;
         }
 
-        Ok(Canvas {
+        let mut canvas = Canvas {
             bundle,
             history,
             texture,
             state_texture,
             political_texture: None,
+            political_country_catalog,
+            political_labels: Vec::new(),
+            political_flag_textures: BTreeMap::new(),
+            political_adjacency_pairs: adjacency_pairs.clone(),
+            political_language: crate::localization::language().to_owned(),
             image_overlay_texture,
             image_overlay_status,
             state_boundaries,
@@ -743,7 +761,9 @@ impl Canvas {
             session_started: Instant::now(),
             modified: false,
             camera,
-        })
+        };
+        canvas.refresh_political_texture();
+        Ok(canvas)
     }
 
     pub fn location(&self) -> &Location {
@@ -3071,6 +3091,9 @@ impl Canvas {
         self.poll_round_trip_validation();
         self.poll_state_save();
         self.poll_province_save();
+        if self.political_language != crate::localization::language() {
+            self.reload_political_country_catalog();
+        }
         let transform = ctx
             .transform
             .append_transform(self.camera.display_matrix(interface));
@@ -3110,6 +3133,9 @@ impl Canvas {
             });
         if let Some(rivers) = rivers {
             graphics::image(rivers, transform, gl);
+        }
+        if political_labels_visible_in_view(self.map_layers.base_view) {
+            self.draw_political_country_labels(ctx, interface, glyph_cache, gl);
         }
         if self.map_layers.show_adjacencies {
             self.draw_adjacencies(ctx, interface, cursor_pos, gl);
@@ -4827,6 +4853,14 @@ impl Canvas {
                         "STATE DIAGNOSTICS".to_owned(),
                     ]);
                 }
+                if let Some(catalog) = self.political_country_catalog.as_ref() {
+                    lines.extend([String::new(), "POLITICAL COUNTRY RESOLUTION".to_owned()]);
+                    lines.extend(
+                        catalog
+                            .owner_resolution(data.history.owner.as_deref())
+                            .diagnostic_lines(),
+                    );
+                }
                 lines.extend(self.project.as_ref().map_or_else(Vec::new, |project| {
                     let path = project
                         .state_document(state_id)
@@ -5802,6 +5836,7 @@ impl Canvas {
         };
         self.definition_catalog = Some(GameDefinitionCatalog::build(project, root.as_deref()));
         self.definition_base_game_root = root;
+        self.reload_political_country_catalog();
         let catalog = self.definition_catalog.as_ref().unwrap();
         alerts.push(Ok(format!(
             "Definition catalog: {} categories, {} resources, {} buildings, {} tags",
@@ -7763,6 +7798,7 @@ impl Canvas {
         self.state_selection = None;
         self.selection_texture = None;
         self.selected_state_boundaries.clear();
+        self.reload_political_country_catalog();
         self.refresh_state_visuals_full(0);
     }
 
@@ -8907,17 +8943,79 @@ impl Canvas {
     fn refresh_political_texture(&mut self) {
         let Some(project) = self.project.as_ref() else {
             self.political_texture = None;
+            self.political_labels.clear();
             return;
         };
         let Some(edit) = self.state_edit_session.as_ref() else {
             self.political_texture = None;
+            self.political_labels.clear();
             return;
         };
         let owners = edit
             .valid_state_ids()
             .iter()
-            .filter_map(|state_id| Some((*state_id, edit.state_data(*state_id)?.history.owner)))
+            .filter_map(|state_id| {
+                let state = edit.state_data(*state_id)?;
+                Some((*state_id, state.history.owner.clone()))
+            })
             .collect::<BTreeMap<_, _>>();
+        let state_ownership = edit
+            .valid_state_ids()
+            .iter()
+            .filter_map(|state_id| {
+                let state = edit.state_data(*state_id)?;
+                Some(PoliticalStateOwnership {
+                    owner: state.history.owner.clone(),
+                    provinces: state.provinces.iter().copied().collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let owner_tags = owners
+            .values()
+            .filter_map(|owner| owner.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(catalog) = self.political_country_catalog.as_mut() {
+            catalog.resolve_tags(owner_tags);
+        }
+        let provinces = self
+            .bundle
+            .map
+            .iter_province_data()
+            .filter_map(|(_, province)| {
+                Some(PoliticalProvince {
+                    id: province.preserved_id?,
+                    is_land: province.kind == ProvinceKind::Land,
+                    center: province.center_of_mass(),
+                    pixel_count: province.pixel_count,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.political_labels =
+            self.political_country_catalog
+                .as_ref()
+                .map_or_else(Vec::new, |catalog| {
+                    prepare_country_labels(
+                        catalog,
+                        &state_ownership,
+                        &provinces,
+                        &self.political_adjacency_pairs,
+                    )
+                });
+        if let Some(catalog) = self.political_country_catalog.as_ref() {
+            let settings = TextureSettings::new().mag(Filter::Nearest);
+            for label in &self.political_labels {
+                if self.political_flag_textures.contains_key(&label.tag) {
+                    continue;
+                }
+                if let Some(flag) = catalog
+                    .metadata(&label.tag)
+                    .and_then(|country| country.flag.as_ref())
+                {
+                    self.political_flag_textures
+                        .insert(label.tag.clone(), Texture::from_image(flag, &settings));
+                }
+            }
+        }
         let ambiguous = project
             .ambiguous_provinces
             .keys()
@@ -8937,11 +9035,11 @@ impl Canvas {
                 return super::project::AMBIGUOUS_PROVINCE_COLOR;
             }
             if let Some(state_id) = state_by_province.get(&province_id) {
-                return owners
-                    .get(state_id)
-                    .and_then(Option::as_deref)
-                    .map(political_fallback_color)
-                    .unwrap_or([0x68, 0x68, 0x68]);
+                let owner = owners.get(state_id).and_then(Option::as_deref);
+                return self.political_country_catalog.as_ref().map_or_else(
+                    || owner.map_or([0x68, 0x68, 0x68], political_fallback_color),
+                    |catalog| catalog.owner_resolution(owner).color_for_map(),
+                );
             }
             if province.kind == ProvinceKind::Land && unassigned.contains(&province_id) {
                 return super::project::UNASSIGNED_LAND_COLOR;
@@ -8950,6 +9048,81 @@ impl Canvas {
         });
         let settings = TextureSettings::new().mag(Filter::Nearest);
         self.political_texture = Some(Texture::from_image(&image, &settings));
+    }
+
+    fn reload_political_country_catalog(&mut self) {
+        self.political_country_catalog = self.project.as_ref().map(|project| {
+            PoliticalCountryCatalog::load(
+                &project.paths.root,
+                self.definition_base_game_root.as_deref(),
+            )
+        });
+        self.political_flag_textures.clear();
+        self.political_language = crate::localization::language().to_owned();
+        self.refresh_political_texture();
+    }
+
+    fn draw_political_country_labels(
+        &self,
+        ctx: Context,
+        interface: &Interface,
+        glyph_cache: &mut FontGlyphCache,
+        gl: &mut GlGraphics,
+    ) {
+        let zoom = self.camera.scale_factor();
+        for label in &self.political_labels {
+            let visibility =
+                political_label_visibility(label.territory_pixels, zoom, label.flag_available);
+            if visibility == PoliticalLabelVisibility::Hidden {
+                continue;
+            }
+            let anchor = self.camera.compute_position(interface, label.anchor);
+            if !self.camera.within_viewport(interface, anchor) {
+                continue;
+            }
+            let font_size = (FONT_SIZE as f64 * zoom.clamp(0.72, 1.35)).round() as u32;
+            let label_width = label.display_name.chars().count() as f64 * font_size as f64 * 0.55;
+            let name_pos = [anchor[0] - label_width / 2.0, anchor[1] - font_size as f64];
+            let show_name = matches!(
+                visibility,
+                PoliticalLabelVisibility::NameOnly | PoliticalLabelVisibility::NameAndFlag
+            );
+            let show_flag = matches!(
+                visibility,
+                PoliticalLabelVisibility::FlagOnly | PoliticalLabelVisibility::NameAndFlag
+            );
+            if show_name {
+                let shadow = ctx.transform.trans(name_pos[0] + 1.0, name_pos[1] + 1.0);
+                graphics::text(
+                    colors::BLACK,
+                    font_size,
+                    &label.display_name,
+                    glyph_cache,
+                    shadow,
+                    gl,
+                )
+                .expect("unable to draw political label shadow");
+                let text = ctx.transform.trans_pos(name_pos);
+                graphics::text(
+                    colors::WHITE,
+                    font_size,
+                    &label.display_name,
+                    glyph_cache,
+                    text,
+                    gl,
+                )
+                .expect("unable to draw political label");
+            }
+            if show_flag && let Some(flag) = self.political_flag_textures.get(&label.tag) {
+                let scale = zoom.clamp(0.75, 1.5);
+                let width = 26.0 * scale;
+                let height = 17.0 * scale;
+                let top = anchor[1] + if show_name { 3.0 } else { -height / 2.0 };
+                graphics::Image::new()
+                    .rect([anchor[0] - width / 2.0, top, width, height])
+                    .draw(flag, &graphics::DrawState::default(), ctx.transform, gl);
+            }
+        }
     }
 
     pub fn toggle_image_overlay(&mut self, alerts: &mut Alerts) {

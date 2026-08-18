@@ -18,7 +18,7 @@ dunce = { version = "1.0" }
 fs-err = { version = "3.1.2" }
 geo = { version = "0.20" }
 glutin = { version = "0.26" }
-image = { version = "~0.24.9", features = ["bmp", "jpeg", "png", "rayon"], default-features = false }
+image = { version = "~0.24.9", features = ["bmp", "dds", "jpeg", "png", "rayon", "tga"], default-features = false }
 itertools = { version = "0.10" }
 once_cell = { version = "1.21" }
 piston = { version = "0.53" }
