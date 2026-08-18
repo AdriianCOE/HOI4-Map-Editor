@@ -1299,7 +1299,8 @@ impl StateEditSession {
                             .get(target_id)
                             .copied()
                             .expect("validated province-removal target");
-                        self.working.set_province_data(target_state_id, *target_id, data);
+                        self.working
+                            .set_province_data(target_state_id, *target_id, data);
                     }
                     self.removed_provinces.insert(*province_id);
                 }
@@ -1319,7 +1320,8 @@ impl StateEditSession {
                     }
                     self.working.move_province(*province_id, None, *state_id);
                     if let Some(state_id) = state_id {
-                        self.working.set_province_data(*state_id, *province_id, data);
+                        self.working
+                            .set_province_data(*state_id, *province_id, data);
                     }
                     self.removed_provinces.remove(province_id);
                 }
@@ -1599,7 +1601,9 @@ impl StateEditCommand {
             Self::ReassignProvinces { deltas } => deltas.is_empty(),
             Self::UpdateStateProperties { change } => change.before == change.after,
             Self::UpdateProvinceData { before, after, .. } => before == after,
-            Self::CreateState { .. } | Self::RemoveState { .. } | Self::RemoveProvince { .. } => false,
+            Self::CreateState { .. } | Self::RemoveState { .. } | Self::RemoveProvince { .. } => {
+                false
+            }
         }
     }
 
@@ -1614,9 +1618,13 @@ impl StateEditCommand {
                 deltas.iter().map(|delta| delta.province_id).collect()
             }
             Self::RemoveProvince {
-                province_id, policy, ..
+                province_id,
+                policy,
+                ..
             } => match policy {
-                ProvinceRemovalPolicy::TransferToProvince(target_id) => vec![*province_id, *target_id],
+                ProvinceRemovalPolicy::TransferToProvince(target_id) => {
+                    vec![*province_id, *target_id]
+                }
                 ProvinceRemovalPolicy::RemoveReferences => vec![*province_id],
             },
         }
@@ -1648,7 +1656,9 @@ impl StateEditCommand {
                 )
             }
             Self::RemoveProvince {
-                province_id, policy, ..
+                province_id,
+                policy,
+                ..
             } => match policy {
                 ProvinceRemovalPolicy::TransferToProvince(target_id) => format!(
                     "Removed Province {province_id} and transferred references to Province {target_id}"
@@ -1744,7 +1754,7 @@ impl StateWorkingSet {
                 (kind == ProvinceKind::Land
                     && !removed_provinces.contains(&province_id)
                     && !self.state_by_province.contains_key(&province_id))
-                    .then_some(province_id)
+                .then_some(province_id)
             })
             .collect();
     }
@@ -3086,12 +3096,18 @@ mod tests {
         assert!(!edit.state_by_province().contains_key(&10));
         assert!(!edit.working.unassigned_land_provinces.contains(&10));
         assert_eq!(edit.working.victory_points_by_state[&2][0].province_id, 30);
-        assert_eq!(edit.working.province_buildings_by_state[&2][&30]["bunker"], 2);
+        assert_eq!(
+            edit.working.province_buildings_by_state[&2][&30]["bunker"],
+            2
+        );
 
         assert!(edit.undo());
         assert_eq!(edit.state_by_province().get(&10), Some(&1));
         assert_eq!(edit.working.victory_points_by_state[&1][0].province_id, 10);
-        assert_eq!(edit.working.province_buildings_by_state[&1][&10]["bunker"], 2);
+        assert_eq!(
+            edit.working.province_buildings_by_state[&1][&10]["bunker"],
+            2
+        );
 
         assert!(edit.redo());
         assert!(!edit.state_by_province().contains_key(&10));
@@ -3139,7 +3155,10 @@ mod tests {
         assert!(!edit.working.unassigned_land_provinces.contains(&11));
         assert!(edit.undo());
         assert_eq!(edit.state_by_province().get(&11), Some(&1));
-        assert_eq!(edit.working.province_buildings_by_state[&1][&11]["bunker"], 2);
+        assert_eq!(
+            edit.working.province_buildings_by_state[&1][&11]["bunker"],
+            2
+        );
     }
 
     #[test]

@@ -208,11 +208,7 @@ impl Interface {
         let save_width = button_width(save_label);
         let mut action_x = window_width.saturating_sub(save_width);
         workspace_buttons.push(ButtonElement {
-            base: ButtonBase::new_fit_width(
-                save_label,
-                [action_x, bar_y],
-                &PALETTE_BUTTON_TOOLBAR,
-            ),
+            base: ButtonBase::new_fit_width(save_label, [action_x, bar_y], &PALETTE_BUTTON_TOOLBAR),
             id: ButtonId::WorkspaceApplyToMod,
         });
         if window_width >= 720 {
@@ -246,11 +242,8 @@ impl Interface {
             } else {
                 "Overlays: Province Borders, State Borders   "
             };
-            let base = ButtonBase::new_fit_width(
-                placeholder,
-                [bar_x, bar_y],
-                &PALETTE_BUTTON_TOOLBAR,
-            );
+            let base =
+                ButtonBase::new_fit_width(placeholder, [bar_x, bar_y], &PALETTE_BUTTON_TOOLBAR);
             if *overlays_selector && bar_x.saturating_add(base.width()) > action_x {
                 continue;
             }
@@ -489,11 +482,7 @@ impl Interface {
                     }
                     _ => true,
                 };
-                return if enabled {
-                    Ok(button.id)
-                } else {
-                    Err(false)
-                };
+                return if enabled { Ok(button.id) } else { Err(false) };
             }
         }
         for dropdown in &mut self.workspace_dropdowns {
@@ -605,13 +594,9 @@ impl Interface {
         for (i, sidebar_button) in tool_buttons.iter().enumerate() {
             if ictx.state_actions.state_view {
                 let hover = sidebar_button.base.test_maybe(pos);
-                sidebar_button.base.draw(
-                    ctx,
-                    hover,
-                    ictx.state_tool == Some(i),
-                    glyph_cache,
-                    gl,
-                );
+                sidebar_button
+                    .base
+                    .draw(ctx, hover, ictx.state_tool == Some(i), glyph_cache, gl);
                 continue;
             }
             let selected_tool = match (ictx.view_mode, i) {
@@ -633,14 +618,7 @@ impl Interface {
 
         for (i, sidebar_button) in self.sidebar_option_buttons.iter().enumerate() {
             let active = ictx.enabled_options[i];
-            sidebar_button.draw(
-                ctx,
-                pos,
-                active,
-                ictx.available_options[i],
-                glyph_cache,
-                gl,
-            );
+            sidebar_button.draw(ctx, pos, active, ictx.available_options[i], glyph_cache, gl);
         }
         if let Some(top) = self
             .sidebar_option_buttons
@@ -706,7 +684,8 @@ impl Interface {
             .fold(self.viewport.window_size[0], f64::min)
             - 8.0;
         let full_status = workspace_status_text(ictx.province_modified, ictx.pending_states, false);
-        let compact_status = workspace_status_text(ictx.province_modified, ictx.pending_states, true);
+        let compact_status =
+            workspace_status_text(ictx.province_modified, ictx.pending_states, true);
         let available = (status_right - status_left).max(0.0);
         let status = if font::get_width_metric_str(&full_status) <= available {
             Some(full_status)
@@ -872,14 +851,9 @@ impl Interface {
             let hover = toolbar_button.base.test_maybe(pos);
             if let Some(label) = selector_label.as_deref() {
                 let label = fit_toolbar_label(label, toolbar_button.base.plate().size[0] - 24.0);
-                toolbar_button.base.draw_with_label(
-                    ctx,
-                    hover,
-                    false,
-                    &label,
-                    glyph_cache,
-                    gl,
-                );
+                toolbar_button
+                    .base
+                    .draw_with_label(ctx, hover, false, &label, glyph_cache, gl);
                 draw_chevron(ctx, toolbar_button.base.plate(), false, gl);
             } else {
                 toolbar_button.base.draw(ctx, hover, false, glyph_cache, gl);
@@ -1023,7 +997,6 @@ impl ToolbarButtonElement {
             })
             .collect()
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1286,12 +1259,7 @@ impl ButtonBase {
 
     fn rect(&self) -> [f64; 4] {
         let plate = self.plate();
-        [
-            plate.pos[0],
-            plate.pos[1],
-            plate.size[0],
-            plate.size[1],
-        ]
+        [plate.pos[0], plate.pos[1], plate.size[0], plate.size[1]]
     }
 }
 
@@ -1428,10 +1396,10 @@ fn draw_tooltip(
         .map(|line| font::get_width_metric_str(line))
         .fold(0.0, f64::max)
         .min(TOOLTIP_MAX_TEXT_WIDTH);
-    let plate_width = (text_width.max(TOOLTIP_MIN_WIDTH) + PADDING[0] * 2.0)
-        .min(window_size[0].max(1.0));
-    let plate_height = (line_height * lines.len() as f64 + PADDING[1] * 2.0)
-        .min(window_size[1].max(1.0));
+    let plate_width =
+        (text_width.max(TOOLTIP_MIN_WIDTH) + PADDING[0] * 2.0).min(window_size[0].max(1.0));
+    let plate_height =
+        (line_height * lines.len() as f64 + PADDING[1] * 2.0).min(window_size[1].max(1.0));
     let below = source[1] + source[3] + 8.0;
     let above = source[1] - plate_height - 8.0;
     let y = if below + plate_height <= window_size[1] {
@@ -1520,12 +1488,20 @@ fn workspace_status_text(province_modified: bool, pending_states: usize, compact
     if compact {
         format!(
             "Map: {} | States: {pending_states}",
-            if province_modified { "Modified" } else { "Saved" }
+            if province_modified {
+                "Modified"
+            } else {
+                "Saved"
+            }
         )
     } else {
         format!(
             "Province Map: {} | States: {pending_states} pending changes",
-            if province_modified { "Modified" } else { "Saved" }
+            if province_modified {
+                "Modified"
+            } else {
+                "Saved"
+            }
         )
     }
 }
@@ -1676,13 +1652,18 @@ pub enum ButtonId {
 fn map_view_button_active(id: ButtonId, view: Option<MapViewMode>) -> bool {
     matches!(
         (id, view),
-        (ButtonId::ToolbarViewMode1, Some(MapViewMode::ProvinceColors))
-            | (ButtonId::ToolbarViewMode2, Some(MapViewMode::ProvinceTypes))
+        (
+            ButtonId::ToolbarViewMode1,
+            Some(MapViewMode::ProvinceColors)
+        ) | (ButtonId::ToolbarViewMode2, Some(MapViewMode::ProvinceTypes))
             | (ButtonId::ToolbarViewMode3, Some(MapViewMode::Terrain))
             | (ButtonId::ToolbarViewMode4, Some(MapViewMode::Continents))
             | (ButtonId::ToolbarViewMode5, Some(MapViewMode::Coastal))
             | (ButtonId::ToolbarViewStateMap, Some(MapViewMode::States))
-            | (ButtonId::ToolbarViewPoliticalMap, Some(MapViewMode::Political))
+            | (
+                ButtonId::ToolbarViewPoliticalMap,
+                Some(MapViewMode::Political)
+            )
     )
 }
 
@@ -1751,10 +1732,7 @@ fn button_visible(id: ButtonId, ictx: InterfaceDrawContext) -> bool {
     );
     let province_only = matches!(
         id,
-        ToolbarEditCoastal
-            | ToolbarEditRecolor
-            | ToolbarEditProblems
-            | ToolbarEditAdjacencies
+        ToolbarEditCoastal | ToolbarEditRecolor | ToolbarEditProblems | ToolbarEditAdjacencies
     );
     if state_only && !ictx.state_actions.state_view {
         return false;
@@ -1796,9 +1774,7 @@ fn button_visible(id: ButtonId, ictx: InterfaceDrawContext) -> bool {
     ) {
         return ictx.state_actions.state_view && ictx.state_actions.fill_active;
     }
-    if matches!(id, ToolbarViewStateMap | ToolbarViewPoliticalMap)
-        && !ictx.states_available
-    {
+    if matches!(id, ToolbarViewStateMap | ToolbarViewPoliticalMap) && !ictx.states_available {
         return false;
     }
     true
@@ -1932,12 +1908,7 @@ enum SidebarPrimitiveKind {
 }
 
 const TOOLBAR_DROPDOWN_WIDTH: u32 = 540;
-const WORKSPACE_DROPDOWNS: &[(
-    &str,
-    &[(&str, &str, ButtonId)],
-    bool,
-    bool,
-)] = &[
+const WORKSPACE_DROPDOWNS: &[(&str, &[(&str, &str, ButtonId)], bool, bool)] = &[
     (
         "Map View",
         &[
@@ -1956,11 +1927,7 @@ const WORKSPACE_DROPDOWNS: &[(
         "Overlays",
         &[
             ("Rivers", "", ButtonId::ToolbarViewToggleRiverOverlay),
-            (
-                "Adjacencies",
-                "",
-                ButtonId::ToolbarViewToggleAdjacencies,
-            ),
+            ("Adjacencies", "", ButtonId::ToolbarViewToggleAdjacencies),
             ("Province IDs", "9", ButtonId::ToolbarViewToggleProvinceIds),
             (
                 "Province Borders",
@@ -1986,17 +1953,17 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 "Ctrl+Alt+O",
                 ButtonId::ToolbarFileOpenFileArchive,
             ),
-            ("Open HOI4 Mod...", "Ctrl+O", ButtonId::ToolbarFileOpenFolder),
+            (
+                "Open HOI4 Mod...",
+                "Ctrl+O",
+                ButtonId::ToolbarFileOpenFolder,
+            ),
             (
                 "Project Settings...",
                 "",
                 ButtonId::ToolbarFileProjectSettings,
             ),
-            (
-                "Save Project",
-                "Ctrl+S",
-                ButtonId::ToolbarFileSave,
-            ),
+            ("Save Project", "Ctrl+S", ButtonId::ToolbarFileSave),
             (
                 "Export Province Map Archive...",
                 "Ctrl+Shift+Alt+S",
@@ -2039,7 +2006,11 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 ButtonId::ToolbarEditStateProperties,
             ),
             ("Edit province data", "", ButtonId::ToolbarEditProvinceData),
-            ("Delete province...", "", ButtonId::ToolbarEditRemoveProvince),
+            (
+                "Delete province...",
+                "",
+                ButtonId::ToolbarEditRemoveProvince,
+            ),
             (
                 "Select All Provinces in Target State",
                 "",
@@ -2080,21 +2051,13 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 "Shift+P",
                 ButtonId::ToolbarEditProblems,
             ),
-            (
-                "Edit Adjacencies",
-                "",
-                ButtonId::ToolbarEditAdjacencies,
-            ),
+            ("Edit Adjacencies", "", ButtonId::ToolbarEditAdjacencies),
         ],
     ),
     (
         "Tools",
         &[
-            (
-                "Validate Project",
-                "",
-                ButtonId::ToolbarPatchValidate,
-            ),
+            ("Validate Project", "", ButtonId::ToolbarPatchValidate),
             (
                 "Base Game Data: Choose...",
                 "",
@@ -2105,11 +2068,7 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 "",
                 ButtonId::ToolbarViewClearBaseGameDefinitions,
             ),
-            (
-                "Recovery...",
-                "",
-                ButtonId::ToolbarPatchRecoverSave,
-            ),
+            ("Recovery...", "", ButtonId::ToolbarPatchRecoverSave),
         ],
     ),
     (
@@ -2135,7 +2094,11 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 "",
                 ButtonId::ToolbarViewToggleStateBoundaries,
             ),
-            ("Panels: Image Overlay", "", ButtonId::ToolbarViewImageOverlayPanel),
+            (
+                "Panels: Image Overlay",
+                "",
+                ButtonId::ToolbarViewImageOverlayPanel,
+            ),
             (
                 "Panels: State Inspector",
                 "",
@@ -2261,11 +2224,7 @@ mod tests {
             .map(|(index, label)| {
                 let x = index as u32 * 70;
                 ToolbarButtonElement {
-                    base: ButtonBase::new_fit_width(
-                        label,
-                        [x, 0],
-                        &PALETTE_BUTTON_TOOLBAR,
-                    ),
+                    base: ButtonBase::new_fit_width(label, [x, 0], &PALETTE_BUTTON_TOOLBAR),
                     buttons: if label == "Tools" {
                         vec![ButtonElement {
                             base: ButtonBase::new_double_text(
@@ -2440,17 +2399,21 @@ mod tests {
             assert!(actions.button_enabled(ButtonId::ToolbarPatchValidate));
         }
 
-        assert!(!StateActionAvailability {
-            project_loaded: true,
-            ..Default::default()
-        }
-        .button_enabled(ButtonId::ToolbarPatchRecoverSave));
-        assert!(StateActionAvailability {
-            project_loaded: true,
-            recovery_required: true,
-            ..Default::default()
-        }
-        .button_enabled(ButtonId::ToolbarPatchRecoverSave));
+        assert!(
+            !StateActionAvailability {
+                project_loaded: true,
+                ..Default::default()
+            }
+            .button_enabled(ButtonId::ToolbarPatchRecoverSave)
+        );
+        assert!(
+            StateActionAvailability {
+                project_loaded: true,
+                recovery_required: true,
+                ..Default::default()
+            }
+            .button_enabled(ButtonId::ToolbarPatchRecoverSave)
+        );
     }
 
     #[test]
@@ -2460,7 +2423,10 @@ mod tests {
             workspace_status_text(true, 4, false),
             "Province Map: Modified | States: 4 pending changes"
         );
-        assert_eq!(workspace_status_text(false, 2, true), "Map: Saved | States: 2");
+        assert_eq!(
+            workspace_status_text(false, 2, true),
+            "Map: Saved | States: 2"
+        );
     }
 
     #[test]
@@ -2531,10 +2497,7 @@ mod tests {
             states
         ));
         states.state_actions.lasso_active = true;
-        assert!(button_visible(
-            ButtonId::ToolbarEditToggleLassoSnap,
-            states
-        ));
+        assert!(button_visible(ButtonId::ToolbarEditToggleLassoSnap, states));
     }
 
     #[test]
@@ -2574,12 +2537,14 @@ mod tests {
         assert_eq!(label, "Map View: Province Colors");
         assert!(!label.ends_with('v'));
         assert!(!label.contains('▾'));
-        assert!(wrap_tooltip(
-            "Validate Project\nCheck the loaded HOI4 mod project.",
-            180.0
-        )
-        .len()
-            >= 2);
+        assert!(
+            wrap_tooltip(
+                "Validate Project\nCheck the loaded HOI4 mod project.",
+                180.0
+            )
+            .len()
+                >= 2
+        );
     }
 
     #[test]
@@ -2590,21 +2555,20 @@ mod tests {
             .map(|(_, entries)| *entries)
             .unwrap();
         assert!(file.iter().any(|(label, shortcut, id)| {
-            *label == "Save Project"
-                && *shortcut == "Ctrl+S"
-                && *id == ButtonId::ToolbarFileSave
+            *label == "Save Project" && *shortcut == "Ctrl+S" && *id == ButtonId::ToolbarFileSave
         }));
         assert!(file.iter().any(|(label, _, id)| {
             *label == "Export Province Map As..." && *id == ButtonId::ToolbarFileSaveAsFolder
         }));
         assert!(file.iter().any(|(label, _, id)| {
-            *label == "Export Province Map Archive..."
-                && *id == ButtonId::ToolbarFileSaveAsArchive
+            *label == "Export Province Map Archive..." && *id == ButtonId::ToolbarFileSaveAsArchive
         }));
         assert!(!file.iter().any(|(label, _, _)| *label == "Save As..."));
-        assert!(!file
-            .iter()
-            .any(|(label, _, _)| *label == "Review Project Changes"));
+        assert!(
+            !file
+                .iter()
+                .any(|(label, _, _)| *label == "Review Project Changes")
+        );
     }
 
     #[test]
@@ -2619,19 +2583,25 @@ mod tests {
             .find(|(label, _)| *label == "Edit")
             .unwrap()
             .1;
-        assert!(file.iter().any(|(_, _, id)| {
-            *id == ButtonId::ToolbarFileProjectSettings
-        }));
-        assert!(edit.iter().any(|(_, _, id)| {
-            *id == ButtonId::ToolbarEditSettings
-        }));
-        assert!(!StateActionAvailability::default()
-            .button_enabled(ButtonId::ToolbarFileProjectSettings));
-        assert!(StateActionAvailability {
-            project_loaded: true,
-            ..Default::default()
-        }
-        .button_enabled(ButtonId::ToolbarFileProjectSettings));
+        assert!(
+            file.iter()
+                .any(|(_, _, id)| { *id == ButtonId::ToolbarFileProjectSettings })
+        );
+        assert!(
+            edit.iter()
+                .any(|(_, _, id)| { *id == ButtonId::ToolbarEditSettings })
+        );
+        assert!(
+            !StateActionAvailability::default()
+                .button_enabled(ButtonId::ToolbarFileProjectSettings)
+        );
+        assert!(
+            StateActionAvailability {
+                project_loaded: true,
+                ..Default::default()
+            }
+            .button_enabled(ButtonId::ToolbarFileProjectSettings)
+        );
     }
 
     fn menu_entries(label: &str) -> &'static [(&'static str, &'static str, ButtonId)] {
@@ -2660,10 +2630,11 @@ mod layout_regressions {
         let mut overflows = Vec::new();
         for (code, _) in SUPPORTED_LANGUAGES {
             localization::set_language(code);
-            let groups = TOOLBAR_PRIMITIVE
-                .iter()
-                .map(|(_, entries)| *entries)
-                .chain(WORKSPACE_DROPDOWNS.iter().map(|(_, entries, _, _)| *entries));
+            let groups = TOOLBAR_PRIMITIVE.iter().map(|(_, entries)| *entries).chain(
+                WORKSPACE_DROPDOWNS
+                    .iter()
+                    .map(|(_, entries, _, _)| *entries),
+            );
             for entries in groups {
                 for (left, right, _) in entries {
                     let width = font::get_width_metric_str(ui_literal(left))

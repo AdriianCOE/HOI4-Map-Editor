@@ -246,10 +246,7 @@ pub fn validate_image_overlay_metadata(
     issues
 }
 
-pub fn image_overlay_is_aligned(
-    image: ImageOverlayMetadata,
-    map_dimensions: [u32; 2],
-) -> bool {
+pub fn image_overlay_is_aligned(image: ImageOverlayMetadata, map_dimensions: [u32; 2]) -> bool {
     validate_image_overlay_metadata(image, map_dimensions).is_empty()
 }
 
@@ -322,10 +319,7 @@ mod tests {
             preferences.get(WorkspaceMode::Provinces),
             MapBaseView::ProvinceColors
         );
-        assert_eq!(
-            preferences.get(WorkspaceMode::States),
-            MapBaseView::States
-        );
+        assert_eq!(preferences.get(WorkspaceMode::States), MapBaseView::States);
 
         preferences.remember(WorkspaceMode::States, MapBaseView::Political);
         assert_eq!(

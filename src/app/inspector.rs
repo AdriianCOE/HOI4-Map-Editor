@@ -209,16 +209,11 @@ impl InspectorLayout {
         let window_height = window_size[1].max(0.0);
         let left = sidebar_width.clamp(0.0, window_width);
         let top = toolbar_height.clamp(0.0, window_height);
-        let reserved =
-            inspector_drawer_width(window_width, left, visibility.reserved_width());
+        let reserved = inspector_drawer_width(window_width, left, visibility.reserved_width());
         let content_height = (window_height - top).max(0.0);
 
-        let map_viewport = MapViewport::new(
-            left,
-            top,
-            (window_width - left).max(0.0),
-            content_height,
-        );
+        let map_viewport =
+            MapViewport::new(left, top, (window_width - left).max(0.0), content_height);
         let inspector_viewport = (reserved > 0.0)
             .then(|| MapViewport::new(window_width - reserved, top, reserved, content_height));
 
@@ -679,18 +674,11 @@ mod tests {
                 Some("CTR".to_owned()),
                 [16020, 16021],
             ),
-            StateSearchEntry::new(517, "Other").with_context(
-                Some("OTH".to_owned()),
-                None,
-                [17000],
-            ),
+            StateSearchEntry::new(517, "Other").with_context(Some("OTH".to_owned()), None, [17000]),
         ]);
 
         assert_eq!(index.search("BOM")[0].matched, StateSearchMatch::Owner);
-        assert_eq!(
-            index.search("CTR")[0].matched,
-            StateSearchMatch::Controller
-        );
+        assert_eq!(index.search("CTR")[0].matched, StateSearchMatch::Controller);
         assert_eq!(
             index.search("16020")[0].matched,
             StateSearchMatch::ProvinceId

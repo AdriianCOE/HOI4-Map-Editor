@@ -111,10 +111,7 @@ pub fn tr_count(key: &str, count: usize) -> String {
     } else {
         "other"
     };
-    tr_args(
-        &format!("{key}.{form}"),
-        &[("count", &count.to_string())],
-    )
+    tr_args(&format!("{key}.{form}"), &[("count", &count.to_string())])
 }
 
 pub fn ui_literal(english: &'static str) -> &'static str {
@@ -253,10 +250,7 @@ fn flatten(prefix: &str, value: &Value, output: &mut BTreeMap<String, &'static s
             }
         }
         Value::String(text) => {
-            output.insert(
-                prefix.to_owned(),
-                Box::leak(text.clone().into_boxed_str()),
-            );
+            output.insert(prefix.to_owned(), Box::leak(text.clone().into_boxed_str()));
         }
         _ => panic!("localization catalog values must be strings"),
     }
@@ -310,9 +304,18 @@ mod tests {
         }
         assert!(set_language("pt-BR"));
         assert_eq!(tr("menu.edit"), "Editar");
-        assert_eq!(tr_count("status.pending_changes", 0), "Nenhuma alteração pendente");
-        assert_eq!(tr_count("status.pending_changes", 1), "1 alteração pendente");
-        assert_eq!(tr_count("status.pending_changes", 4), "4 alterações pendentes");
+        assert_eq!(
+            tr_count("status.pending_changes", 0),
+            "Nenhuma alteração pendente"
+        );
+        assert_eq!(
+            tr_count("status.pending_changes", 1),
+            "1 alteração pendente"
+        );
+        assert_eq!(
+            tr_count("status.pending_changes", 4),
+            "4 alterações pendentes"
+        );
         assert_eq!(tr("missing-key"), "missing key");
         assert!(!set_language("unknown-language"));
         assert_eq!(language(), "en-US");
@@ -323,9 +326,8 @@ mod tests {
 
     #[test]
     fn catalogs_do_not_contain_mojibake() {
-        const BROKEN_SEQUENCES: &[&str] = &[
-            "Ãƒ", "Ã¢â", "Â ", "â€”", "â€“", "Ð°", "Ðµ", "Ñ€", "锟斤拷",
-        ];
+        const BROKEN_SEQUENCES: &[&str] =
+            &["Ãƒ", "Ã¢â", "Â ", "â€”", "â€“", "Ð°", "Ðµ", "Ñ€", "锟斤拷"];
         for (code, catalog) in catalogs() {
             for (key, value) in catalog {
                 for broken in BROKEN_SEQUENCES {
@@ -428,14 +430,26 @@ mod dialog_layout_regressions {
         const DIALOG_MARGIN: f64 = 24.0;
         let budget = DIALOG_MIN_WIDTH - DIALOG_MARGIN;
         let keys = [
-            "settings.title", "settings.language", "settings.open_last",
-            "settings.remember_workspace", "settings.remember_overlays",
-            "settings.tooltip_delay", "settings.max_undo", "settings.change_view_undo",
-            "settings.reset_layout", "settings.restore", "settings.cancel", "settings.save",
-            "project_settings.title", "project_settings.preserve_ids",
-            "project_settings.generate_coastal", "project_settings.lone_pixels",
-            "project_settings.few_borders", "project_settings.threshold",
-            "project_settings.open", "project_settings.validate",
+            "settings.title",
+            "settings.language",
+            "settings.open_last",
+            "settings.remember_workspace",
+            "settings.remember_overlays",
+            "settings.tooltip_delay",
+            "settings.max_undo",
+            "settings.change_view_undo",
+            "settings.reset_layout",
+            "settings.restore",
+            "settings.cancel",
+            "settings.save",
+            "project_settings.title",
+            "project_settings.preserve_ids",
+            "project_settings.generate_coastal",
+            "project_settings.lone_pixels",
+            "project_settings.few_borders",
+            "project_settings.threshold",
+            "project_settings.open",
+            "project_settings.validate",
         ];
         let mut overflows = Vec::new();
         for (code, _) in SUPPORTED_LANGUAGES {

@@ -4,7 +4,7 @@ use itertools::Itertools;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use toml_edit::{value, DocumentMut, Item, Table};
+use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::app::map::{Color, ProvinceKind};
 use crate::util::files::{atomic_move_new_file, atomic_replace_file, write_complete_file};
@@ -376,7 +376,8 @@ impl GlobalConfig {
 
 impl ProjectConfig {
     pub fn path(root: &Path) -> PathBuf {
-        root.join(PROJECT_CONFIG_DIRECTORY).join(PROJECT_CONFIG_FILE)
+        root.join(PROJECT_CONFIG_DIRECTORY)
+            .join(PROJECT_CONFIG_FILE)
     }
 
     pub fn load(root: &Path) -> Result<ConfigLoad<Self>, LoadConfigError> {
@@ -420,10 +421,7 @@ impl ProjectConfig {
         )
     }
 
-    pub fn replace_invalid_file(
-        &self,
-        root: &Path,
-    ) -> Result<FileFingerprint, SaveConfigError> {
+    pub fn replace_invalid_file(&self, root: &Path) -> Result<FileFingerprint, SaveConfigError> {
         self.validate()?;
         replace_invalid_document(
             &Self::path(root),
@@ -475,7 +473,8 @@ fn load_document<T: Clone>(
                 issue: Some(ConfigIssue::Invalid(format!(
                     "{} could not be parsed at {}: {error}",
                     path.display(),
-                    error.span()
+                    error
+                        .span()
                         .map(|span| format!("byte {}", span.start))
                         .unwrap_or_else(|| "an unknown position".to_owned())
                 ))),
@@ -515,10 +514,8 @@ fn parse_global(document: &DocumentMut) -> Result<GlobalConfig, String> {
     let general = table(document, "general")?;
     config.language = string_or(general, "language", &config.language)?;
     config.open_last_project = bool_or(general, "open-last-project", config.open_last_project)?;
-    config.remember_workspace =
-        bool_or(general, "remember-workspace", config.remember_workspace)?;
-    config.remember_map_views =
-        bool_or(general, "remember-map-views", config.remember_map_views)?;
+    config.remember_workspace = bool_or(general, "remember-workspace", config.remember_workspace)?;
+    config.remember_map_views = bool_or(general, "remember-map-views", config.remember_map_views)?;
     config.remember_overlays = bool_or(general, "remember-overlays", config.remember_overlays)?;
     config.last_project = optional_string(general, "last-project")?.map(PathBuf::from);
 
@@ -531,8 +528,7 @@ fn parse_global(document: &DocumentMut) -> Result<GlobalConfig, String> {
     )?;
 
     let interface = table(document, "interface")?;
-    config.tooltip_delay_ms =
-        u32_or(interface, "tooltip-delay-ms", config.tooltip_delay_ms)?;
+    config.tooltip_delay_ms = u32_or(interface, "tooltip-delay-ms", config.tooltip_delay_ms)?;
     config.ui_scale = string_or(interface, "ui-scale", &config.ui_scale)?;
 
     let window = table(document, "window")?;
@@ -566,10 +562,8 @@ fn parse_global(document: &DocumentMut) -> Result<GlobalConfig, String> {
 
     let overlays = table(document, "overlays")?;
     config.overlays.rivers = bool_or(overlays, "rivers", config.overlays.rivers)?;
-    config.overlays.adjacencies =
-        bool_or(overlays, "adjacencies", config.overlays.adjacencies)?;
-    config.overlays.province_ids =
-        bool_or(overlays, "province-ids", config.overlays.province_ids)?;
+    config.overlays.adjacencies = bool_or(overlays, "adjacencies", config.overlays.adjacencies)?;
+    config.overlays.province_ids = bool_or(overlays, "province-ids", config.overlays.province_ids)?;
     config.overlays.province_boundaries = bool_or(
         overlays,
         "province-boundaries",
@@ -642,10 +636,12 @@ fn parse_project(document: &DocumentMut) -> Result<ProjectConfig, String> {
                 .ok_or_else(|| format!("Terrain '{name}' must be a TOML table."))?;
             let color = parse_color(name, terrain)?;
             let kind_name = required_string(terrain, "type", &format!("Terrain '{name}'"))?;
-            let kind = ProvinceKind::from_str(&kind_name).map_err(|_| {
-                format!("Terrain '{name}': type must be land, sea, or lake.")
-            })?;
-            if !matches!(kind, ProvinceKind::Land | ProvinceKind::Sea | ProvinceKind::Lake) {
+            let kind = ProvinceKind::from_str(&kind_name)
+                .map_err(|_| format!("Terrain '{name}': type must be land, sea, or lake."))?;
+            if !matches!(
+                kind,
+                ProvinceKind::Land | ProvinceKind::Sea | ProvinceKind::Lake
+            ) {
                 return Err(format!(
                     "Terrain '{name}': type must be land, sea, or lake."
                 ));
@@ -682,7 +678,10 @@ fn parse_color(name: &str, terrain: &Table) -> Result<Color, String> {
     let mut color = [0; 3];
     for (index, component) in array.iter().enumerate() {
         let component = component.as_integer().ok_or_else(|| {
-            format!("Terrain '{name}': color component {} must be an integer.", index + 1)
+            format!(
+                "Terrain '{name}': color component {} must be an integer.",
+                index + 1
+            )
         })?;
         if !(0..=255).contains(&component) {
             return Err(format!(
@@ -769,11 +768,12 @@ fn save_document<T>(
     }
     atomic_write(path, &bytes)?;
     let reloaded = fs::read(path)?;
-    let reloaded_text = std::str::from_utf8(&reloaded)
-        .map_err(|error| SaveConfigError::Invalid(format!("Saved configuration is not UTF-8: {error}")))?;
-    let reloaded_document = reloaded_text
-        .parse::<DocumentMut>()
-        .map_err(|error| SaveConfigError::Invalid(format!("Saved configuration is invalid: {error}")))?;
+    let reloaded_text = std::str::from_utf8(&reloaded).map_err(|error| {
+        SaveConfigError::Invalid(format!("Saved configuration is not UTF-8: {error}"))
+    })?;
+    let reloaded_document = reloaded_text.parse::<DocumentMut>().map_err(|error| {
+        SaveConfigError::Invalid(format!("Saved configuration is invalid: {error}"))
+    })?;
     validate(&reloaded_document).map_err(SaveConfigError::Invalid)?;
     Ok(fingerprint_bytes(&reloaded))
 }
@@ -832,12 +832,7 @@ fn update_global(document: &mut DocumentMut, config: &GlobalConfig) {
         config.remember_overlays,
     );
     if let Some(path) = &config.last_project {
-        set_string(
-            document,
-            "general",
-            "last-project",
-            &path.to_string_lossy(),
-        );
+        set_string(document, "general", "last-project", &path.to_string_lossy());
     } else if let Some(table) = document["general"].as_table_mut() {
         table.remove("last-project");
     }
@@ -948,7 +943,12 @@ fn update_project(document: &mut DocumentMut, config: &ProjectConfig) {
         "few-shared-borders-threshold",
         config.extra_warnings.few_shared_borders_threshold as i64,
     );
-    set_bool(document, "image-overlay", "visible", config.image_overlay.visible);
+    set_bool(
+        document,
+        "image-overlay",
+        "visible",
+        config.image_overlay.visible,
+    );
     set_integer(
         document,
         "image-overlay",
@@ -1066,12 +1066,7 @@ fn set_string(document: &mut DocumentMut, table: &str, key: &str, setting: &str)
     ensure_table(document, table)[key] = value(setting);
 }
 
-fn set_optional_integer(
-    document: &mut DocumentMut,
-    table: &str,
-    key: &str,
-    setting: Option<i64>,
-) {
+fn set_optional_integer(document: &mut DocumentMut, table: &str, key: &str, setting: Option<i64>) {
     if let Some(setting) = setting {
         set_integer(document, table, key, setting);
     } else if let Some(table) = document[table].as_table_mut() {
@@ -1088,10 +1083,7 @@ fn set_optional_string(document: &mut DocumentMut, table: &str, key: &str, setti
 }
 
 fn backup_path(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_os_string();
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".bak");
     path.with_file_name(name)
 }
@@ -1244,11 +1236,13 @@ type = "land"
         fs::write(&path, b"[image-overlay]\nopacity-percent = 101\n").unwrap();
 
         let loaded = ProjectConfig::load(&root).unwrap();
-        assert!(loaded
-            .issue
-            .unwrap()
-            .to_string()
-            .contains("opacity-percent' must be between 0 and 100"));
+        assert!(
+            loaded
+                .issue
+                .unwrap()
+                .to_string()
+                .contains("opacity-percent' must be between 0 and 100")
+        );
     }
 
     #[test]
@@ -1262,9 +1256,13 @@ type = "land"
 "#;
         fs::write(&path, bytes).unwrap();
         let loaded = ProjectConfig::load(&root).unwrap();
-        assert!(loaded.issue.unwrap().to_string().contains(
-            "Terrain 'volcanic': color component 301 must be between 0 and 255"
-        ));
+        assert!(
+            loaded
+                .issue
+                .unwrap()
+                .to_string()
+                .contains("Terrain 'volcanic': color component 301 must be between 0 and 255")
+        );
         assert_eq!(fs::read(path).unwrap(), bytes);
     }
 
@@ -1316,12 +1314,24 @@ type = "land"
             max_undo_states: 0,
             ..GlobalConfig::default()
         };
-        assert!(config.validate().unwrap_err().to_string().contains("1 and 500"));
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("1 and 500")
+        );
         config.max_undo_states = 501;
         assert!(config.validate().is_err());
         config.max_undo_states = 24;
         config.ui_scale = "150%".to_owned();
-        assert!(config.validate().unwrap_err().to_string().contains("System"));
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("System")
+        );
     }
 
     #[test]
@@ -1388,7 +1398,10 @@ type = "land"
             .unwrap();
         assert_eq!(fs::read(root.join("map/provinces.bmp")).unwrap(), b"bmp");
         assert_eq!(fs::read(root.join("map/definition.csv")).unwrap(), b"csv");
-        assert_eq!(fs::read(root.join("history/states/1.txt")).unwrap(), b"state");
+        assert_eq!(
+            fs::read(root.join("history/states/1.txt")).unwrap(),
+            b"state"
+        );
         assert!(ProjectConfig::path(&root).is_file());
     }
 }

@@ -2,44 +2,42 @@ use defy::ContextualError;
 use thiserror::Error;
 
 use crate::app::format::CsvError;
-use crate::config::LoadConfigError;
 use crate::app::project::ProjectPathError;
+use crate::config::LoadConfigError;
 use crate::util::files::FilesError;
-
-
 
 #[derive(Debug, Error)]
 pub enum Error {
-  #[error(transparent)]
-  FilesError(#[from] FilesError),
-  #[error(transparent)]
-  Zip(#[from] zip::result::ZipError),
-  #[error(transparent)]
-  Image(#[from] image::ImageError),
-  #[error("csv parse error ({1}): {0}")]
-  Csv(CsvError, &'static str),
-  #[error("config error: {0}")]
-  ConfigError(#[from] LoadConfigError),
-  #[error(transparent)]
-  ProjectPath(#[from] ProjectPathError),
-  #[error("{0}")]
-  Custom(String)
+    #[error(transparent)]
+    FilesError(#[from] FilesError),
+    #[error(transparent)]
+    Zip(#[from] zip::result::ZipError),
+    #[error(transparent)]
+    Image(#[from] image::ImageError),
+    #[error("csv parse error ({1}): {0}")]
+    Csv(CsvError, &'static str),
+    #[error("config error: {0}")]
+    ConfigError(#[from] LoadConfigError),
+    #[error(transparent)]
+    ProjectPath(#[from] ProjectPathError),
+    #[error("{0}")]
+    Custom(String),
 }
 
 impl From<ContextualError<std::io::Error>> for Error {
-  fn from(error: ContextualError<std::io::Error>) -> Self {
-    Error::FilesError(FilesError::Io(error))
-  }
+    fn from(error: ContextualError<std::io::Error>) -> Self {
+        Error::FilesError(FilesError::Io(error))
+    }
 }
 
 impl From<String> for Error {
-  fn from(s: String) -> Error {
-    Error::Custom(s)
-  }
+    fn from(s: String) -> Error {
+        Error::Custom(s)
+    }
 }
 
 impl From<&str> for Error {
-  fn from(s: &str) -> Error {
-    Error::Custom(s.to_owned())
-  }
+    fn from(s: &str) -> Error {
+        Error::Custom(s.to_owned())
+    }
 }

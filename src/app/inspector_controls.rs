@@ -48,10 +48,10 @@ pub enum InspectorControlId {
     Decrement(InspectorValueTarget),
     Increment(InspectorValueTarget),
     Select(InspectorPickTarget),
-  Remove(InspectorPickTarget),
-  RemoveValue(InspectorValueTarget),
-  Add(InspectorPickTarget),
-  MapPick(MapTagPickTarget),
+    Remove(InspectorPickTarget),
+    RemoveValue(InspectorValueTarget),
+    Add(InspectorPickTarget),
+    MapPick(MapTagPickTarget),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -490,9 +490,7 @@ mod tests {
         for control in controls {
             assert_eq!(control.draw, control.hit);
             assert!(control.draw.x >= layout.origin[0]);
-            assert!(
-                control.draw.right() <= layout.origin[0] + layout.width * layout.scale
-            );
+            assert!(control.draw.right() <= layout.origin[0] + layout.width * layout.scale);
         }
     }
 

@@ -512,7 +512,9 @@ mod tests {
         project.load_states(&province_ids, &land_ids);
         let mut edit = StateEditSession::new(&project, &bundle.map);
         let source = 5144;
-        let source_state = edit.province_state_id(source).expect("State for province 5144");
+        let source_state = edit
+            .province_state_id(source)
+            .expect("State for province 5144");
         let target = edit
             .valid_state_ids()
             .iter()

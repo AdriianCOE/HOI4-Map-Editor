@@ -10,12 +10,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use super::save_plan::ProjectSavePlan;
 use super::validation::{compare_project_for_save, reload_project_for_save};
 use super::{
-    CombinedRoundTripValidationReport, Hoi4Project, PatchSafety, ProjectPatchPlan,
-    RoundTripStatus, RoundTripValidationReport, SourceFingerprint, StateEditSession,
+    CombinedRoundTripValidationReport, Hoi4Project, PatchSafety, ProjectPatchPlan, RoundTripStatus,
+    RoundTripValidationReport, SourceFingerprint, StateEditSession,
 };
-use super::save_plan::ProjectSavePlan;
 use crate::util::files::{atomic_move_new_file, atomic_replace_file};
 
 static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -106,7 +106,9 @@ impl StateSaveBlockReason {
             Self::BlockedPatch => "Blocked patches cannot be saved.",
             Self::NoRoundTripReport => "Run the isolated round-trip validation before saving.",
             Self::RoundTripReportStale => "The round-trip validation is outdated.",
-            Self::RoundTripNotPassed => "Only a current eligible round-trip report can authorize Save.",
+            Self::RoundTripNotPassed => {
+                "Only a current eligible round-trip report can authorize Save."
+            }
             Self::SourceChanged => {
                 "The source project changed after validation. Regenerate and validate again."
             }
@@ -535,7 +537,9 @@ pub fn authorize_project_save_plan(
         || report.round_trip.plan_generation != patch_plan.generation
         || !report.round_trip.eligible_for_atomic_save_preparation
     {
-        return Err("The combined validation does not authorize this project save plan.".to_owned());
+        return Err(
+            "The combined validation does not authorize this project save plan.".to_owned(),
+        );
     }
     let needs_explicit_review = patch_plan.summary.review_required_files != 0
         || report
@@ -1273,7 +1277,10 @@ fn resolve_final_path(root: &Path, relative: &Path) -> Result<PathBuf, String> {
         let canonical_map = dunce::canonicalize(root.join("map"))
             .map_err(|error| format!("Cannot canonicalize map directory: {error}"))?;
         if parent != canonical_map.as_path() {
-            return Err(format!("Map path escaped map directory: {}", relative.display()));
+            return Err(format!(
+                "Map path escaped map directory: {}",
+                relative.display()
+            ));
         }
         return Ok(final_path);
     }
@@ -1424,9 +1431,12 @@ fn verify_source(project: &Hoi4Project, plan: &ProjectPatchPlan) -> Result<(), S
     for (source, fingerprint) in &plan.source_fingerprints {
         let canonical_source = dunce::canonicalize(source)
             .map_err(|error| format!("Cannot canonicalize {}: {error}", source.display()))?;
-        let relative = canonical_source
-            .strip_prefix(&root)
-            .map_err(|_| format!("Planned source is outside project root: {}", source.display()))?;
+        let relative = canonical_source.strip_prefix(&root).map_err(|_| {
+            format!(
+                "Planned source is outside project root: {}",
+                source.display()
+            )
+        })?;
         validate_plan_path(relative)?;
         if !planned_paths.contains(&normalized_path(relative).to_ascii_lowercase()) {
             return Err(format!(
@@ -1613,9 +1623,9 @@ fn commit_operations(
                 ..
             } => {
                 ensure_absent(rollback_path)?;
-                atomic_replace_file(stage_path, final_path, Some(rollback_path)).map_err(|error| {
-                    rename_error("atomically replace destination", stage_path, error)
-                })?;
+                atomic_replace_file(stage_path, final_path, Some(rollback_path)).map_err(
+                    |error| rename_error("atomically replace destination", stage_path, error),
+                )?;
                 journal.operations[index].progress = FileOperationProgress::CandidateInstalled;
             }
             ResolvedOperation::Create {
@@ -1694,7 +1704,10 @@ fn validate_saved_project(
     map_snapshot: &[(PathBuf, Vec<u8>)],
 ) -> Result<Hoi4Project, String> {
     for (path, expected) in map_snapshot {
-        if !operations.iter().any(|operation| operation.final_path() == path) {
+        if !operations
+            .iter()
+            .any(|operation| operation.final_path() == path)
+        {
             verify_exact_file(path, expected)?;
         }
     }
@@ -2751,7 +2764,10 @@ mod tests {
         change_manpower(&project, &mut edit, 2);
         let mut bundle = Bundle::load(
             &Location::Directory(project.paths.map_directory.clone()),
-            Config { preserve_ids: true, ..Config::default() },
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
         )
         .unwrap();
         bundle.map.recolor_province([1, 2, 3], [4, 5, 6]);
@@ -2768,9 +2784,11 @@ mod tests {
             &edit,
             &state_plan,
             Some(&province.files),
-            |map| validate_province_map_candidate(&province, |path| {
-                fs::read(map.join(path)).map_err(|error| error.to_string())
-            }),
+            |map| {
+                validate_province_map_candidate(&province, |path| {
+                    fs::read(map.join(path)).map_err(|error| error.to_string())
+                })
+            },
             &RoundTripCancellation::default(),
             |_| {},
         );
@@ -2796,14 +2814,30 @@ mod tests {
             StateSaveFault::None,
             |_, _, _| {},
         );
-        assert_eq!(report.outcome, StateSaveOutcome::Completed, "{}", report.summary_text());
-        let manifest: BackupManifest = read_toml(
-            &report.backup_path.as_ref().unwrap().join("manifest.toml"),
-        )
-        .unwrap();
-        assert!(manifest.entries.iter().any(|entry| entry.relative_path == Path::new("map/provinces.bmp")));
-        assert!(manifest.entries.iter().any(|entry| entry.relative_path.starts_with("history/states")));
-        assert_eq!(fs::read(root.join("map/provinces.bmp")).unwrap(), province.files[Path::new("provinces.bmp")]);
+        assert_eq!(
+            report.outcome,
+            StateSaveOutcome::Completed,
+            "{}",
+            report.summary_text()
+        );
+        let manifest: BackupManifest =
+            read_toml(&report.backup_path.as_ref().unwrap().join("manifest.toml")).unwrap();
+        assert!(
+            manifest
+                .entries
+                .iter()
+                .any(|entry| entry.relative_path == Path::new("map/provinces.bmp"))
+        );
+        assert!(
+            manifest
+                .entries
+                .iter()
+                .any(|entry| entry.relative_path.starts_with("history/states"))
+        );
+        assert_eq!(
+            fs::read(root.join("map/provinces.bmp")).unwrap(),
+            province.files[Path::new("provinces.bmp")]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2814,7 +2848,10 @@ mod tests {
         change_manpower(&project, &mut edit, 3);
         let mut bundle = Bundle::load(
             &Location::Directory(project.paths.map_directory.clone()),
-            Config { preserve_ids: true, ..Config::default() },
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
         )
         .unwrap();
         bundle.map.recolor_province([1, 2, 3], [4, 5, 6]);
@@ -2831,9 +2868,11 @@ mod tests {
             &edit,
             &state_plan,
             Some(&province.files),
-            |map| validate_province_map_candidate(&province, |path| {
-                fs::read(map.join(path)).map_err(|error| error.to_string())
-            }),
+            |map| {
+                validate_province_map_candidate(&province, |path| {
+                    fs::read(map.join(path)).map_err(|error| error.to_string())
+                })
+            },
             &RoundTripCancellation::default(),
             |_| {},
         );
@@ -2855,7 +2894,12 @@ mod tests {
             StateSaveFault::FailAfterCommit(1),
             |_, _, _| {},
         );
-        assert_eq!(report.outcome, StateSaveOutcome::RolledBack, "{}", report.summary_text());
+        assert_eq!(
+            report.outcome,
+            StateSaveOutcome::RolledBack,
+            "{}",
+            report.summary_text()
+        );
         assert_eq!(snapshot_original(&root), before);
         fs::remove_dir_all(root).unwrap();
     }
@@ -2866,7 +2910,10 @@ mod tests {
         change_manpower(&project, &mut edit, 4);
         let mut bundle = Bundle::load(
             &Location::Directory(project.paths.map_directory.clone()),
-            Config { preserve_ids: true, ..Config::default() },
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
         )
         .unwrap();
         bundle.map.recolor_province([1, 2, 3], [4, 5, 6]);
@@ -2883,9 +2930,11 @@ mod tests {
             &edit,
             &state_plan,
             Some(&province.files),
-            |map| validate_province_map_candidate(&province, |path| {
-                fs::read(map.join(path)).map_err(|error| error.to_string())
-            }),
+            |map| {
+                validate_province_map_candidate(&province, |path| {
+                    fs::read(map.join(path)).map_err(|error| error.to_string())
+                })
+            },
             &RoundTripCancellation::default(),
             |_| {},
         );
@@ -2912,7 +2961,10 @@ mod tests {
         );
 
         assert_eq!(report.outcome, StateSaveOutcome::FailedBeforeCommit);
-        assert_eq!(fs::read(&project.paths.provinces_bmp).unwrap(), externally_changed);
+        assert_eq!(
+            fs::read(&project.paths.provinces_bmp).unwrap(),
+            externally_changed
+        );
         assert!(!root.join(INTERNAL_DIRECTORY).exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -3005,7 +3057,8 @@ mod tests {
         assert!(project_validation.delta.has_preexisting_errors());
         assert!(!project_validation.delta.blocks_save());
         assert!(!project_validation.delta.requires_warning_review());
-        let plan = ProjectSavePlan::new(&project, edit.revision(), None, Some(&state_plan)).unwrap();
+        let plan =
+            ProjectSavePlan::new(&project, edit.revision(), None, Some(&state_plan)).unwrap();
 
         assert!(authorize_project_save_plan(&plan, &validation, false).is_ok());
         cleanup(&root);

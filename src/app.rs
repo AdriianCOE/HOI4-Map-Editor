@@ -11,28 +11,25 @@ pub mod state;
 
 use defy::Contextualize;
 use glutin::window::CursorIcon;
-use graphics::{Transformed, Viewport};
 use graphics::context::Context;
+use graphics::{Transformed, Viewport};
 use opengl_graphics::{Filter, GlGraphics, TextureSettings};
 use piston::input::{Key, MouseButton};
 use vecmath::Vector2;
 
 use self::alerts::Alerts;
-use self::canvas::{
-    Canvas, InspectorExternalRequest, StateApplyDialogAction, ToolMode, ViewMode,
-};
+use self::canvas::{Canvas, InspectorExternalRequest, StateApplyDialogAction, ToolMode, ViewMode};
 use self::interface::{ButtonId, Interface, StateActionAvailability, get_interface};
 use self::map::ProvinceSaveMode;
 use self::map_layers::WorkspaceMode;
 use self::project::{
     Hoi4Project, LassoSelectionMode, MapViewMode, ProjectPathError, ProjectPaths,
-    ProvinceInclusionMode,
-    StateBrushMode, StateFillMode,
+    ProvinceInclusionMode, StateBrushMode, StateFillMode,
 };
+use crate::config::{ConfigIssue, FileFingerprint, GlobalConfig, ProjectConfig, SaveConfigError};
 use crate::error::Error;
 use crate::events::{EventHandler, KeyMods};
 use crate::font::{self, FONT_SIZE};
-use crate::config::{ConfigIssue, FileFingerprint, GlobalConfig, ProjectConfig, SaveConfigError};
 use crate::util::files::{IntoLocation, Location};
 
 use std::env;
@@ -187,7 +184,13 @@ impl EventHandler for App {
         graphics::clear(colors::NEUTRAL, gl);
 
         if let Some(canvas) = &mut self.canvas {
-            canvas.draw(ctx, interface, &mut self.glyph_cache, interactive_cursor, gl);
+            canvas.draw(
+                ctx,
+                interface,
+                &mut self.glyph_cache,
+                interactive_cursor,
+                gl,
+            );
         };
 
         self.alerts.draw(ctx, interface, &mut self.glyph_cache, gl);
@@ -343,10 +346,7 @@ impl EventHandler for App {
             if key == Key::S && mods.ctrl && !mods.shift {
                 self.action_save_map();
             } else if key == Key::Escape
-                && self
-                    .canvas
-                    .as_ref()
-                    .is_some_and(Canvas::save_can_cancel)
+                && self.canvas.as_ref().is_some_and(Canvas::save_can_cancel)
             {
                 if let Some(canvas) = self.canvas.as_mut() {
                     canvas.cancel_active_save(&mut self.alerts);
@@ -455,15 +455,9 @@ impl EventHandler for App {
             (Some(_), true, Key::D2) => {
                 self.action_change_map_view_mode(MapViewMode::ProvinceTypes)
             }
-            (Some(_), true, Key::D3) => {
-                self.action_change_map_view_mode(MapViewMode::Terrain)
-            }
-            (Some(_), true, Key::D4) => {
-                self.action_change_map_view_mode(MapViewMode::Continents)
-            }
-            (Some(_), true, Key::D5) => {
-                self.action_change_map_view_mode(MapViewMode::Coastal)
-            }
+            (Some(_), true, Key::D3) => self.action_change_map_view_mode(MapViewMode::Terrain),
+            (Some(_), true, Key::D4) => self.action_change_map_view_mode(MapViewMode::Continents),
+            (Some(_), true, Key::D5) => self.action_change_map_view_mode(MapViewMode::Coastal),
             (Some(_), true, Key::D6) => self.action_change_map_view_mode(MapViewMode::States),
             (Some(_), true, Key::D7) => self.action_change_map_view_mode(MapViewMode::Political),
             (Some(_), true, Key::D8) => self.action_change_map_view_mode(MapViewMode::States),
@@ -496,9 +490,7 @@ impl EventHandler for App {
             self.left_press_consumed = false;
             return;
         }
-        if state
-            && let Some(interface) = self.interface.as_mut()
-        {
+        if state && let Some(interface) = self.interface.as_mut() {
             interface.clear_tooltip();
         }
         if state
@@ -594,16 +586,14 @@ impl EventHandler for App {
             return;
         };
         match (&mut self.canvas, state, button) {
-            (_, true, MouseButton::Left) => {
-                match interface.on_mouse_click(pos, ictx) {
-                    Ok(id) => {
-                        self.left_press_consumed = true;
-                        self.action_interface_button(id);
-                    }
-                    Err(true) => self.action_activate_tool(pos, mods),
-                    Err(false) => self.left_press_consumed = true,
+            (_, true, MouseButton::Left) => match interface.on_mouse_click(pos, ictx) {
+                Ok(id) => {
+                    self.left_press_consumed = true;
+                    self.action_interface_button(id);
                 }
-            }
+                Err(true) => self.action_activate_tool(pos, mods),
+                Err(false) => self.left_press_consumed = true,
+            },
             (Some(_), false, MouseButton::Left) => self.action_deactivate_tool(),
             (Some(canvas), true, MouseButton::Right) if interface.map_contains(pos) => {
                 canvas.camera.set_panning(true)
@@ -711,12 +701,7 @@ impl EventHandler for App {
         self.alerts.set_state(false);
     }
 
-    fn on_window_state(
-        &mut self,
-        position: Option<[i32; 2]>,
-        size: [u32; 2],
-        maximized: bool,
-    ) {
+    fn on_window_state(&mut self, position: Option<[i32; 2]>, size: [u32; 2], maximized: bool) {
         self.global_config.window.width = size[0].max(384);
         self.global_config.window.height = size[1].max(256);
         self.global_config.window.maximized = maximized;
@@ -727,21 +712,13 @@ impl EventHandler for App {
     }
 
     fn on_close(&mut self) -> bool {
-        if self
-            .canvas
-            .as_ref()
-            .is_some_and(Canvas::save_blocks_close)
-        {
+        if self.canvas.as_ref().is_some_and(Canvas::save_blocks_close) {
             self.alerts.push(Err(
                 "Cannot close while a save commit, rollback, or recovery is pending",
             ));
             return false;
         }
-        if self
-            .canvas
-            .as_ref()
-            .is_some_and(Canvas::save_is_running)
-        {
+        if self.canvas.as_ref().is_some_and(Canvas::save_is_running) {
             if let Some(canvas) = self.canvas.as_mut() {
                 canvas.cancel_active_save(&mut self.alerts);
             }
@@ -808,18 +785,13 @@ impl App {
             return;
         }
         if let Some(viewport) = self.viewport {
-            self.global_config.window.width = viewport.window_size[0]
-                .round()
-                .max(384.0) as u32;
-            self.global_config.window.height = viewport.window_size[1]
-                .round()
-                .max(256.0) as u32;
+            self.global_config.window.width = viewport.window_size[0].round().max(384.0) as u32;
+            self.global_config.window.height = viewport.window_size[1].round().max(256.0) as u32;
         }
-        match self.global_config.save(
-            self.global_config_fingerprint.as_ref(),
-            false,
-            false,
-        ) {
+        match self
+            .global_config
+            .save(self.global_config_fingerprint.as_ref(), false, false)
+        {
             Ok(fingerprint) => self.global_config_fingerprint = Some(fingerprint),
             Err(error) => eprintln!("Could not persist global preferences on close: {error}"),
         }
@@ -899,8 +871,7 @@ impl App {
         if position[0] < x
             || position[0] > x + width
             || position[1] < y + 46.0
-            || position[1]
-                >= y + 46.0 + preference_rows(&self.preferences_dialog) as f64 * 30.0
+            || position[1] >= y + 46.0 + preference_rows(&self.preferences_dialog) as f64 * 30.0
         {
             return;
         }
@@ -970,8 +941,7 @@ impl App {
         match self.preferences_dialog.as_mut() {
             Some(PreferencesDialog::Global { draft, .. }) => match selected {
                 0 => {
-                    draft.language =
-                        crate::localization::next_language(&draft.language).to_owned();
+                    draft.language = crate::localization::next_language(&draft.language).to_owned();
                     crate::localization::set_language(&draft.language);
                     self.interface = None;
                 }
@@ -1011,8 +981,7 @@ impl App {
                 }
                 1 => draft.generate_coastal_on_save = !draft.generate_coastal_on_save,
                 2 => {
-                    draft.extra_warnings.lone_pixels =
-                        !draft.extra_warnings.lone_pixels;
+                    draft.extra_warnings.lone_pixels = !draft.extra_warnings.lone_pixels;
                     update_extra_warnings_enabled(draft);
                 }
                 3 => {
@@ -1027,9 +996,8 @@ impl App {
                     if path.exists() {
                         self.handle_result_none(open_file_default(&path));
                     } else {
-                        self.alerts.push(Err(
-                            "No project.toml exists yet. Choose Save to create it.",
-                        ));
+                        self.alerts
+                            .push(Err("No project.toml exists yet. Choose Save to create it."));
                     }
                 }
                 7 => match draft.validate() {
@@ -1048,9 +1016,7 @@ impl App {
     }
 
     fn cancel_preferences_dialog(&mut self) {
-        if let Some(PreferencesDialog::Global { original, .. }) =
-            self.preferences_dialog.take()
-        {
+        if let Some(PreferencesDialog::Global { original, .. }) = self.preferences_dialog.take() {
             crate::localization::set_language(&original.language);
             self.interface = None;
         } else {
@@ -1060,9 +1026,7 @@ impl App {
 
     fn save_global_preferences(&mut self) {
         let Some(PreferencesDialog::Global {
-            draft,
-            fingerprint,
-            ..
+            draft, fingerprint, ..
         }) = self.preferences_dialog.clone()
         else {
             return;
@@ -1220,7 +1184,7 @@ impl App {
                     province_modified,
                     pending_states,
                 }
-            },
+            }
             None => InterfaceDrawContext {
                 map_view_mode: None,
                 view_mode: None,
@@ -1370,10 +1334,7 @@ impl App {
         match (&mut self.canvas, id) {
             (
                 _,
-                WorkspaceProvinces
-                | WorkspaceStates
-                | WorkspaceReviewChanges
-                | WorkspaceApplyToMod,
+                WorkspaceProvinces | WorkspaceStates | WorkspaceReviewChanges | WorkspaceApplyToMod,
             ) => unreachable!(),
             (_, ToolbarFileOpenFileArchive) => self.action_open_map(true),
             (_, ToolbarFileOpenFolder) => self.action_open_map(false),
@@ -1538,18 +1499,12 @@ impl App {
             (Some(_), ToolbarViewMode2) => {
                 self.action_change_map_view_mode(MapViewMode::ProvinceTypes)
             }
-            (Some(_), ToolbarViewMode3) => {
-                self.action_change_map_view_mode(MapViewMode::Terrain)
-            }
+            (Some(_), ToolbarViewMode3) => self.action_change_map_view_mode(MapViewMode::Terrain),
             (Some(_), ToolbarViewMode4) => {
                 self.action_change_map_view_mode(MapViewMode::Continents)
             }
-            (Some(_), ToolbarViewMode5) => {
-                self.action_change_map_view_mode(MapViewMode::Coastal)
-            }
-            (Some(_), ToolbarViewMode6) => {
-                self.action_change_map_view_mode(MapViewMode::States)
-            }
+            (Some(_), ToolbarViewMode5) => self.action_change_map_view_mode(MapViewMode::Coastal),
+            (Some(_), ToolbarViewMode6) => self.action_change_map_view_mode(MapViewMode::States),
             (Some(_), ToolbarViewProvinceMap) => {
                 self.action_change_map_view_mode(MapViewMode::ProvinceColors)
             }
@@ -1581,9 +1536,7 @@ impl App {
             (Some(canvas), ToolbarImageOpacityUp) => {
                 canvas.adjust_image_overlay_opacity(0.1, &mut self.alerts)
             }
-            (Some(canvas), ToolbarImageClear) => {
-                canvas.clear_image_overlay(&mut self.alerts)
-            }
+            (Some(canvas), ToolbarImageClear) => canvas.clear_image_overlay(&mut self.alerts),
             (Some(canvas), ToolbarViewToggleStateBoundaries | SidebarOptionStateBoundaries) => {
                 canvas.toggle_state_boundaries(&mut self.alerts)
             }
@@ -1885,11 +1838,7 @@ impl App {
             let location = canvas.location().clone();
             if msg_dialog_confirm_province_save() {
                 if let Some(canvas) = self.canvas.as_mut() {
-                    canvas.start_province_save(
-                        location,
-                        ProvinceSaveMode::Save,
-                        &mut self.alerts,
-                    );
+                    canvas.start_province_save(location, ProvinceSaveMode::Save, &mut self.alerts);
                 }
             } else {
                 self.alerts
@@ -1899,13 +1848,9 @@ impl App {
     }
 
     fn action_export_province_map(&mut self, archive: bool) {
-        if self
-            .canvas
-            .as_ref()
-            .is_some_and(|canvas| {
-                saves_state_files(canvas.workspace_mode(), canvas.project().is_some())
-            })
-        {
+        if self.canvas.as_ref().is_some_and(|canvas| {
+            saves_state_files(canvas.workspace_mode(), canvas.project().is_some())
+        }) {
             self.alerts.push(Err(
         "Province export is available in the Provinces workspace. Use Apply State Changes for state files."
       ));
@@ -1915,11 +1860,7 @@ impl App {
             return;
         };
         if let Some(canvas) = self.canvas.as_mut() {
-            canvas.start_province_save(
-                location,
-                ProvinceSaveMode::Export,
-                &mut self.alerts,
-            );
+            canvas.start_province_save(location, ProvinceSaveMode::Export, &mut self.alerts);
         };
     }
 
@@ -2163,8 +2104,18 @@ fn draw_preferences_dialog(
         return;
     };
     let [x, y, width, height] = preferences_rect(viewport.window_size);
-    graphics::rectangle(colors::OVERLAY_T, [0.0, 0.0, viewport.window_size[0], viewport.window_size[1]], ctx.transform, gl);
-    graphics::rectangle(colors::BUTTON_TOOLBAR, [x, y, width, height], ctx.transform, gl);
+    graphics::rectangle(
+        colors::OVERLAY_T,
+        [0.0, 0.0, viewport.window_size[0], viewport.window_size[1]],
+        ctx.transform,
+        gl,
+    );
+    graphics::rectangle(
+        colors::BUTTON_TOOLBAR,
+        [x, y, width, height],
+        ctx.transform,
+        gl,
+    );
     let (title, selected, rows) = match dialog {
         PreferencesDialog::Global {
             draft, selected, ..
@@ -2177,7 +2128,10 @@ fn draw_preferences_dialog(
                     crate::localization::tr("settings.language"),
                     crate::localization::native_name(&draft.language)
                 ),
-                setting_row(crate::localization::tr("settings.open_last"), draft.open_last_project),
+                setting_row(
+                    crate::localization::tr("settings.open_last"),
+                    draft.open_last_project,
+                ),
                 setting_row(
                     crate::localization::tr("settings.remember_workspace"),
                     draft.remember_workspace,
@@ -2256,13 +2210,7 @@ fn draw_preferences_dialog(
                 gl,
             );
         }
-        draw_dialog_text(
-            ctx,
-            glyph_cache,
-            gl,
-            [x + 16.0, row_y + 18.0],
-            row,
-        );
+        draw_dialog_text(ctx, glyph_cache, gl, [x + 16.0, row_y + 18.0], row);
     }
 }
 
@@ -2369,7 +2317,7 @@ fn file_dialog_open(archive: bool) -> Option<Location> {
     } else {
         FileDialog::new()
             .set_directory(&root)
-        .set_title("Open HOI4 Mod")
+            .set_title("Open HOI4 Mod")
             .pick_folder()
             .map(Location::Directory)
     }
@@ -2408,11 +2356,7 @@ fn lasso_mode_from_mods(mods: KeyMods) -> Option<LassoSelectionMode> {
     }
 }
 
-fn workspace_shortcut(
-    key: Key,
-    mods: KeyMods,
-    current: WorkspaceMode,
-) -> Option<WorkspaceMode> {
+fn workspace_shortcut(key: Key, mods: KeyMods, current: WorkspaceMode) -> Option<WorkspaceMode> {
     if !mods.ctrl || mods.alt {
         return None;
     }
@@ -2487,7 +2431,7 @@ fn msg_dialog_confirm_state_batch(description: &str) -> bool {
 fn msg_dialog_confirm_province_save() -> bool {
     matches!(
         MessageDialog::new()
-        .set_title("SAVE PROVINCE MAP")
+            .set_title("SAVE PROVINCE MAP")
             .set_description(province_save_confirmation_text())
             .set_level(MessageLevel::Warning)
             .set_buttons(MessageButtons::YesNo)
@@ -2728,11 +2672,9 @@ pub fn copy_text_to_clipboard(text: &str) -> Result<(), Error> {
 
 #[cfg(test)]
 mod source_open_tests {
-    use super::{
-        PreferencesDialog, map_view_from_preference, open_source_with, preference_rows,
-    };
-    use crate::config::{GlobalConfig, ProjectConfig};
+    use super::{PreferencesDialog, map_view_from_preference, open_source_with, preference_rows};
     use crate::app::project::MapViewMode;
+    use crate::config::{GlobalConfig, ProjectConfig};
     use std::cell::Cell;
     use std::path::Path;
 

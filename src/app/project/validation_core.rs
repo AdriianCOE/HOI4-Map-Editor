@@ -225,11 +225,17 @@ impl ProjectValidationDelta {
     }
 
     pub fn new_errors(&self) -> usize {
-        self.new.iter().filter(|change| change.after_is_error()).count()
+        self.new
+            .iter()
+            .filter(|change| change.after_is_error())
+            .count()
     }
 
     pub fn new_warnings(&self) -> usize {
-        self.new.iter().filter(|change| change.after_is_warning()).count()
+        self.new
+            .iter()
+            .filter(|change| change.after_is_warning())
+            .count()
     }
 
     pub fn aggravated_to_error(&self) -> usize {
@@ -446,7 +452,8 @@ fn validate_states(
             continue;
         };
         let state_id = state.id;
-        let state_label = state_id.map_or_else(|| "unknown state".to_owned(), |id| format!("State {id}"));
+        let state_label =
+            state_id.map_or_else(|| "unknown state".to_owned(), |id| format!("State {id}"));
 
         if state.provinces.is_empty() {
             diagnostics.push(
@@ -467,7 +474,9 @@ fn validate_states(
                         ProjectDiagnosticKind::UnknownProvince,
                         DiagnosticSeverity::Error,
                         Some(document.path.clone()),
-                        format!("{state_label} references removed or missing province {province_id}"),
+                        format!(
+                            "{state_label} references removed or missing province {province_id}"
+                        ),
                     )
                     .with_domain(ProjectValidationDomain::CrossDomain)
                     .with_province_id(province_id)
@@ -500,7 +509,10 @@ fn validate_states(
                         ProjectDiagnosticKind::UnknownProvince,
                         DiagnosticSeverity::Error,
                         Some(document.path.clone()),
-                        format!("{state_label} victory point references removed or missing province {}", vp.province_id),
+                        format!(
+                            "{state_label} victory point references removed or missing province {}",
+                            vp.province_id
+                        ),
                     )
                     .with_domain(ProjectValidationDomain::CrossDomain)
                     .with_province_id(vp.province_id)
@@ -675,7 +687,10 @@ fn identity(diagnostic: &ProjectValidationDiagnostic, root: &Path) -> Diagnostic
         domain: diagnostic.domain,
         code: diagnostic.code.clone(),
         message_key: diagnostic.message_key.clone(),
-        path: diagnostic.path.as_ref().map(|path| normalized_path(root, path)),
+        path: diagnostic
+            .path
+            .as_ref()
+            .map(|path| normalized_path(root, path)),
         related_path: diagnostic
             .related_path
             .as_ref()
@@ -703,7 +718,10 @@ fn change_key(change: &ProjectValidationChange) -> DiagnosticIdentity {
     if let Some(after) = &change.after {
         identity(after, Path::new(""))
     } else {
-        identity(change.before.as_ref().expect("change has before or after"), Path::new(""))
+        identity(
+            change.before.as_ref().expect("change has before or after"),
+            Path::new(""),
+        )
     }
 }
 

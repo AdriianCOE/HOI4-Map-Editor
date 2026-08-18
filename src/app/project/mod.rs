@@ -21,8 +21,8 @@ pub use catalog::{
 };
 pub use diagnostics::{DiagnosticSeverity, ProjectDiagnostic, ProjectDiagnosticKind};
 pub use edit::{
-    ProvinceRemovalPolicy, StateEditError, StateEditSession, StateEditSummary, StateEditTimings, StateRemovalPolicy,
-    WorkingStateLifecycle, WorkingStateOrigin,
+    ProvinceRemovalPolicy, StateEditError, StateEditSession, StateEditSummary, StateEditTimings,
+    StateRemovalPolicy, WorkingStateLifecycle, WorkingStateOrigin,
 };
 pub use indexes::{StateIndexes, index_state_documents};
 pub use lasso::{
@@ -56,11 +56,11 @@ pub use state_fill::{
 };
 pub use validation::{
     ByteComparisonResult, ByteDifference, CandidateApplicationResult,
-    CombinedRoundTripValidationReport, DiagnosticComparison, FileFingerprint,
-    ProjectReloadResult, ProjectSemanticComparison, RoundTripCancellation, RoundTripDiagnostic,
-    RoundTripStage, RoundTripStatus, RoundTripTimings, RoundTripValidationPolicy,
-    RoundTripValidationReport, RoundTripValidator, SemanticDifference, SourceVerificationResult,
-    TemporaryProjectManifest, TemporaryWorkspaceSummary, resolve_candidate_path,
+    CombinedRoundTripValidationReport, DiagnosticComparison, FileFingerprint, ProjectReloadResult,
+    ProjectSemanticComparison, RoundTripCancellation, RoundTripDiagnostic, RoundTripStage,
+    RoundTripStatus, RoundTripTimings, RoundTripValidationPolicy, RoundTripValidationReport,
+    RoundTripValidator, SemanticDifference, SourceVerificationResult, TemporaryProjectManifest,
+    TemporaryWorkspaceSummary, resolve_candidate_path,
 };
 pub use validation_core::{
     ProjectValidationChange, ProjectValidationDelta, ProjectValidationDiagnostic,
@@ -70,9 +70,9 @@ pub use validation_core::{
 pub use view::{
     AMBIGUOUS_PROVINCE_COLOR, MapViewMode, SELECTED_STATE_COLOR, STATE_BOUNDARY_COLOR,
     StateMapRegionData, StateMapViewData, StateSelection, UNASSIGNED_LAND_COLOR,
-    UNKNOWN_PROVINCE_COLOR, boundaries_for_state,
-    generate_state_view, generate_state_view_for, generate_state_view_region_for, select_state_at,
-    select_state_at_for, selection_overlay, selection_overlay_for, state_color,
+    UNKNOWN_PROVINCE_COLOR, boundaries_for_state, generate_state_view, generate_state_view_for,
+    generate_state_view_region_for, select_state_at, select_state_at_for, selection_overlay,
+    selection_overlay_for, state_color,
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};

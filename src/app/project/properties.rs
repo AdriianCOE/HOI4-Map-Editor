@@ -461,20 +461,19 @@ impl ProvinceDataDraft {
 
     pub fn validate(&self) -> Result<EditableProvinceData, Vec<ProvinceDataValidationError>> {
         let mut errors = Vec::new();
-        let victory_point =
-            self.victory_point
-                .as_ref()
-                .and_then(|raw| match parse_grouped_nonnegative_integer(raw) {
-                    Ok(value) if value <= i64::MAX as u64 => Some(value as i64),
-                    _ => {
-                        errors.push(province_error(
-                            "Victory point value",
-                            Some(0),
-                            "must be a non-negative integer without decimals",
-                        ));
-                        None
-                    }
-                });
+        let victory_point = self.victory_point.as_ref().and_then(|raw| {
+            match parse_grouped_nonnegative_integer(raw) {
+                Ok(value) if value <= i64::MAX as u64 => Some(value as i64),
+                _ => {
+                    errors.push(province_error(
+                        "Victory point value",
+                        Some(0),
+                        "must be a non-negative integer without decimals",
+                    ));
+                    None
+                }
+            }
+        });
         let mut buildings = BTreeMap::new();
         for (index, building) in self.buildings.iter().enumerate() {
             let name_field = 1 + index * 2;
@@ -556,10 +555,7 @@ pub fn parse_grouped_nonnegative_integer(value: &str) -> Result<u64, &'static st
         }) {
             return Err("must be a non-negative integer without decimals");
         }
-    } else if !value
-        .chars()
-        .all(|character| character.is_ascii_digit())
-    {
+    } else if !value.chars().all(|character| character.is_ascii_digit()) {
         return Err("must be a non-negative integer without decimals");
     }
     let normalized = value.replace(['.', ' '], "");
@@ -868,8 +864,7 @@ mod tests {
         assert_eq!(state.resource_values().unwrap().len(), 1);
         assert_eq!(state.state_building_values().unwrap()["arms_factory"], 1);
 
-        let mut province =
-            ProvinceDataDraft::new(1, 1, &EditableProvinceData::default());
+        let mut province = ProvinceDataDraft::new(1, 1, &EditableProvinceData::default());
         let row = province.add_building();
         assert_eq!(province.buildings[row].value, "1");
     }

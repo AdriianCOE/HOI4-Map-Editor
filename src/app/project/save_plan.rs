@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    PatchPlanSummary, PatchPlanTimings, PatchSafety, PlannedFileCreation,
-    PlannedFileModification, ProjectPatchPlan, SourceFingerprint,
+    PatchPlanSummary, PatchPlanTimings, PatchSafety, PlannedFileCreation, PlannedFileModification,
+    ProjectPatchPlan, SourceFingerprint,
 };
 use crate::app::map::ProvinceMapCandidate;
 use crate::app::project::Hoi4Project;
@@ -56,17 +56,17 @@ impl ProjectSavePlan {
         let state_plan = states.unwrap_or(&empty_state_plan);
         let mut patch_plan = state_plan.clone();
         patch_plan.generation = generation;
-        let candidate_digest = combined_candidate_digest(
-            &patch_plan,
-            province.map(|candidate| &candidate.files),
-        );
+        let candidate_digest =
+            combined_candidate_digest(&patch_plan, province.map(|candidate| &candidate.files));
         let state_files = patch_plan.files_len();
         let province_files = if let Some(candidate) = province {
             append_province_candidate(project, candidate, &mut patch_plan)?
         } else {
             0
         };
-        patch_plan.modified_files.sort_by(|a, b| a.path.cmp(&b.path));
+        patch_plan
+            .modified_files
+            .sort_by(|a, b| a.path.cmp(&b.path));
         patch_plan.created_files.sort_by(|a, b| a.path.cmp(&b.path));
         patch_plan.removed_files.sort_by(|a, b| a.path.cmp(&b.path));
         patch_plan.summary = summarize(&patch_plan);
@@ -263,7 +263,10 @@ mod tests {
 
         assert_eq!(plan.dirty().province_files, 1);
         assert!(plan.domains().contains(&SaveDomain::ProvinceMap));
-        assert_eq!(plan.patch_plan().created_files[0].path, PathBuf::from("map/definition.csv"));
+        assert_eq!(
+            plan.patch_plan().created_files[0].path,
+            PathBuf::from("map/definition.csv")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

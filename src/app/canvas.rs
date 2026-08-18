@@ -3,9 +3,9 @@ use graphics::Transformed;
 use graphics::context::Context;
 use graphics::ellipse::Ellipse;
 use graphics::types::Color as DrawColor;
-use image::{RgbImage, RgbaImage};
 #[cfg(test)]
 use image::Rgba;
+use image::{RgbImage, RgbaImage};
 use itertools::Itertools;
 use opengl_graphics::{Filter, GlGraphics, Texture, TextureSettings};
 use uord::UOrd2 as UOrd;
@@ -19,36 +19,34 @@ use super::inspector::{
     ProvinceSearchResult, StateInspectorState, StateInspectorVisibility, StateOpenSource,
     StateSearchEntry, StateSearchIndex, StateSearchResult,
 };
-use super::map_layers::{
-    ImageOverlaySource, MapBaseView, MapLayerState, WorkspaceMode, WorkspaceViewPreferences,
-    political_fallback_color,
-};
 use super::inspector_controls::{
     InspectorControlId, InspectorControlLayout, InspectorControlRect, InspectorPickTarget,
     InspectorValueTarget, MapTagPickTarget, MapTagPicker, SearchablePicker,
 };
 use super::interface::{Interface, StateActionAvailability};
 use super::map::*;
+use super::map_layers::{
+    ImageOverlaySource, MapBaseView, MapLayerState, WorkspaceMode, WorkspaceViewPreferences,
+    political_fallback_color,
+};
 use super::project::{
     BrushProvinceClassification, BuildingScope, CombinedRoundTripValidationReport,
     DiagnosticSeverity, EditableProvinceData, EditableStateProperties, GameDefinitionCatalog,
     Hoi4Project, LassoSelectionMode, MapViewMode, ProjectPatchPlan, ProjectSavePlan,
     ProjectValidationChange, ProjectValidationDiagnostic, ProjectValidationDomain,
-    ProjectValidationReport, ProjectValidationTarget, ProvinceDataDraft,
-    ProvinceDataValidationError,
-    ProvinceInclusionMode, RecoveryInfo,
-    RoundTripCancellation, RoundTripStage, RoundTripStatus,
-    RoundTripValidationPolicy, RoundTripValidationReport, RoundTripValidator, SaveTransactionState,
-    ProvinceRemovalPolicy, StateBrushMode, StateEditSession, StateLassoPhase, StatePropertyDraft, StateRemovalPolicy,
-    StateSaveCancellation, StateSaveConditions, StateSaveFault, StateSaveOutcome, StateSaveReport,
-    StateSelection, WorkingStateOrigin, boundaries_for_state, classify_state_lasso,
-    detect_state_save_recovery, execute_project_save, execute_state_save, generate_state_view,
-    generate_state_view_for, generate_state_view_region_for, plan_state_fill, plan_state_patches,
-    ProvinceAdjacency,
-    format_integer_pt_br, parse_grouped_nonnegative_integer,
-    recover_interrupted_state_save, sample_segment, save_confirmation_text, validate_project,
-    select_state_at_for as resolve_state_at_for, selection_overlay_for, state_save_eligibility,
-    StateFillMode, StateFillPreview, StateFillProvince, StateFillProvinceKind,
+    ProjectValidationReport, ProjectValidationTarget, ProvinceAdjacency, ProvinceDataDraft,
+    ProvinceDataValidationError, ProvinceInclusionMode, ProvinceRemovalPolicy, RecoveryInfo,
+    RoundTripCancellation, RoundTripStage, RoundTripStatus, RoundTripValidationPolicy,
+    RoundTripValidationReport, RoundTripValidator, SaveTransactionState, StateBrushMode,
+    StateEditSession, StateFillMode, StateFillPreview, StateFillProvince, StateFillProvinceKind,
+    StateLassoPhase, StatePropertyDraft, StateRemovalPolicy, StateSaveCancellation,
+    StateSaveConditions, StateSaveFault, StateSaveOutcome, StateSaveReport, StateSelection,
+    WorkingStateOrigin, boundaries_for_state, classify_state_lasso, detect_state_save_recovery,
+    execute_project_save, execute_state_save, format_integer_pt_br, generate_state_view,
+    generate_state_view_for, generate_state_view_region_for, parse_grouped_nonnegative_integer,
+    plan_state_fill, plan_state_patches, recover_interrupted_state_save, sample_segment,
+    save_confirmation_text, select_state_at_for as resolve_state_at_for, selection_overlay_for,
+    state_save_eligibility, validate_project,
 };
 use super::{FontGlyphCache, colors};
 use crate::config::{Config, ImageOverlayProjectSettings, ProjectConfig};
@@ -519,7 +517,9 @@ impl Canvas {
 
     pub fn load_project(project: Hoi4Project) -> Result<Canvas, Error> {
         let location = Location::Directory(project.paths.map_directory.clone());
-        let overlay_settings = ProjectConfig::load(&project.paths.root)?.value.image_overlay;
+        let overlay_settings = ProjectConfig::load(&project.paths.root)?
+            .value
+            .image_overlay;
         let config = Config::load_for_project(&project.paths.root)?;
         Self::load_with_access(
             location,
@@ -596,14 +596,18 @@ impl Canvas {
             MapViewMode::ProvinceColors
         };
         let overlay_settings = overlay_settings.unwrap_or_default();
-        let (image_overlay_source, image_overlay_texture, image_overlay_status, image_overlay_dimensions) =
-            load_configured_image_overlay(
-                &location,
-                project.as_ref(),
-                &overlay_settings,
-                bundle.map.dimensions(),
-                &texture_settings,
-            );
+        let (
+            image_overlay_source,
+            image_overlay_texture,
+            image_overlay_status,
+            image_overlay_dimensions,
+        ) = load_configured_image_overlay(
+            &location,
+            project.as_ref(),
+            &overlay_settings,
+            bundle.map.dimensions(),
+            &texture_settings,
+        );
         let state_edit_session = project
             .as_ref()
             .map(|project| StateEditSession::new(project, &bundle.map));
@@ -805,10 +809,7 @@ impl Canvas {
     }
 
     pub fn detected_capabilities_message(&self) -> String {
-        let mut capabilities = vec![
-            "Province map detected",
-            "Definition catalog detected",
-        ];
+        let mut capabilities = vec!["Province map detected", "Definition catalog detected"];
         if self.project.is_some() {
             capabilities.push("State history detected");
         }
@@ -889,7 +890,10 @@ impl Canvas {
     ) {
         let results = self.inspector_search_results();
         let Some(result) = results
-            .get(self.inspector_search_index.min(results.len().saturating_sub(1)))
+            .get(
+                self.inspector_search_index
+                    .min(results.len().saturating_sub(1)),
+            )
             .cloned()
         else {
             return;
@@ -1040,23 +1044,24 @@ impl Canvas {
             alerts.push(Err("Select a land province before deleting it"));
             return;
         };
-        if !self
-            .bundle
-            .map
-            .iter_province_data()
-            .any(|(_, province)| province.preserved_id == Some(province_id) && province.kind == ProvinceKind::Land)
-        {
-            alerts.push(Err("Only land provinces can be removed from a State project"));
+        if !self.bundle.map.iter_province_data().any(|(_, province)| {
+            province.preserved_id == Some(province_id) && province.kind == ProvinceKind::Land
+        }) {
+            alerts.push(Err(
+                "Only land provinces can be removed from a State project",
+            ));
             return;
         }
         let result = self
             .state_edit_session
             .as_ref()
-            .ok_or_else(|| "Province removal is available only for loaded state projects".to_owned())
+            .ok_or_else(|| {
+                "Province removal is available only for loaded state projects".to_owned()
+            })
             .and_then(|edit| {
-                edit.province_data(province_id)
-                    .map(|_| ())
-                    .ok_or_else(|| format!("Province {province_id} is not a selectable land province"))
+                edit.province_data(province_id).map(|_| ()).ok_or_else(|| {
+                    format!("Province {province_id} is not a selectable land province")
+                })
             });
         if let Err(error) = result {
             alerts.push(Err(error));
@@ -1095,13 +1100,17 @@ impl Canvas {
                 return;
             }
         };
-        let Some(target_color) = self
-            .bundle
-            .map
-            .iter_province_data()
-            .find_map(|(color, province)| (province.preserved_id == Some(target_id)).then_some(color))
+        let Some(target_color) =
+            self.bundle
+                .map
+                .iter_province_data()
+                .find_map(|(color, province)| {
+                    (province.preserved_id == Some(target_id)).then_some(color)
+                })
         else {
-            alerts.push(Err(format!("Province {target_id} does not exist in the map")));
+            alerts.push(Err(format!(
+                "Province {target_id} does not exist in the map"
+            )));
             return;
         };
         let Some(source_pos) = (0..self.bundle.map.height()).find_map(|y| {
@@ -1110,7 +1119,10 @@ impl Canvas {
                     .then_some([x, y])
             })
         }) else {
-            alerts.push(Err(format!("Province {} no longer has pixels", draft.province_id)));
+            alerts.push(Err(format!(
+                "Province {} no longer has pixels",
+                draft.province_id
+            )));
             return;
         };
         if transfer && !self.province_is_coastal(target_id) {
@@ -1118,7 +1130,11 @@ impl Canvas {
                 .state_edit_session
                 .as_ref()
                 .and_then(|edit| edit.province_data(draft.province_id))
-                .is_some_and(|data| data.buildings.keys().any(|name| is_coastal_only_building(name)));
+                .is_some_and(|data| {
+                    data.buildings
+                        .keys()
+                        .any(|name| is_coastal_only_building(name))
+                });
             if has_naval_base {
                 alerts.push(Err(format!(
                     "Province {target_id} is not coastal, so it cannot receive a naval base"
@@ -1140,7 +1156,10 @@ impl Canvas {
             .state_edit_session
             .as_mut()
             .ok_or_else(|| "Province removal is unavailable".to_owned())
-            .and_then(|edit| edit.remove_province_references(draft.province_id, policy).map_err(|error| error.to_string()));
+            .and_then(|edit| {
+                edit.remove_province_references(draft.province_id, policy)
+                    .map_err(|error| error.to_string())
+            });
         if let Err(error) = result {
             alerts.push(Err(error));
             return;
@@ -1153,7 +1172,9 @@ impl Canvas {
             if let Some(edit) = self.state_edit_session.as_mut() {
                 edit.undo();
             }
-            alerts.push(Err("Province removal could not update the map; references were restored"));
+            alerts.push(Err(
+                "Province removal could not update the map; references were restored",
+            ));
             return;
         }
         self.bundle.map.recalculate_all_boundaries();
@@ -1253,10 +1274,17 @@ impl Canvas {
         let selected = self
             .state_edit_session
             .as_ref()
-            .map(|edit| edit.selected_provinces().iter().copied().collect::<Vec<_>>())
+            .map(|edit| {
+                edit.selected_provinces()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         if selected.len() < 2 {
-            alerts.push(Err("Select at least two provinces to navigate the selection."));
+            alerts.push(Err(
+                "Select at least two provinces to navigate the selection.",
+            ));
             return;
         }
         let current = self
@@ -1565,7 +1593,10 @@ impl Canvas {
     ) -> Result<EditableProvinceData, Vec<ProvinceDataValidationError>> {
         let data = draft.validate()?;
         if self.province_is_coastal(draft.province_id)
-            || !data.buildings.keys().any(|name| is_coastal_only_building(name))
+            || !data
+                .buildings
+                .keys()
+                .any(|name| is_coastal_only_building(name))
         {
             return Ok(data);
         }
@@ -1934,8 +1965,7 @@ impl Canvas {
         if self.state_property_draft.is_some() {
             return self.state_property_draft.as_mut();
         }
-        let StateLifecycleDraft::Create { properties, .. } =
-            self.state_lifecycle_draft.as_mut()?
+        let StateLifecycleDraft::Create { properties, .. } = self.state_lifecycle_draft.as_mut()?
         else {
             return None;
         };
@@ -1969,10 +1999,15 @@ impl Canvas {
         let tag = self
             .state_edit_session
             .as_ref()
-            .and_then(|edit| edit.province_state_id(province_id).and_then(|id| edit.state_data(id)))
+            .and_then(|edit| {
+                edit.province_state_id(province_id)
+                    .and_then(|id| edit.state_data(id))
+            })
             .and_then(|data| data.history.owner);
         let Some((target, tag)) = self.map_tag_picker.pick(tag) else {
-            alerts.push(Err("The clicked state has no owner; map picker remains available"));
+            alerts.push(Err(
+                "The clicked state has no owner; map picker remains available",
+            ));
             self.map_tag_picker.begin(target);
             return true;
         };
@@ -2135,10 +2170,7 @@ impl Canvas {
         (true, None)
     }
 
-    fn inspector_draft_controls(
-        &self,
-        layout: InspectorCanvasLayout,
-    ) -> Vec<InspectorControlRect> {
+    fn inspector_draft_controls(&self, layout: InspectorCanvasLayout) -> Vec<InspectorControlRect> {
         if self.state_property_draft.is_none() {
             return Vec::new();
         }
@@ -2157,7 +2189,11 @@ impl Canvas {
             super::inspector::InspectorSection::History => {
                 for (row, target, map_target) in [
                     (0, InspectorPickTarget::Owner, MapTagPickTarget::Owner),
-                    (1, InspectorPickTarget::Controller, MapTagPickTarget::Controller),
+                    (
+                        1,
+                        InspectorPickTarget::Controller,
+                        MapTagPickTarget::Controller,
+                    ),
                     (2, InspectorPickTarget::Core, MapTagPickTarget::Core),
                     (3, InspectorPickTarget::Claim, MapTagPickTarget::Claim),
                 ] {
@@ -2184,10 +2220,10 @@ impl Canvas {
                     .and_then(|draft| draft.resource_values().ok())
                     .map_or(0, |values| values.len());
                 for index in 0..count {
-                    controls.extend(control_layout.numeric_stepper(
-                        index + 1,
-                        InspectorValueTarget::Resource(index),
-                    ));
+                    controls.extend(
+                        control_layout
+                            .numeric_stepper(index + 1, InspectorValueTarget::Resource(index)),
+                    );
                     controls.push(control_layout.body_control(
                         InspectorControlId::RemoveValue(InspectorValueTarget::Resource(index)),
                         index + 1,
@@ -2211,10 +2247,10 @@ impl Canvas {
                     .and_then(|draft| draft.state_building_values().ok())
                     .map_or(0, |values| values.len());
                 for index in 0..count {
-                    controls.extend(control_layout.numeric_stepper(
-                        index + 1,
-                        InspectorValueTarget::StateBuilding(index),
-                    ));
+                    controls.extend(
+                        control_layout
+                            .numeric_stepper(index + 1, InspectorValueTarget::StateBuilding(index)),
+                    );
                     controls.push(control_layout.body_control(
                         InspectorControlId::RemoveValue(InspectorValueTarget::StateBuilding(index)),
                         index + 1,
@@ -2251,7 +2287,9 @@ impl Canvas {
                 self.cancel_state_fill();
                 self.state_pan_tool = false;
                 self.map_tag_picker.begin(target);
-                alerts.push(Ok("Map tag picker active — click a state's owner; Esc cancels"));
+                alerts.push(Ok(
+                    "Map tag picker active — click a state's owner; Esc cancels",
+                ));
             }
             InspectorControlId::Decrement(target) | InspectorControlId::Increment(target) => {
                 let increment = matches!(id, InspectorControlId::Increment(_));
@@ -2317,15 +2355,17 @@ impl Canvas {
                 }
                 .to_string();
             }
-            InspectorValueTarget::BuildingsMaxLevelFactor
-            | InspectorValueTarget::LocalSupplies => {
+            InspectorValueTarget::BuildingsMaxLevelFactor | InspectorValueTarget::LocalSupplies => {
                 let field = if target == InspectorValueTarget::BuildingsMaxLevelFactor {
                     &mut draft.buildings_max_level_factor
                 } else {
                     &mut draft.local_supplies
                 };
                 let value = field.trim().parse::<f64>().unwrap_or(0.0);
-                *field = format!("{:.3}", (value + if increment { 0.1 } else { -0.1 }).max(0.0));
+                *field = format!(
+                    "{:.3}",
+                    (value + if increment { 0.1 } else { -0.1 }).max(0.0)
+                );
             }
             InspectorValueTarget::Resource(index) => {
                 let Some((name, value)) = draft
@@ -2369,20 +2409,21 @@ impl Canvas {
             return Vec::new();
         };
         if self.is_state_workspace() {
-            let index = StateSearchIndex::new(edit.valid_state_ids().iter().filter_map(|state_id| {
-                let data = edit.state_data(*state_id)?;
-                Some(
-                    StateSearchEntry::new(
-                        *state_id,
-                        data.name.unwrap_or_else(|| "<unnamed>".to_owned()),
+            let index =
+                StateSearchIndex::new(edit.valid_state_ids().iter().filter_map(|state_id| {
+                    let data = edit.state_data(*state_id)?;
+                    Some(
+                        StateSearchEntry::new(
+                            *state_id,
+                            data.name.unwrap_or_else(|| "<unnamed>".to_owned()),
+                        )
+                        .with_context(
+                            data.history.owner,
+                            data.history.controller,
+                            data.provinces,
+                        ),
                     )
-                    .with_context(
-                        data.history.owner,
-                        data.history.controller,
-                        data.provinces,
-                    ),
-                )
-            }));
+                }));
             return index
                 .search(&self.inspector.search)
                 .into_iter()
@@ -2477,9 +2518,7 @@ impl Canvas {
             );
         }
         self.refresh_state_information();
-        alerts.push(Ok(format!(
-            "Selected State {state_id} from map search"
-        )));
+        alerts.push(Ok(format!("Selected State {state_id} from map search")));
     }
 
     fn select_province_by_id(
@@ -3041,18 +3080,13 @@ impl Canvas {
         if self.map_layers.image_overlay.enabled
             && let Some(image_overlay) = &self.image_overlay_texture
         {
-            graphics::Image::new_color([
-                1.0,
-                1.0,
-                1.0,
-                self.map_layers.image_overlay.opacity,
-            ])
-            .draw(
-                image_overlay,
-                &graphics::DrawState::default(),
-                transform,
-                gl,
-            );
+            graphics::Image::new_color([1.0, 1.0, 1.0, self.map_layers.image_overlay.opacity])
+                .draw(
+                    image_overlay,
+                    &graphics::DrawState::default(),
+                    transform,
+                    gl,
+                );
         }
 
         let rivers = self
@@ -3480,7 +3514,11 @@ impl Canvas {
                 glyph_cache,
                 gl,
                 layout.severity_filter(),
-                &format!("{}: {}", tr("project_validation.filter"), self.validation_problems_view.severity.label()),
+                &format!(
+                    "{}: {}",
+                    tr("project_validation.filter"),
+                    self.validation_problems_view.severity.label()
+                ),
                 true,
             );
             draw_editor_button(
@@ -3488,7 +3526,11 @@ impl Canvas {
                 glyph_cache,
                 gl,
                 layout.source_filter(),
-                &format!("{}: {}", tr("project_validation.source"), self.validation_problems_view.source.label()),
+                &format!(
+                    "{}: {}",
+                    tr("project_validation.source"),
+                    self.validation_problems_view.source.label()
+                ),
                 true,
             );
             draw_editor_button(
@@ -3496,7 +3538,11 @@ impl Canvas {
                 glyph_cache,
                 gl,
                 layout.domain_filter(),
-                &format!("{}: {}", tr("project_validation.domain"), self.validation_problems_view.domain.label()),
+                &format!(
+                    "{}: {}",
+                    tr("project_validation.domain"),
+                    self.validation_problems_view.domain.label()
+                ),
                 true,
             );
         }
@@ -3504,22 +3550,23 @@ impl Canvas {
             for (index, label) in [
                 "Choose Image...",
                 "Use Project Heightmap",
-                &format!("Opacity: {}% (click to set)", (self.map_layers.image_overlay.opacity * 100.0).round() as u32),
+                &format!(
+                    "Opacity: {}% (click to set)",
+                    (self.map_layers.image_overlay.opacity * 100.0).round() as u32
+                ),
                 "Opacity -10%",
                 "Opacity +10%",
                 "Clear Image",
-            ].iter().enumerate() {
+            ]
+            .iter()
+            .enumerate()
+            {
                 draw_editor_button(ctx, glyph_cache, gl, layout.problem_row(index), label, true);
             }
         }
         if dialog == StateApplyDialog::ProvinceRemoval {
             let target = layout.problem_row(0);
-            graphics::rectangle(
-                editor_field_color(true, false),
-                target,
-                ctx.transform,
-                gl,
-            );
+            graphics::rectangle(editor_field_color(true, false), target, ctx.transform, gl);
             draw_canvas_text(
                 ctx,
                 glyph_cache,
@@ -3560,14 +3607,7 @@ impl Canvas {
                     tr("project_validation.copy_details"),
                     self.selected_validation_problem().is_some(),
                 );
-                draw_editor_button(
-                    ctx,
-                    glyph_cache,
-                    gl,
-                    layout.validation_close(),
-                    close,
-                    true,
-                );
+                draw_editor_button(ctx, glyph_cache, gl, layout.validation_close(), close, true);
             } else {
                 draw_editor_button(ctx, glyph_cache, gl, layout.close(), close, true);
             }
@@ -3610,8 +3650,8 @@ impl Canvas {
             let color = match self.map_layers.base_view {
                 MapBaseView::States | MapBaseView::Political => colors::BLACK,
                 MapBaseView::ProvinceColors => match province_data.kind {
-                        ProvinceKind::Land | ProvinceKind::Lake => colors::BLACK,
-                        ProvinceKind::Sea | ProvinceKind::Unknown => colors::WHITE,
+                    ProvinceKind::Land | ProvinceKind::Lake => colors::BLACK,
+                    ProvinceKind::Sea | ProvinceKind::Unknown => colors::WHITE,
                 },
                 MapBaseView::ProvinceTypes | MapBaseView::Terrain => colors::BLACK,
                 MapBaseView::Continents => colors::WHITE,
@@ -3674,9 +3714,10 @@ impl Canvas {
 
                 graphics::line_from_to(color, width, center1, center2, ctx.transform, gl);
                 if let Some(through) = connection_data.through {
-                    let through = self
-                        .camera
-                        .compute_position(interface, self.bundle.map.get_province(through).center_of_mass());
+                    let through = self.camera.compute_position(
+                        interface,
+                        self.bundle.map.get_province(through).center_of_mass(),
+                    );
                     graphics::Ellipse::new_border(color, width).draw(
                         [through[0] - 4.0, through[1] - 4.0, 8.0, 8.0],
                         &graphics::DrawState::default(),
@@ -4001,16 +4042,29 @@ impl Canvas {
             });
         let lines = if self.map_layers.base_view == MapBaseView::Political {
             state_id
-                .and_then(|id| self.state_edit_session.as_ref()?.state_data(id).map(|data| (id, data)))
+                .and_then(|id| {
+                    self.state_edit_session
+                        .as_ref()?
+                        .state_data(id)
+                        .map(|data| (id, data))
+                })
                 .map_or_else(
                     || vec![format!("Province {province_id} | unassigned")],
-                    |(id, data)| vec![
-                        format!("State {id} — {state_name}"),
-                        format!("Owner: {}", data.history.owner.as_deref().unwrap_or("—")),
-                        format!("Controller: {}", data.history.controller.as_deref().unwrap_or("—")),
-                        format!("Category: {}", data.state_category.as_deref().unwrap_or("—")),
-                        format!("Provinces: {}", data.provinces.len()),
-                    ],
+                    |(id, data)| {
+                        vec![
+                            format!("State {id} — {state_name}"),
+                            format!("Owner: {}", data.history.owner.as_deref().unwrap_or("—")),
+                            format!(
+                                "Controller: {}",
+                                data.history.controller.as_deref().unwrap_or("—")
+                            ),
+                            format!(
+                                "Category: {}",
+                                data.state_category.as_deref().unwrap_or("—")
+                            ),
+                            format!("Provinces: {}", data.provinces.len()),
+                        ]
+                    },
                 )
         } else {
             vec![state_id.map_or_else(
@@ -4547,14 +4601,12 @@ impl Canvas {
             match self.inspector.active_section {
                 super::inspector::InspectorSection::Overview => {
                     let resources = draft.resource_values().map_or(0, |values| values.len());
-                    let state_buildings =
-                        draft.state_building_values().map_or(0, |values| values.len());
+                    let state_buildings = draft
+                        .state_building_values()
+                        .map_or(0, |values| values.len());
                     return vec![
                         format!("Name: {}", draft.name),
-                        format!(
-                            "Manpower: {}",
-                            format_integer_input(&draft.manpower, true)
-                        ),
+                        format!("Manpower: {}", format_integer_input(&draft.manpower, true)),
                         format!("Category: {}", draft.state_category),
                         format!("Max level factor: {}", draft.buildings_max_level_factor),
                         format!("Local supplies: {}", draft.local_supplies),
@@ -4567,8 +4619,22 @@ impl Canvas {
                             "Province building groups: {}",
                             data.history.province_buildings.len()
                         ),
-                        format!("Cores: {}", draft.cores.split(',').filter(|v| !v.trim().is_empty()).count()),
-                        format!("Claims: {}", draft.claims.split(',').filter(|v| !v.trim().is_empty()).count()),
+                        format!(
+                            "Cores: {}",
+                            draft
+                                .cores
+                                .split(',')
+                                .filter(|v| !v.trim().is_empty())
+                                .count()
+                        ),
+                        format!(
+                            "Claims: {}",
+                            draft
+                                .claims
+                                .split(',')
+                                .filter(|v| !v.trim().is_empty())
+                                .count()
+                        ),
                         if draft.is_modified() {
                             "Draft modified - Apply or Discard".to_owned()
                         } else {
@@ -4669,7 +4735,10 @@ impl Canvas {
                 format!("Resources: {}", data.resources.len()),
                 format!("State buildings: {}", data.history.state_buildings.len()),
                 format!("Victory points: {}", data.history.victory_points.len()),
-                format!("Province building groups: {}", data.history.province_buildings.len()),
+                format!(
+                    "Province building groups: {}",
+                    data.history.province_buildings.len()
+                ),
                 format!("Cores: {}", data.history.cores.len()),
                 format!("Claims: {}", data.history.claims.len()),
             ],
@@ -4738,10 +4807,11 @@ impl Canvas {
                         format!("Country tags: {}", catalog.country_tags.len()),
                         format!(
                             "Base game definitions: {}",
-                            self.definition_base_game_root.as_ref().map_or(
-                                "not configured (fallback only)".to_owned(),
-                                |path| path.display().to_string()
-                            )
+                            self.definition_base_game_root
+                                .as_ref()
+                                .map_or("not configured (fallback only)".to_owned(), |path| path
+                                    .display()
+                                    .to_string())
                         ),
                         "Mod definitions: loaded".to_owned(),
                         "Observed project values: loaded".to_owned(),
@@ -4800,10 +4870,7 @@ impl Canvas {
                     glyph_cache,
                     gl,
                     [1.0, 0.42, 0.42, 1.0],
-                    [
-                        layout.panel[0] + 8.0,
-                        layout.footer_left()[1] - 7.0,
-                    ],
+                    [layout.panel[0] + 8.0, layout.footer_left()[1] - 7.0],
                     &fit_editor_text(
                         &format!("{}: {}", error.field, error.message),
                         layout.panel[2] - 16.0,
@@ -4820,13 +4887,12 @@ impl Canvas {
             );
             draw_editor_button(ctx, glyph_cache, gl, layout.footer_right(), "Discard", true);
         } else {
-            let edit_label = if self.inspector.active_section
-                == super::inspector::InspectorSection::Overview
-            {
-                "Edit General Properties"
-            } else {
-                "Edit State Properties"
-            };
+            let edit_label =
+                if self.inspector.active_section == super::inspector::InspectorSection::Overview {
+                    "Edit General Properties"
+                } else {
+                    "Edit State Properties"
+                };
             draw_editor_button(
                 ctx,
                 glyph_cache,
@@ -5890,7 +5956,9 @@ impl Canvas {
             if state_undone {
                 self.state_edit_session.as_mut().unwrap().redo();
             }
-            alerts.push(Err("Province removal undo could not restore both map and State data"));
+            alerts.push(Err(
+                "Province removal undo could not restore both map and State data",
+            ));
             return;
         }
         if self.is_state_workspace() {
@@ -5954,7 +6022,9 @@ impl Canvas {
             if state_redone {
                 self.state_edit_session.as_mut().unwrap().undo();
             }
-            alerts.push(Err("Province removal redo could not restore both map and State data"));
+            alerts.push(Err(
+                "Province removal redo could not restore both map and State data",
+            ));
             return;
         }
         if self.is_state_workspace() {
@@ -6251,19 +6321,19 @@ impl Canvas {
         if !self.ensure_current_patch_preview(alerts) {
             return;
         }
-        self.state_apply_dialog = Some(if self.round_trip_task.is_some()
-            || self.state_save_task.is_some()
-        {
-            StateApplyDialog::Progress
-        } else if self
-            .patch_preview
-            .as_ref()
-            .is_some_and(|plan| plan.summary.blocked_files != 0)
-        {
-            StateApplyDialog::Blocked
-        } else {
-            StateApplyDialog::Review
-        });
+        self.state_apply_dialog = Some(
+            if self.round_trip_task.is_some() || self.state_save_task.is_some() {
+                StateApplyDialog::Progress
+            } else if self
+                .patch_preview
+                .as_ref()
+                .is_some_and(|plan| plan.summary.blocked_files != 0)
+            {
+                StateApplyDialog::Blocked
+            } else {
+                StateApplyDialog::Review
+            },
+        );
     }
 
     pub fn prepare_state_apply(&mut self, alerts: &mut Alerts) -> bool {
@@ -6312,7 +6382,9 @@ impl Canvas {
 
     fn ensure_current_patch_preview(&mut self, alerts: &mut Alerts) -> bool {
         let Some(edit) = self.state_edit_session.as_ref() else {
-            alerts.push(Err("Review and Apply are available only for state projects"));
+            alerts.push(Err(
+                "Review and Apply are available only for state projects",
+            ));
             return false;
         };
         if self.property_editor_is_open()
@@ -6401,7 +6473,8 @@ impl Canvas {
             }
             if point_in_rect(pos, layout.problem_row(2)) {
                 let track = layout.problem_row(2);
-                self.map_layers.image_overlay.opacity = ((pos[0] - track[0]) / track[2]).clamp(0.0, 1.0) as f32;
+                self.map_layers.image_overlay.opacity =
+                    ((pos[0] - track[0]) / track[2]).clamp(0.0, 1.0) as f32;
                 self.persist_image_overlay_settings(alerts);
                 return StateApplyDialogAction::None;
             }
@@ -6415,7 +6488,8 @@ impl Canvas {
                 return StateApplyDialogAction::ClearImageOverlay;
             }
         }
-        if dialog == StateApplyDialog::ProvinceRemoval && point_in_rect(pos, layout.problem_row(0)) {
+        if dialog == StateApplyDialog::ProvinceRemoval && point_in_rect(pos, layout.problem_row(0))
+        {
             return StateApplyDialogAction::None;
         }
         if dialog == StateApplyDialog::ValidationResults {
@@ -6513,7 +6587,9 @@ impl Canvas {
                     }
                 }
                 StateApplyDialog::ValidationResults => {
-                    let selected = self.selected_validation_problem().map(|(_, diagnostic)| diagnostic);
+                    let selected = self
+                        .selected_validation_problem()
+                        .map(|(_, diagnostic)| diagnostic);
                     let navigation = selected.and_then(|diagnostic| {
                         diagnostic
                             .province_id
@@ -6526,9 +6602,9 @@ impl Canvas {
                     } else if let Some((_, Some(state_id))) = navigation {
                         self.state_apply_dialog = None;
                         self.select_state_by_id(interface, state_id, alerts);
-                    } else if let Some(path) = selected
-                        .and_then(|diagnostic| validation_source_path(diagnostic, self.project.as_ref()))
-                    {
+                    } else if let Some(path) = selected.and_then(|diagnostic| {
+                        validation_source_path(diagnostic, self.project.as_ref())
+                    }) {
                         return StateApplyDialogAction::OpenSource(path);
                     } else if let Some(diagnostic) = selected
                         && diagnostic.path.is_some()
@@ -6558,7 +6634,10 @@ impl Canvas {
                     self.validation_problems_view = ValidationProblemsView::default();
                     self.state_apply_dialog = Some(StateApplyDialog::ValidationResults);
                 }
-                StateApplyDialog::ValidationResults => self.validation_problems_view.show_technical_details = !self.validation_problems_view.show_technical_details,
+                StateApplyDialog::ValidationResults => {
+                    self.validation_problems_view.show_technical_details =
+                        !self.validation_problems_view.show_technical_details
+                }
                 StateApplyDialog::ImageOverlay => self.state_apply_dialog = None,
                 StateApplyDialog::ProvinceRemoval => {
                     return StateApplyDialogAction::ConfirmProvinceReferenceRemoval;
@@ -6567,14 +6646,11 @@ impl Canvas {
                 _ if self.round_trip_report.is_some() => self.view_round_trip_report(alerts),
                 _ => self.print_patch_preview_details(),
             }
-        } else if point_in_rect(pos, layout.close())
-            && dialog != StateApplyDialog::Progress
-        {
+        } else if point_in_rect(pos, layout.close()) && dialog != StateApplyDialog::Progress {
             if dialog == StateApplyDialog::ValidationResults {
                 if let Some((source, diagnostic)) = self.selected_validation_problem() {
                     return StateApplyDialogAction::CopyDetails(validation_problem_details(
-                        source,
-                        diagnostic,
+                        source, diagnostic,
                     ));
                 }
             } else {
@@ -6603,7 +6679,10 @@ impl Canvas {
                         .validation_problems_view
                         .severity
                         .matches(diagnostic.severity)
-                    && self.validation_problems_view.domain.matches(diagnostic.domain)
+                    && self
+                        .validation_problems_view
+                        .domain
+                        .matches(diagnostic.domain)
             })
             .collect()
     }
@@ -6613,7 +6692,11 @@ impl Canvas {
     ) -> Option<(ValidationSourceFilter, &ProjectValidationDiagnostic)> {
         let problems = self.filtered_validation_problems();
         problems
-            .get(self.validation_problems_view.selected.min(problems.len().saturating_sub(1)))
+            .get(
+                self.validation_problems_view
+                    .selected
+                    .min(problems.len().saturating_sub(1)),
+            )
             .copied()
     }
 
@@ -6783,12 +6866,9 @@ impl Canvas {
         if self.round_trip_task.is_some() {
             return Err("Wait for the running round-trip validation to finish.".to_owned());
         }
-        let project = self
-            .project
-            .as_ref()
-            .ok_or_else(|| {
-                "Apply State Changes is available only for loaded state projects.".to_owned()
-            })?;
+        let project = self.project.as_ref().ok_or_else(|| {
+            "Apply State Changes is available only for loaded state projects.".to_owned()
+        })?;
         let edit = self
             .state_edit_session
             .as_ref()
@@ -6826,7 +6906,9 @@ impl Canvas {
 
     pub fn start_state_save(&mut self, alerts: &mut Alerts) {
         if self.province_save_task.is_some() {
-            alerts.push(Err("Wait for the running Province Save or export to finish"));
+            alerts.push(Err(
+                "Wait for the running Province Save or export to finish",
+            ));
             return;
         }
         if self.round_trip_task.is_some() {
@@ -6913,7 +6995,9 @@ impl Canvas {
 
     pub fn prepare_project_save(&mut self) -> Result<String, String> {
         if self.save_blocks_editing() {
-            return Err("Finish or recover the active save before starting Save Project.".to_owned());
+            return Err(
+                "Finish or recover the active save before starting Save Project.".to_owned(),
+            );
         }
         if self.property_editor_is_open()
             || self.state_lasso_is_active()
@@ -6922,12 +7006,14 @@ impl Canvas {
         {
             return Err("Apply or cancel the active draft/tool before Save Project.".to_owned());
         }
-        let project = self.project.as_ref().ok_or_else(|| {
-            "Save Project requires a loaded HOI4 mod project.".to_owned()
-        })?;
-        let edit = self.state_edit_session.as_ref().ok_or_else(|| {
-            "The project state edit session is unavailable.".to_owned()
-        })?;
+        let project = self
+            .project
+            .as_ref()
+            .ok_or_else(|| "Save Project requires a loaded HOI4 mod project.".to_owned())?;
+        let edit = self
+            .state_edit_session
+            .as_ref()
+            .ok_or_else(|| "The project state edit session is unavailable.".to_owned())?;
         let state_plan = plan_state_patches(project, edit);
         let province_candidate = self
             .has_unsaved_province_edits()
@@ -6954,7 +7040,9 @@ impl Canvas {
             },
         };
         let cancellation = RoundTripCancellation::default();
-        let map_files = province_candidate.as_ref().map(|candidate| &candidate.files);
+        let map_files = province_candidate
+            .as_ref()
+            .map(|candidate| &candidate.files);
         let combined = validator.validate_combined(
             project,
             edit,
@@ -6987,7 +7075,9 @@ impl Canvas {
             Some(&state_plan),
         )?;
         if combined.candidate_digest != *plan.candidate_digest() {
-            return Err("The validated candidate no longer matches the Save Project plan.".to_owned());
+            return Err(
+                "The validated candidate no longer matches the Save Project plan.".to_owned(),
+            );
         }
         let validation = combined.project_validation.as_ref();
         let text = format!(
@@ -7063,7 +7153,11 @@ impl Canvas {
             return;
         };
         let started = Instant::now();
-        let report = validate_project(&self.bundle, project, ProjectValidationTarget::CurrentProject);
+        let report = validate_project(
+            &self.bundle,
+            project,
+            ProjectValidationTarget::CurrentProject,
+        );
         let summary = format!(
             "Validation Results: {} error(s), {} warning(s), {} information message(s)",
             report.errors, report.warnings, report.information
@@ -7075,7 +7169,12 @@ impl Canvas {
         }
         self.last_validation = Some(LastValidationState {
             target: ProjectValidationTarget::CurrentProject,
-            result: if report.blocks_save { "Blocked" } else { "Passed" }.to_owned(),
+            result: if report.blocks_save {
+                "Blocked"
+            } else {
+                "Passed"
+            }
+            .to_owned(),
             duration_ms: started.elapsed().as_millis(),
             semantic: None,
             indexes: None,
@@ -7106,7 +7205,9 @@ impl Canvas {
             return;
         };
         if edit.revision() != plan.patch_plan().generation {
-            alerts.push(Err("The project changed in memory after validation. Validate again."));
+            alerts.push(Err(
+                "The project changed in memory after validation. Validate again.",
+            ));
             return;
         }
         let includes_province_map = plan.dirty().province_files != 0;
@@ -7141,7 +7242,9 @@ impl Canvas {
                 self.state_save_status = Some("Save Project: Preparing...".to_owned());
                 self.state_apply_dialog = Some(StateApplyDialog::Progress);
                 self.refresh_state_information();
-                alerts.push(Ok("Save Project started; editing is locked until verification finishes"));
+                alerts.push(Ok(
+                    "Save Project started; editing is locked until verification finishes",
+                ));
             }
             Err(error) => alerts.push(Err(format!("Failed to start Save Project: {error}"))),
         }
@@ -7159,8 +7262,7 @@ impl Canvas {
             return;
         }
         task.cancellation.cancel();
-        self.state_save_status =
-            Some("Apply State Changes: cancellation requested...".to_owned());
+        self.state_save_status = Some("Apply State Changes: cancellation requested...".to_owned());
         self.refresh_state_information();
         alerts.push(Ok("Cancellation requested before commit"));
     }
@@ -7173,9 +7275,7 @@ impl Canvas {
         println!("{}", report.summary_text());
         self.state_save_status = Some(report.summary_text());
         self.refresh_state_information();
-        alerts.push(Ok(
-            "Printed the Apply State Changes report to the console",
-        ));
+        alerts.push(Ok("Printed the Apply State Changes report to the console"));
     }
 
     pub fn recover_state_save(&mut self, alerts: &mut Alerts) {
@@ -7254,7 +7354,9 @@ impl Canvas {
             || self.round_trip_task.is_some()
             || self.province_save_task.is_some()
         {
-            alerts.push(Err("Wait for the active save, export, or validation to finish"));
+            alerts.push(Err(
+                "Wait for the active save, export, or validation to finish",
+            ));
             return;
         }
         if self.map_access_mode == MapAccessMode::ReadOnly {
@@ -7307,9 +7409,9 @@ impl Canvas {
                     }
                 }));
             }
-            Err(error) => {
-                alerts.push(Err(format!("Failed to start Province Save worker: {error}")))
-            }
+            Err(error) => alerts.push(Err(format!(
+                "Failed to start Province Save worker: {error}"
+            ))),
         }
     }
 
@@ -7327,7 +7429,9 @@ impl Canvas {
         task.cancellation.cancel();
         self.province_save_status =
             Some("Province Save: cancellation requested before commit...".to_owned());
-        alerts.push(Ok("Cancellation requested; destination files remain unchanged"));
+        alerts.push(Ok(
+            "Cancellation requested; destination files remain unchanged",
+        ));
     }
 
     pub fn save_is_running(&self) -> bool {
@@ -8102,7 +8206,9 @@ impl Canvas {
         }
         self.discard_unmodified_property_draft();
         let Some(edit) = self.state_edit_session.as_ref() else {
-            alerts.push(Err("State Fill is available only for loaded state projects"));
+            alerts.push(Err(
+                "State Fill is available only for loaded state projects",
+            ));
             return;
         };
         if edit.target_state_id().is_none() {
@@ -8802,9 +8908,7 @@ impl Canvas {
         let owners = edit
             .valid_state_ids()
             .iter()
-            .filter_map(|state_id| {
-                Some((*state_id, edit.state_data(*state_id)?.history.owner))
-            })
+            .filter_map(|state_id| Some((*state_id, edit.state_data(*state_id)?.history.owner)))
             .collect::<BTreeMap<_, _>>();
         let ambiguous = project
             .ambiguous_provinces
@@ -8849,7 +8953,11 @@ impl Canvas {
         self.persist_image_overlay_settings(alerts);
         alerts.push(Ok(format!(
             "Image Overlay: {} at {}%",
-            if self.map_layers.image_overlay.enabled { "on" } else { "off" },
+            if self.map_layers.image_overlay.enabled {
+                "on"
+            } else {
+                "off"
+            },
             (self.map_layers.image_overlay.opacity * 100.0).round() as u32
         )));
     }
@@ -8876,8 +8984,11 @@ impl Canvas {
         self.image_overlay_status = status.clone();
         self.map_layers.image_overlay.source = Some(ImageOverlaySource::ProjectHeightmap);
         self.map_layers.image_overlay.dimensions = dimensions;
-        self.map_layers.image_overlay.content_revision =
-            self.map_layers.image_overlay.content_revision.wrapping_add(1);
+        self.map_layers.image_overlay.content_revision = self
+            .map_layers
+            .image_overlay
+            .content_revision
+            .wrapping_add(1);
         self.map_layers.image_overlay.enabled = true;
         self.persist_image_overlay_settings(alerts);
         alerts.push(Ok(status));
@@ -8904,11 +9015,13 @@ impl Canvas {
             Ok((texture, dimensions, status)) => {
                 self.image_overlay_texture = Some(texture);
                 self.image_overlay_status = status.clone();
-                self.map_layers.image_overlay.source =
-                    Some(ImageOverlaySource::Custom(path));
+                self.map_layers.image_overlay.source = Some(ImageOverlaySource::Custom(path));
                 self.map_layers.image_overlay.dimensions = Some(dimensions);
-                self.map_layers.image_overlay.content_revision =
-                    self.map_layers.image_overlay.content_revision.wrapping_add(1);
+                self.map_layers.image_overlay.content_revision = self
+                    .map_layers
+                    .image_overlay
+                    .content_revision
+                    .wrapping_add(1);
                 self.map_layers.image_overlay.enabled = true;
                 self.persist_image_overlay_settings(alerts);
                 alerts.push(Ok(status));
@@ -8923,8 +9036,11 @@ impl Canvas {
         self.map_layers.image_overlay.enabled = false;
         self.map_layers.image_overlay.source = None;
         self.map_layers.image_overlay.dimensions = None;
-        self.map_layers.image_overlay.content_revision =
-            self.map_layers.image_overlay.content_revision.wrapping_add(1);
+        self.map_layers.image_overlay.content_revision = self
+            .map_layers
+            .image_overlay
+            .content_revision
+            .wrapping_add(1);
         self.persist_image_overlay_settings(alerts);
         alerts.push(Ok("Image Overlay cleared"));
     }
@@ -8951,19 +9067,21 @@ impl Canvas {
         };
         let mut settings = loaded.value;
         settings.image_overlay.visible = self.map_layers.image_overlay.enabled;
-        settings.image_overlay.opacity_percent =
-            (self.map_layers.image_overlay.opacity * 100.0).round().clamp(0.0, 100.0) as u8;
-        let (use_project_heightmap, source_path) = match self.map_layers.image_overlay.source.as_ref() {
-            Some(ImageOverlaySource::ProjectHeightmap) => (true, None),
-            Some(ImageOverlaySource::Custom(path)) => (
-                false,
-                Some(
-                    path.strip_prefix(&project.paths.root)
-                        .map_or_else(|_| path.clone(), PathBuf::from),
+        settings.image_overlay.opacity_percent = (self.map_layers.image_overlay.opacity * 100.0)
+            .round()
+            .clamp(0.0, 100.0) as u8;
+        let (use_project_heightmap, source_path) =
+            match self.map_layers.image_overlay.source.as_ref() {
+                Some(ImageOverlaySource::ProjectHeightmap) => (true, None),
+                Some(ImageOverlaySource::Custom(path)) => (
+                    false,
+                    Some(
+                        path.strip_prefix(&project.paths.root)
+                            .map_or_else(|_| path.clone(), PathBuf::from),
+                    ),
                 ),
-            ),
-            None => (false, None),
-        };
+                None => (false, None),
+            };
         settings.image_overlay.use_project_heightmap = use_project_heightmap;
         settings.image_overlay.source_path = source_path;
         if let Err(error) = settings.save(
@@ -8982,7 +9100,11 @@ impl Canvas {
         self.map_layers.show_state_boundaries = !self.map_layers.show_state_boundaries;
         alerts.push(Ok(format!(
             "State boundaries: {}",
-            if self.map_layers.show_state_boundaries { "on" } else { "off" }
+            if self.map_layers.show_state_boundaries {
+                "on"
+            } else {
+                "off"
+            }
         )));
     }
 
@@ -9671,11 +9793,13 @@ impl Canvas {
         let referenced = self
             .state_edit_session
             .as_ref()
-            .map(|edit| removed_provinces_with_state_references(
-                previous_ids,
-                &current_ids,
-                edit.state_by_province(),
-            ))
+            .map(|edit| {
+                removed_provinces_with_state_references(
+                    previous_ids,
+                    &current_ids,
+                    edit.state_by_province(),
+                )
+            })
             .unwrap_or_default();
         let Some((province_id, state_id)) = referenced.first().copied() else {
             return;
@@ -9850,7 +9974,8 @@ impl Canvas {
         let cursor_info = cursor_pos
             .and_then(|cursor_pos| self.camera.relative_position_int(interface, cursor_pos))
             .map_or_else(String::new, |[x, y]| format!("{}, {} px", x, y));
-        if self.is_state_workspace() && let Some(edit) = self.state_edit_session.as_ref()
+        if self.is_state_workspace()
+            && let Some(edit) = self.state_edit_session.as_ref()
         {
             let summary = edit.summary();
             if compact_status {
@@ -9870,9 +9995,10 @@ impl Canvas {
                     summary.commands,
                 );
             }
-            let picker = self.map_tag_picker.active_target().map_or_else(
-                String::new,
-                |target| {
+            let picker = self
+                .map_tag_picker
+                .active_target()
+                .map_or_else(String::new, |target| {
                     let field = match target {
                         MapTagPickTarget::Owner => "Owner",
                         MapTagPickTarget::Controller => "Controller",
@@ -9884,8 +10010,7 @@ impl Canvas {
                         self.active_state_id
                             .map_or_else(|| "-".to_owned(), |id| id.to_string())
                     )
-                },
-            );
+                });
             return format!(
                 "{map_info} · {} · Cursor: {cursor_info:<14} · Zoom: {zoom_info:<8} · Target: {:<8} · Selected: {:<7} · Commands: {:<5} · Modified states: {}{picker}",
                 self.brush_info(),
@@ -10200,7 +10325,12 @@ fn validation_delta_items(
     }
 
     let mut output = Vec::with_capacity(report.diagnostics.len());
-    append(&mut output, ValidationSourceFilter::New, &report.delta.new, false);
+    append(
+        &mut output,
+        ValidationSourceFilter::New,
+        &report.delta.new,
+        false,
+    );
     append(
         &mut output,
         ValidationSourceFilter::Aggravated,
@@ -10258,8 +10388,12 @@ fn validation_problem_details(
             .path
             .as_ref()
             .map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
-        diagnostic.province_id.map_or_else(|| "-".to_owned(), |id| id.to_string()),
-        diagnostic.state_id.map_or_else(|| "-".to_owned(), |id| id.to_string()),
+        diagnostic
+            .province_id
+            .map_or_else(|| "-".to_owned(), |id| id.to_string()),
+        diagnostic
+            .state_id
+            .map_or_else(|| "-".to_owned(), |id| id.to_string()),
     )
 }
 
@@ -10295,11 +10429,20 @@ fn validation_display_path(
         return format!("File: {}", relative.display());
     }
     let parts = path.components().collect::<Vec<_>>();
-    if let Some(index) = parts.iter().position(|part| part.as_os_str().eq_ignore_ascii_case("candidate")) {
+    if let Some(index) = parts
+        .iter()
+        .position(|part| part.as_os_str().eq_ignore_ascii_case("candidate"))
+    {
         let relative = parts[index + 1..].iter().collect::<PathBuf>();
         return format!("File: {}", relative.display());
     }
-    format!("File: {}", path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned()))
+    format!(
+        "File: {}",
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned()
+        )
+    )
 }
 
 impl StateApplyDialogLayout {
@@ -10741,13 +10884,18 @@ fn load_configured_image_overlay(
             texture_settings,
             &path.display().to_string(),
         ) {
-            Ok((texture, dimensions, status)) => (Some(source), Some(texture), status, Some(dimensions)),
+            Ok((texture, dimensions, status)) => {
+                (Some(source), Some(texture), status, Some(dimensions))
+            }
             Err(error) => (Some(source), None, error, None),
         },
         Err(error) => (
             Some(source),
             None,
-            format!("Image Overlay unavailable: failed to read {}: {error}", path.display()),
+            format!(
+                "Image Overlay unavailable: failed to read {}: {error}",
+                path.display()
+            ),
             None,
         ),
     }
@@ -10777,14 +10925,15 @@ fn load_project_image_overlay(
             );
         }
         Err(error) => {
-            return (
-                None,
-                format!("Image Overlay unavailable: {error}"),
-                None,
-            );
+            return (None, format!("Image Overlay unavailable: {error}"), None);
         }
     };
-    match decode_image_overlay(&bytes, map_dimensions, texture_settings, "map/heightmap.bmp") {
+    match decode_image_overlay(
+        &bytes,
+        map_dimensions,
+        texture_settings,
+        "map/heightmap.bmp",
+    ) {
         Ok((texture, dimensions, status)) => (Some(texture), status, Some(dimensions)),
         Err(error) => (None, error, None),
     }
@@ -11754,8 +11903,7 @@ mod tests {
         let decoded = decode_image_overlay_pixels(bytes.get_ref(), [2, 3], "test.png").unwrap();
         assert_eq!([decoded.width(), decoded.height()], [2, 3]);
 
-        let error =
-            decode_image_overlay_pixels(bytes.get_ref(), [4, 5], "test.png").unwrap_err();
+        let error = decode_image_overlay_pixels(bytes.get_ref(), [4, 5], "test.png").unwrap_err();
         assert!(error.contains("test.png is 2x3"));
         assert!(error.contains("provinces.bmp is 4x5"));
     }
