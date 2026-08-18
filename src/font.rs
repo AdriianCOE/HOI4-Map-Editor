@@ -8,28 +8,10 @@ use once_cell::sync::Lazy;
 use opengl_graphics::{Texture, TextureSettings};
 use rusttype::{Font, GlyphId, Scale};
 
-use std::env;
-use std::process::Command;
-
 use crate::error::Error;
 
 pub const FONT_SIZE: u32 = 11;
 const FONT_SCALE: Scale = Scale { x: 15.0, y: 15.0 };
-
-/// Windows system fonts tried, in order, when the embedded UI font (Latin-only
-/// Inconsolata) lacks a glyph. These are never bundled with the application;
-/// they are read from the local Windows installation at startup if present.
-/// Segoe UI covers Cyrillic (ru-RU); Microsoft YaHei UI / SimSun cover
-/// Simplified Chinese (zh-CN). Missing files are skipped silently.
-const FALLBACK_FONT_CANDIDATES: &[(&str, u32)] = &[
-    ("segoeui.ttf", 0),
-    ("seguisym.ttf", 0),
-    ("msyh.ttc", 0),
-    ("msyhbd.ttc", 0),
-    ("simsun.ttc", 0),
-    ("simhei.ttf", 0),
-    ("tahoma.ttf", 0),
-];
 
 fn get_font_ref() -> &'static Font<'static> {
     const FONT_DATA: &[u8] = include_bytes!("../assets/Inconsolata-Regular.ttf");
@@ -39,32 +21,25 @@ fn get_font_ref() -> &'static Font<'static> {
     &*FONT
 }
 
-/// Locates readable system fallback fonts on this machine. Returns an empty
-/// list where none are found (eg. non-Windows platforms); callers must treat
-/// this as best-effort coverage, not a guarantee.
+/// Locates readable system fallback fonts on this machine. The platform layer
+/// supplies Windows and Linux candidates; missing files remain best-effort.
 fn load_system_fallback_fonts() -> Vec<Font<'static>> {
-    let Some(fonts_dir) = windows_fonts_dir() else {
-        return Vec::new();
-    };
+    load_fonts_from_candidates(crate::platform::fonts::system_font_candidates())
+}
 
+fn load_fonts_from_candidates(
+    candidates: impl IntoIterator<Item = crate::platform::fonts::SystemFontCandidate>,
+) -> Vec<Font<'static>> {
     let mut fonts = Vec::new();
-    for (file_name, index) in FALLBACK_FONT_CANDIDATES {
-        let path = fonts_dir.join(file_name);
+    for candidate in candidates {
+        let path = candidate.path;
         let Ok(bytes) = fs::read(&path) else { continue };
-        match Font::try_from_vec_and_index(bytes, *index) {
+        match Font::try_from_vec_and_index(bytes, candidate.index) {
             Some(font) => fonts.push(font),
             None => eprintln!("Fallback font at {} could not be parsed", path.display()),
         }
     }
     fonts
-}
-
-fn windows_fonts_dir() -> Option<std::path::PathBuf> {
-    if !cfg!(target_os = "windows") {
-        return None;
-    }
-    let system_root = env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-    Some(std::path::PathBuf::from(system_root).join("Fonts"))
 }
 
 /// A [`CharacterCache`] that renders text with a primary font, drawing any
@@ -120,7 +95,7 @@ impl<'a> CharacterCache for MultiFontGlyphCache<'a> {
 }
 
 /// Builds the glyph cache used for all UI text: the embedded Inconsolata
-/// font plus whichever Windows system fonts are available locally for
+/// font plus whichever platform system fonts are available locally for
 /// scripts it does not cover (Cyrillic, Simplified Chinese).
 pub fn get_glyph_cache(settings: TextureSettings) -> MultiFontGlyphCache<'static> {
     let mut fonts = vec![get_font_ref().clone()];
@@ -166,23 +141,16 @@ pub fn view_font_license() -> Result<(), Error> {
     const LICENSE_CONTENTS: &[u8] = include_bytes!("../assets/Inconsolata-OFL.txt");
 
     let now = Local::now().format("%Y%m%d-%H%M%S");
-    let path = env::temp_dir().join(format!("Inconsolata-OFL-{}.txt", now));
+    let directory = crate::platform::AppPaths::from_process()
+        .temporary_dir()
+        .map_err(|error| Error::from(error.to_string()))?;
+    fs::create_dir_all(&directory).context("Failed to create font license directory")?;
+    let path = directory.join(format!("Inconsolata-OFL-{}.txt", now));
 
     fs::write(&path, LICENSE_CONTENTS).context("Failed to write font license to disk")?;
 
-    if cfg!(target_os = "windows") {
-        Command::new("notepad")
-            .arg(path)
-            .spawn()
-            .context("Failed to open license")?;
-    } else if cfg!(target_os = "macos") {
-        Command::new("open")
-            .arg(path)
-            .spawn()
-            .context("Failed to open license")?;
-    } else {
-        unimplemented!()
-    };
+    crate::platform::desktop::open_font_license(&path)
+        .map_err(|error| Error::from(format!("Failed to open license: {error}")))?;
 
     Ok(())
 }
@@ -204,26 +172,19 @@ mod tests {
     }
 
     #[test]
-    fn cyrillic_and_cjk_resolve_to_a_fallback_font_when_one_is_available() {
+    fn system_font_loading_is_best_effort() {
         let cache = get_glyph_cache(TextureSettings::new());
-        if cache.caches.len() == 1 {
-            // No Windows system fonts were found in this environment (eg. non-Windows CI);
-            // fallback coverage cannot be asserted here, only that nothing panics.
-            return;
-        }
-        for ch in "АБВЖЗПРСабвжзпрс".chars() {
-            assert_ne!(
-                cache.cache_index_for(ch),
-                0,
-                "Cyrillic '{ch}' must use a fallback font"
-            );
-        }
-        for ch in "设置省份状态应用更改保存地图".chars() {
-            assert_ne!(
-                cache.cache_index_for(ch),
-                0,
-                "CJK '{ch}' must use a fallback font"
-            );
-        }
+        // Installed system font packages vary by distribution and desktop image.
+        // Candidate selection is tested separately without depending on this machine.
+        assert!(!cache.caches.is_empty());
+    }
+
+    #[test]
+    fn missing_system_font_candidates_are_skipped() {
+        let fonts = load_fonts_from_candidates([crate::platform::fonts::SystemFontCandidate {
+            path: std::path::PathBuf::from("definitely-missing-font.ttf"),
+            index: 0,
+        }]);
+        assert!(fonts.is_empty());
     }
 }

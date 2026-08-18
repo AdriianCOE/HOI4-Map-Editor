@@ -9,7 +9,6 @@ pub mod map_layers;
 pub mod project;
 pub mod state;
 
-use defy::Contextualize;
 use glutin::window::CursorIcon;
 use graphics::context::Context;
 use graphics::{Transformed, Viewport};
@@ -1575,17 +1574,22 @@ impl App {
             }
             (_, ToolbarHelpCopyVersion) => {
                 let summary = format!(
-                    "{}\n{}\n\nBased on ScottyThePilot's HOI4 Province Editor.\nDeveloped and extended by Adrian Costa.\n\nUnofficial community tool. Not affiliated with or endorsed by Paradox Interactive.\nRepository: https://github.com/AdriianCOE/hoi4_state_editor",
+                    "{}\n{}\n\nBased on ScottyThePilot's HOI4 Province Editor.\nDeveloped and extended by Adrian Costa.\n\nUnofficial community tool. Not affiliated with or endorsed by Paradox Interactive.\nRepository: https://github.com/AdriianCOE/HOI4-Map-Editor",
                     crate::diagnostic_summary().trim_end(),
                     crate::PRODUCT_SUBTITLE,
                 );
                 self.handle_result_none(copy_text_to_clipboard(&summary));
             }
             (_, ToolbarHelpOpenLogs) => {
-                let logs = crate::log_directory();
-                let result = std::fs::create_dir_all(&logs)
-                    .map_err(|error| Error::from(format!("Unable to create logs folder: {error}")))
-                    .and_then(|_| open_file_default(&logs));
+                let result = crate::log_directory()
+                    .map_err(|error| Error::from(format!("Unable to resolve logs folder: {error}")))
+                    .and_then(|logs| {
+                        std::fs::create_dir_all(&logs)
+                            .map_err(|error| {
+                                Error::from(format!("Unable to create logs folder: {error}"))
+                            })
+                            .and_then(|_| open_file_default(&logs))
+                    });
                 self.handle_result_none(result);
             }
             (_, ToolbarViewFontLicense) => self.handle_result_none(font::view_font_license()),
@@ -2258,7 +2262,7 @@ fn show_about_dialog() {
         .set_level(MessageLevel::Info)
         .set_title(crate::localization::tr("about.title"))
         .set_description(format!(
-            "HOI4 Map Editor · Version {}\n{}\n\n{}\n\n{}\n\nMIT License\nhttps://github.com/AdriianCOE/hoi4_state_editor",
+            "HOI4 Map Editor · Version {}\n{}\n\n{}\n\n{}\n\nMIT License\nhttps://github.com/AdriianCOE/HOI4-Map-Editor",
             crate::APP_VERSION,
             crate::localization::tr("about.subtitle"),
             crate::localization::tr("about.credits"),
@@ -2585,89 +2589,18 @@ fn msg_dialog_discard_property_draft_exit(province: bool) -> bool {
 }
 
 pub fn reveal_in_file_browser(path: impl AsRef<Path>) -> Result<(), Error> {
-    use std::process::Command;
-
     let path = crate::util::files::canonicalize(path)?;
-    if cfg!(target_os = "windows") {
-        Command::new("explorer")
-            .arg(&path)
-            .status()
-            .context("failed to execute command 'explorer'")?;
-        Ok(())
-    } else if cfg!(target_os = "macos") {
-        Command::new("open")
-            .arg(&path)
-            .status()
-            .context("failed to execute command 'open'")?;
-        Ok(())
-    } else if cfg!(target_os = "linux") {
-        Command::new("xdg-open")
-            .arg(&path)
-            .status()
-            .context("failed to execute command 'xdg-open'")?;
-        Ok(())
-    } else {
-        Err("unable to reveal in file browser".into())
-    }
+    crate::platform::desktop::open_folder(&path).map_err(|error| Error::from(error.to_string()))
 }
 
 pub fn open_file_default(path: impl AsRef<Path>) -> Result<(), Error> {
-    use std::process::Command;
-
     let path = crate::util::files::canonicalize(path)?;
-    let mut command = if cfg!(target_os = "windows") {
-        let mut command = Command::new("explorer");
-        command.arg(&path);
-        command
-    } else if cfg!(target_os = "macos") {
-        let mut command = Command::new("open");
-        command.arg(&path);
-        command
-    } else if cfg!(target_os = "linux") {
-        let mut command = Command::new("xdg-open");
-        command.arg(&path);
-        command
-    } else {
-        return Err("unable to open source file on this platform".into());
-    };
-    command
-        .status()
-        .context("failed to execute the platform file opener")?;
-    Ok(())
+    crate::platform::desktop::open_file(&path).map_err(|error| Error::from(error.to_string()))
 }
 
 pub fn copy_text_to_clipboard(text: &str) -> Result<(), Error> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-
-    let program = if cfg!(target_os = "windows") {
-        "clip"
-    } else if cfg!(target_os = "macos") {
-        "pbcopy"
-    } else {
-        "xclip"
-    };
-    let mut command = Command::new(program);
-    if cfg!(target_os = "linux") {
-        command.args(["-selection", "clipboard"]);
-    }
-    let mut child = command
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("failed to start the platform clipboard command")?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| Error::from("clipboard command stdin is unavailable"))?
-        .write_all(text.as_bytes())
-        .context("failed to write the source path to the clipboard")?;
-    let status = child
-        .wait()
-        .context("failed to wait for the clipboard command")?;
-    if !status.success() {
-        return Err("the platform clipboard command failed".into());
-    }
-    Ok(())
+    crate::platform::clipboard::copy_to_clipboard(text)
+        .map_err(|error| Error::from(error.to_string()))
 }
 
 #[cfg(test)]

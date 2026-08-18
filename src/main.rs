@@ -11,6 +11,7 @@ pub mod error;
 pub mod events;
 pub mod font;
 pub mod localization;
+pub mod platform;
 
 use glutin::dpi::{LogicalSize, PhysicalPosition};
 use glutin::window::Icon;
@@ -137,12 +138,8 @@ pub(crate) fn diagnostic_summary() -> String {
     String::from_utf8(output).expect("application information is valid UTF-8")
 }
 
-pub(crate) fn log_directory() -> PathBuf {
-    env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(env::temp_dir)
-        .join("HOI4MapEditor")
-        .join("logs")
+pub(crate) fn log_directory() -> Result<PathBuf, crate::platform::PathError> {
+    crate::platform::AppPaths::from_process().log_dir()
 }
 
 fn install_handler() {
@@ -171,7 +168,13 @@ fn install_handler() {
         // only write panic info to file if not on dev profile
         if cfg!(not(debug_assertions)) {
             let now = Local::now().format("%Y%m%d_%H%M%S");
-            let log_dir = log_directory();
+            let log_dir = match log_directory() {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("Unable to resolve crash log directory: {error}");
+                    return;
+                }
+            };
             let log_path = log_dir.join(format!("crash_{}.log", now));
             let create_result =
                 std::fs::create_dir_all(&log_dir).and_then(|_| File::create(&log_path));
@@ -197,9 +200,7 @@ fn install_handler() {
 
 #[cfg(test)]
 mod branding_tests {
-    use super::{
-        APP_ICON_PNG, APP_VERSION, APPNAME, PRODUCT_NAME, diagnostic_summary, log_directory,
-    };
+    use super::{APP_ICON_PNG, APP_VERSION, APPNAME, PRODUCT_NAME, diagnostic_summary};
 
     #[test]
     fn embedded_application_icon_is_valid_png() {
@@ -216,6 +217,5 @@ mod branding_tests {
         assert_eq!(PRODUCT_NAME, "HOI4 Map Editor");
         assert_eq!(APP_VERSION, env!("CARGO_PKG_VERSION"));
         assert!(diagnostic_summary().contains("Operating System:"));
-        assert!(log_directory().ends_with("HOI4MapEditor\\logs"));
     }
 }

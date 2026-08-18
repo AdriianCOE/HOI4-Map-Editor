@@ -9,7 +9,6 @@ use toml_edit::{DocumentMut, Item, Table, value};
 use crate::app::map::{Color, ProvinceKind};
 use crate::util::files::{atomic_move_new_file, atomic_replace_file, write_complete_file};
 
-use std::env;
 use std::fmt;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -17,7 +16,6 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const CONFIG_SCHEMA_VERSION: i64 = 1;
-pub const GLOBAL_CONFIG_DIRECTORY: &str = "HOI4MapEditor";
 pub const PROJECT_CONFIG_DIRECTORY: &str = ".hoi4-map-editor";
 pub const PROJECT_CONFIG_FILE: &str = "project.toml";
 static NEXT_STAGE_ID: AtomicU64 = AtomicU64::new(1);
@@ -287,8 +285,8 @@ impl fmt::Display for ConfigIssue {
 pub enum LoadConfigError {
     #[error(transparent)]
     IoError(#[from] std::io::Error),
-    #[error("configuration directory is unavailable")]
-    DirectoryUnavailable,
+    #[error(transparent)]
+    Platform(#[from] crate::platform::PathError),
 }
 
 #[derive(Error, Debug)]
@@ -307,9 +305,9 @@ pub enum SaveConfigError {
 
 impl GlobalConfig {
     pub fn path() -> Result<PathBuf, LoadConfigError> {
-        roaming_app_data()
-            .map(|root| root.join(GLOBAL_CONFIG_DIRECTORY).join("config.toml"))
-            .ok_or(LoadConfigError::DirectoryUnavailable)
+        Ok(crate::platform::AppPaths::from_process()
+            .config_dir()?
+            .join("config.toml"))
     }
 
     pub fn load() -> Result<ConfigLoad<Self>, LoadConfigError> {
@@ -1123,10 +1121,6 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     result
 }
 
-fn roaming_app_data() -> Option<PathBuf> {
-    env::var_os("APPDATA").map(PathBuf::from)
-}
-
 fn default_terrains() -> AHashMap<String, Terrain> {
     DEFAULT_TERRAINS
         .iter()
@@ -1151,6 +1145,7 @@ const DEFAULT_TERRAINS: &[(Color, &str, ProvinceKind)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
