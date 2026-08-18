@@ -63,7 +63,7 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes pkg-config libx11-dev libwayland-dev
+          sudo apt-get install --yes pkg-config libx11-dev libwayland-dev file binutils
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -94,6 +94,9 @@ jobs:
 
       - name: Build release executable
         run: cargo build --release --locked
+
+      - name: Build and validate portable Linux package
+        run: bash scripts/package-linux.sh --output-directory dist
 
       - name: Check repository diff whitespace
         run: git diff --check
