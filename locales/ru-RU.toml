@@ -20,6 +20,8 @@ save_short = "Сохранить"
 review_project_changes = "Проверить изменения проекта"
 validate_project = "Проверить проект"
 validate_short = "Проверить"
+view_changes = "Просмотреть изменения"
+view_short = "Изменения"
 validation_results = "Результаты проверки"
 
 [file]
@@ -254,7 +256,7 @@ show_technical_details = "Показать технические сведени
 hide_technical_details = "Скрыть технические сведения"
 filters_collapsed = "Фильтры ▾"
 filters_expanded = "Фильтры ▴"
-project_saved = "Проект сохранён"
+project_saved = "Проект успешно сохранён"
 files_updated = "Обновлено файлов: {count}"
 safety = "Безопасность"
 validation_passed = "✓ Проверка пройдена"
@@ -268,6 +270,13 @@ no_partial_changes = "Частично сохранённых изменений
 no_changes_committed = "Изменения не были сохранены."
 validation_result = "Результат проверки"
 validation_incomplete = "Проверка не завершилась."
+province_changes_pending = "Есть несохраненные изменения карты провинций."
+states_pending = "Штаты: ожидается изменений: {count}"
+coastal_maintenance_pending = "Автоматическое обновление побережий будет выполнено при сохранении проекта."
+blocking_problems_count = "Нужно устранить блокирующих проблем: {count}."
+view_blocking_problems = "Показать блокирующие проблемы"
+view_existing_issues = "Показать существующие проблемы"
+current_project_issues_unclassified = "Текущие проблемы проекта показаны без базовой линии сравнения."
 
 [config]
 invalid_project = "Не удалось загрузить конфигурацию проекта. В этом сеансе используются значения по умолчанию. Исходный файл не был изменён."

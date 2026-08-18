@@ -251,6 +251,7 @@ struct ProvinceSaveTask {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StateApplyDialog {
     Review,
+    ViewChanges,
     ProjectSaveReview,
     AdditionalValidation,
     Blocked,
@@ -411,6 +412,7 @@ struct ValidationProblemsView {
     offset: usize,
     filters_expanded: bool,
     show_technical_details: bool,
+    blocking_only: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -418,6 +420,20 @@ struct ProjectSavePresentationSummary {
     province_files: usize,
     state_files: usize,
     coastal_flags_recalculated: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectSaveReviewPrimaryAction {
+    ConfirmSave,
+    ViewBlockingProblems,
+}
+
+fn project_save_review_primary_action(blocked: bool) -> ProjectSaveReviewPrimaryAction {
+    if blocked {
+        ProjectSaveReviewPrimaryAction::ViewBlockingProblems
+    } else {
+        ProjectSaveReviewPrimaryAction::ConfirmSave
+    }
 }
 
 impl ProjectSavePresentationSummary {
@@ -3331,6 +3347,34 @@ impl Canvas {
                         .to_owned(),
                 ],
             ),
+            StateApplyDialog::ViewChanges => {
+                let (province_modified, pending_states) = self.workspace_dirty_summary();
+                let geometry_changed = self.history.has_geometry_changes(&self.bundle.map);
+                let mut lines = vec![tr("project_validation.pending_changes").to_owned()];
+                if !province_modified && pending_states == 0 {
+                    lines.push(tr("project_validation.no_changes").to_owned());
+                } else {
+                    if province_modified {
+                        lines.push(tr("project_validation.province_changes_pending").to_owned());
+                    }
+                    if pending_states != 0 {
+                        lines.push(tr_args(
+                            "project_validation.states_pending",
+                            &[("count", &pending_states.to_string())],
+                        ));
+                    }
+                    if geometry_changed && self.bundle.config.generate_coastal_on_save {
+                        lines.push(tr("project_validation.coastal_maintenance_pending").to_owned());
+                    }
+                }
+                (
+                    tr("workspace.view_changes"),
+                    tr("project_validation.close"),
+                    "",
+                    "",
+                    lines,
+                )
+            }
             StateApplyDialog::ProjectSaveReview => {
                 let report = self.project_validation_report.as_ref();
                 let baseline = report.and_then(|report| report.baseline_summary.as_ref());
@@ -3340,37 +3384,52 @@ impl Canvas {
                 let coastal = plan.map_or(0, ProjectSavePlan::coastal_flags_recalculated);
                 let blocked = report.is_some_and(|report| report.delta.blocks_save())
                     || !matches!(self.current_round_trip_status(), Some(RoundTripStatus::Passed | RoundTripStatus::PassedWithReview));
+                let blocking = project_validation_blockers(report);
+                let mut lines = vec![
+                    tr("project_validation.changes").to_owned(),
+                    tr_args("project_validation.map_provinces_files", &[("count", &dirty.province_files.to_string())]),
+                    tr_args("project_validation.states_files", &[("count", &dirty.state_files.to_string())]),
+                    if coastal != 0 {
+                        tr_args("project_validation.automatic_coastal", &[("count", &coastal.to_string())])
+                    } else {
+                        String::new()
+                    },
+                    tr_args("project_validation.files_will_update", &[("count", &files.to_string())]),
+                    tr("project_validation.validation").to_owned(),
+                ];
+                if blocked {
+                    if !blocking.is_empty() {
+                        lines.push(tr_args(
+                            "project_validation.blocking_problems_count",
+                            &[("count", &blocking.len().to_string())],
+                        ));
+                        lines.extend(blocking.iter().take(3).map(|(source, diagnostic)| {
+                            validation_problem_summary(source, diagnostic)
+                        }));
+                    } else {
+                        lines.push(tr("project_validation.round_trip_save_blocked").to_owned());
+                    }
+                } else {
+                    lines.push(tr("project_validation.no_new_blockers").to_owned());
+                }
+                lines.push(if let Some(baseline) = baseline {
+                    tr_args("project_validation.existing_project_issues", &[
+                        ("errors", &baseline.errors.to_string()),
+                        ("warnings", &baseline.warnings.to_string()),
+                    ])
+                } else {
+                    tr("project_validation.current_project_issues_unclassified").to_owned()
+                });
                 (
                     if blocked {
                         tr("project_validation.save_blocked")
                     } else {
                         tr("project_validation.ready_to_save")
                     },
-                    if blocked { tr("project_validation.view_problems") } else { tr("workspace.save_project") },
-                    tr("project_validation.view_problems"),
+                    if blocked { tr("project_validation.view_blocking_problems") } else { tr("workspace.save_project") },
+                    if blocked { tr("project_validation.view_existing_issues") } else { tr("project_validation.view_problems") },
                     tr("project_validation.close"),
-                    vec![
-                        tr("project_validation.changes").to_owned(),
-                        tr_args("project_validation.map_provinces_files", &[("count", &dirty.province_files.to_string())]),
-                        tr_args("project_validation.states_files", &[("count", &dirty.state_files.to_string())]),
-                        if coastal != 0 {
-                            tr_args("project_validation.automatic_coastal", &[("count", &coastal.to_string())])
-                        } else {
-                            String::new()
-                        },
-                        tr_args("project_validation.files_will_update", &[("count", &files.to_string())]),
-                        tr("project_validation.validation").to_owned(),
-                        if blocked { tr("project_validation.validation_integrity_blocked").to_owned() } else { tr("project_validation.no_new_blockers").to_owned() },
-                        if let Some(baseline) = baseline {
-                            tr_args("project_validation.existing_project_issues", &[
-                                ("errors", &baseline.errors.to_string()),
-                                ("warnings", &baseline.warnings.to_string()),
-                            ])
-                        } else {
-                            tr("project_validation.no_pre_existing_issues").to_owned()
-                        },
-                        tr("project_validation.not_caused_by_pending").to_owned(),
-                    ],
+                    lines,
                 )
             }
             StateApplyDialog::Blocked => (
@@ -3445,7 +3504,13 @@ impl Canvas {
                     } else if round_trip_failed {
                         tr("project_validation.round_trip_save_blocked").to_owned()
                     } else { "No new blocking problems were found.".to_owned() },
-                    baseline.map_or_else(|| "No pre-existing project issues.".to_owned(), |summary| format!("Pre-existing issues: {} errors, {} warnings.", summary.errors, summary.warnings)),
+                    baseline.map_or_else(
+                        || tr("project_validation.current_project_issues_unclassified").to_owned(),
+                        |summary| tr_args("project_validation.existing_project_issues", &[
+                            ("errors", &summary.errors.to_string()),
+                            ("warnings", &summary.warnings.to_string()),
+                        ]),
+                    ),
                     if self.validation_problems_view.show_technical_details {
                         report.map_or_else(|| "Technical details unavailable.".to_owned(), |report| format!("Baseline: {} | Candidate: {} | Delta: +{} !{} ={} -{} ↓{}", report.baseline_summary.as_ref().map_or(0, |summary| summary.total), report.total, report.delta.new.len(), report.delta.aggravated.len(), report.delta.unchanged.len(), report.delta.resolved.len(), report.delta.improved.len()))
                     } else { tr_args("project_validation.errors_warnings", &[("errors", &report.map_or(0, |report| report.errors).to_string()), ("warnings", &report.map_or(0, |report| report.warnings).to_string())]) },
@@ -6795,8 +6860,16 @@ impl Canvas {
                         self.state_apply_after_validation = false;
                     }
                 }
+                StateApplyDialog::ViewChanges => self.state_apply_dialog = None,
                 StateApplyDialog::ProjectSaveReview => {
-                    return StateApplyDialogAction::ConfirmProjectSave;
+                    match project_save_review_primary_action(self.project_save_is_blocked()) {
+                        ProjectSaveReviewPrimaryAction::ConfirmSave => {
+                            return StateApplyDialogAction::ConfirmProjectSave;
+                        }
+                        ProjectSaveReviewPrimaryAction::ViewBlockingProblems => {
+                            self.open_validation_problems(true, ValidationSourceFilter::All);
+                        }
+                    }
                 }
                 StateApplyDialog::Blocked => {
                     self.print_patch_preview_details();
@@ -6859,8 +6932,7 @@ impl Canvas {
                     self.state_apply_dialog = Some(StateApplyDialog::Review);
                 }
                 StateApplyDialog::ProjectSaveReview => {
-                    self.validation_problems_view = ValidationProblemsView::default();
-                    self.state_apply_dialog = Some(StateApplyDialog::ValidationResults);
+                    self.open_validation_problems(false, ValidationSourceFilter::All);
                 }
                 StateApplyDialog::ValidationResults => {
                     self.validation_problems_view.show_technical_details =
@@ -6900,19 +6972,32 @@ impl Canvas {
         validation_delta_items(report)
             .into_iter()
             .filter(|(source, diagnostic)| {
-                (self.validation_problems_view.source != ValidationSourceFilter::All
-                    || *source != ValidationSourceFilter::Unchanged)
-                    && self.validation_problems_view.source.matches(*source)
-                    && self
-                        .validation_problems_view
-                        .severity
-                        .matches(diagnostic.severity)
-                    && self
-                        .validation_problems_view
-                        .domain
-                        .matches(diagnostic.domain)
+                validation_problem_matches(&self.validation_problems_view, *source, diagnostic)
             })
             .collect()
+    }
+
+    pub fn open_view_changes(&mut self) {
+        self.state_apply_dialog = Some(StateApplyDialog::ViewChanges);
+    }
+
+    fn project_save_is_blocked(&self) -> bool {
+        self.project_validation_report
+            .as_ref()
+            .is_some_and(|report| report.delta.blocks_save())
+            || !matches!(
+                self.current_round_trip_status(),
+                Some(RoundTripStatus::Passed | RoundTripStatus::PassedWithReview)
+            )
+    }
+
+    fn open_validation_problems(&mut self, blocking_only: bool, source: ValidationSourceFilter) {
+        self.validation_problems_view = ValidationProblemsView {
+            blocking_only,
+            source,
+            ..ValidationProblemsView::default()
+        };
+        self.state_apply_dialog = Some(StateApplyDialog::ValidationResults);
     }
 
     fn selected_validation_problem(
@@ -10812,7 +10897,46 @@ fn validation_delta_items(
         &report.delta.improved,
         false,
     );
+    output.sort_by_key(|(_, diagnostic)| match diagnostic.severity {
+        DiagnosticSeverity::Error => 0,
+        DiagnosticSeverity::Warning => 1,
+        DiagnosticSeverity::Information => 2,
+    });
     output
+}
+
+fn project_validation_blockers(
+    report: Option<&ProjectValidationReport>,
+) -> Vec<(ValidationSourceFilter, &ProjectValidationDiagnostic)> {
+    report
+        .map(validation_delta_items)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(source, diagnostic)| {
+            diagnostic.severity == DiagnosticSeverity::Error
+                && matches!(
+                    *source,
+                    ValidationSourceFilter::New | ValidationSourceFilter::Aggravated
+                )
+        })
+        .collect()
+}
+
+fn validation_problem_matches(
+    view: &ValidationProblemsView,
+    source: ValidationSourceFilter,
+    diagnostic: &ProjectValidationDiagnostic,
+) -> bool {
+    source != ValidationSourceFilter::Resolved
+        && view.source.matches(source)
+        && view.severity.matches(diagnostic.severity)
+        && view.domain.matches(diagnostic.domain)
+        && (!view.blocking_only
+            || diagnostic.severity == DiagnosticSeverity::Error
+                && matches!(
+                    source,
+                    ValidationSourceFilter::New | ValidationSourceFilter::Aggravated
+                ))
 }
 
 fn removed_provinces_with_state_references(
@@ -12549,5 +12673,65 @@ mod tests {
         assert!(summary.contains("Province 501"));
         assert!(summary.contains("State 123"));
         assert!(summary.contains("Province reference is invalid"));
+    }
+
+    #[test]
+    fn blocked_project_save_review_cannot_authorize_save() {
+        assert_eq!(
+            project_save_review_primary_action(true),
+            ProjectSaveReviewPrimaryAction::ViewBlockingProblems
+        );
+        assert_ne!(
+            project_save_review_primary_action(true),
+            ProjectSaveReviewPrimaryAction::ConfirmSave
+        );
+        assert_eq!(
+            project_save_review_primary_action(false),
+            ProjectSaveReviewPrimaryAction::ConfirmSave
+        );
+    }
+
+    #[test]
+    fn normal_problem_list_keeps_current_issues_and_hides_resolved_history() {
+        let diagnostic = ProjectValidationDiagnostic {
+            kind: crate::app::project::ProjectDiagnosticKind::UnknownProvince,
+            severity: DiagnosticSeverity::Error,
+            domain: ProjectValidationDomain::State,
+            code: "unknown-province".to_owned(),
+            message_key: "unknown-province".to_owned(),
+            path: None,
+            related_path: None,
+            span: None,
+            province_id: Some(501),
+            state_id: Some(123),
+            blocks_save: true,
+            message: "Province reference is invalid".to_owned(),
+        };
+        let view = ValidationProblemsView::default();
+        assert!(validation_problem_matches(
+            &view,
+            ValidationSourceFilter::Unchanged,
+            &diagnostic,
+        ));
+        assert!(!validation_problem_matches(
+            &view,
+            ValidationSourceFilter::Resolved,
+            &diagnostic,
+        ));
+
+        let blocking = ValidationProblemsView {
+            blocking_only: true,
+            ..ValidationProblemsView::default()
+        };
+        assert!(validation_problem_matches(
+            &blocking,
+            ValidationSourceFilter::New,
+            &diagnostic,
+        ));
+        assert!(!validation_problem_matches(
+            &blocking,
+            ValidationSourceFilter::Unchanged,
+            &diagnostic,
+        ));
     }
 }

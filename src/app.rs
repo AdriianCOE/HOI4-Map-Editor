@@ -1231,7 +1231,7 @@ impl App {
             }
             WorkspaceReviewChanges => {
                 if let Some(canvas) = self.canvas.as_mut() {
-                    canvas.validate_project_for_ui(&mut self.alerts);
+                    canvas.open_view_changes();
                 }
                 return;
             }

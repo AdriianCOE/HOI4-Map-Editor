@@ -213,9 +213,9 @@ impl Interface {
         });
         if window_width >= 720 {
             let validate_label = if window_width < 980 {
-                tr("workspace.validate_short")
+                tr("workspace.view_short")
             } else {
-                tr("workspace.validate_project")
+                tr("workspace.view_changes")
             };
             let validate_width = button_width(validate_label);
             action_x = action_x.saturating_sub(validate_width);
@@ -942,7 +942,7 @@ impl ButtonElement {
                 );
             }
             WorkspaceReviewChanges => {
-                return Some("Validate Project\nCheck the loaded HOI4 mod project.");
+                return Some("View Changes\nReview pending changes without saving.");
             }
             WorkspaceApplyToMod => {
                 return Some("Save Project\nValidate, back up and save project changes.");
