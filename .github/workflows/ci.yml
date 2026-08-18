@@ -63,7 +63,7 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes pkg-config libx11-dev
+          sudo apt-get install --yes pkg-config libx11-dev libwayland-dev
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
