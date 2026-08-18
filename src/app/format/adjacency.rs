@@ -219,6 +219,10 @@ mod tests {
         assert_eq!(adjacencies[0].through, Some(3));
         assert_eq!(adjacencies[0].start, None);
         assert_eq!(adjacencies[1].kind, AdjacencyKind::Impassable);
+        assert_eq!(
+            adjacencies[1].through, None,
+            "-1 remains the no-through sentinel"
+        );
         assert_eq!(adjacencies[1].start, Some([10, 20]));
         assert_eq!(adjacencies[1].stop, Some([30, 40]));
         assert_eq!(adjacencies[1].rule_name, "SYNTHETIC_RULE");

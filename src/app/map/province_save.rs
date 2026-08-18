@@ -995,6 +995,9 @@ fn validate_definition_colors(
         .map(|definition| definition.rgb)
         .collect::<BTreeSet<_>>();
     let pixels = image.pixels().map(|pixel| pixel.0).collect::<BTreeSet<_>>();
+    if ids.contains(&0) {
+        return Err("Staged definition.csv contains reserved province ID 0.".to_owned());
+    }
     if ids.len() != definitions.len() {
         return Err("Staged definition.csv contains duplicate province IDs.".to_owned());
     }
@@ -1529,10 +1532,12 @@ pub(super) fn save_bundle_compat(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::format::DefinitionKind;
+    use crate::app::format::{Adjacency, AdjacencyKind, DefinitionKind, ParseCsv};
     use crate::app::map::bridge::construct_map_data;
+    use crate::app::map::construct_map_data_for_sparse_tests;
     use crate::config::Config;
     use image::{Rgb, RgbImage};
+    use std::sync::Arc;
 
     #[test]
     fn only_project_save_clears_province_dirty_state() {
@@ -1562,6 +1567,81 @@ mod tests {
             image,
             definitions,
             Vec::new(),
+            None,
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn sparse_bundle() -> Bundle {
+        let colors = [[10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]];
+        let image = RgbImage::from_fn(4, 1, |x, _| Rgb(colors[x as usize]));
+        let definitions = colors
+            .into_iter()
+            .enumerate()
+            .map(|(index, rgb)| Definition {
+                id: index as u32 + 1,
+                rgb,
+                kind: DefinitionKind::Land,
+                coastal: false,
+                terrain: "plains".to_owned(),
+                continent: 1,
+            })
+            .collect();
+        let mut bundle = construct_map_data(
+            image,
+            definitions,
+            Vec::new(),
+            None,
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        for (color, id) in colors.into_iter().zip([1, 7, 42, 500]) {
+            Arc::make_mut(
+                Arc::make_mut(&mut bundle.map.base.province_data_map)
+                    .get_mut(&color)
+                    .unwrap(),
+            )
+            .preserved_id = Some(id);
+        }
+        bundle.map.rebuild_province_id_index();
+        bundle
+    }
+
+    fn sparse_bundle_with_adjacency() -> Bundle {
+        let colors = [[10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]];
+        let image = RgbImage::from_fn(4, 1, |x, _| Rgb(colors[x as usize]));
+        let definitions = colors
+            .into_iter()
+            .zip([1, 7, 42, 500])
+            .map(|(rgb, id)| Definition {
+                id,
+                rgb,
+                kind: DefinitionKind::Land,
+                coastal: false,
+                terrain: "plains".to_owned(),
+                continent: 1,
+            })
+            .collect();
+        construct_map_data_for_sparse_tests(
+            image,
+            definitions,
+            vec![Adjacency {
+                from_id: 7,
+                to_id: 500,
+                kind: AdjacencyKind::Sea,
+                through: Some(42),
+                start: None,
+                stop: None,
+                rule_name: String::new(),
+                comment: String::new(),
+            }],
             None,
             Config {
                 preserve_ids: true,
@@ -1614,6 +1694,84 @@ mod tests {
                 .ok_or_else(|| relative.display().to_string())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn sparse_candidate_preserves_ids_without_gap_records_or_id_changes() {
+        let candidate = build_province_map_candidate(&sparse_bundle()).unwrap();
+        assert_eq!(
+            candidate
+                .definitions
+                .iter()
+                .map(|definition| definition.id)
+                .collect::<Vec<_>>(),
+            vec![1, 7, 42, 500]
+        );
+        assert!(!candidate.had_id_changes);
+        assert!(!candidate.files.contains_key(Path::new("id_changes.txt")));
+        validate_province_map_candidate(&candidate, |relative| {
+            candidate
+                .files
+                .get(relative)
+                .cloned()
+                .ok_or_else(|| relative.display().to_string())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn sparse_candidate_serializes_adjacency_ids_and_through_without_renumbering() {
+        let candidate = build_province_map_candidate(&sparse_bundle_with_adjacency()).unwrap();
+        let adjacencies = Adjacency::read_records(
+            candidate
+                .files
+                .get(Path::new("adjacencies.csv"))
+                .expect("candidate must include non-empty adjacencies.csv")
+                .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(
+            adjacencies
+                .iter()
+                .map(|adjacency| (adjacency.from_id, adjacency.to_id, adjacency.through))
+                .collect::<Vec<_>>(),
+            vec![(7, 500, Some(42))]
+        );
+        assert!(!candidate.had_id_changes);
+    }
+
+    #[test]
+    fn candidate_validation_rejects_zero_and_duplicate_definition_identities() {
+        let image = RgbImage::from_pixel(1, 1, Rgb([1, 2, 3]));
+        let definition = |id, rgb| Definition {
+            id,
+            rgb,
+            kind: DefinitionKind::Land,
+            coastal: false,
+            terrain: "plains".to_owned(),
+            continent: 1,
+        };
+        assert!(
+            validate_definition_colors(&[definition(0, [1, 2, 3])], &image)
+                .unwrap_err()
+                .contains("reserved province ID 0")
+        );
+        assert!(
+            validate_definition_colors(
+                &[definition(1, [1, 2, 3]), definition(1, [4, 5, 6])],
+                &image,
+            )
+            .unwrap_err()
+            .contains("duplicate province IDs")
+        );
+        assert!(
+            validate_definition_colors(
+                &[definition(1, [1, 2, 3]), definition(2, [1, 2, 3])],
+                &image,
+            )
+            .unwrap_err()
+            .contains("duplicate province colors")
+        );
     }
 
     #[test]

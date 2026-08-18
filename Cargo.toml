@@ -1,11 +1,11 @@
 [package]
 name = "hoi4_state_editor"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 authors = ["ScottyThePilot <scotty.codes@gmail.com>", "AdriianCOE <tommycramos@gmail.com>"]
 edition = "2024"
 description = "Province and State Editing Toolkit"
 readme = "README.md"
-repository = "https://github.com/AdriianCOE/hoi4_state_editor"
+repository = "https://github.com/AdriianCOE/HOI4-Map-Editor"
 license = "MIT"
 
 [dependencies]

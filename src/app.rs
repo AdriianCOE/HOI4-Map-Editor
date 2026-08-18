@@ -22,8 +22,9 @@ use self::interface::{ButtonId, Interface, StateActionAvailability, get_interfac
 use self::map::ProvinceSaveMode;
 use self::map_layers::WorkspaceMode;
 use self::project::{
-    Hoi4Project, LassoSelectionMode, MapViewMode, ProjectPathError, ProjectPaths,
-    ProvinceInclusionMode, StateBrushMode, StateFillMode,
+    CompatibilityCode, CompatibilityFinding, Hoi4Project, LassoSelectionMode, MapViewMode,
+    ProjectPathError, ProjectPaths, ProvinceInclusionMode, StateBrushMode, StateFillMode,
+    scan_project,
 };
 use crate::config::{ConfigIssue, FileFingerprint, GlobalConfig, ProjectConfig, SaveConfigError};
 use crate::error::Error;
@@ -1903,7 +1904,8 @@ impl App {
                     .ok()
                     .and_then(|loaded| loaded.issue);
                 let project = Hoi4Project::new(paths);
-                let canvas = Canvas::load_project(project)?;
+                let canvas = Canvas::load_project(project)
+                  .map_err(|error| compatibility_open_error(&root, error))?;
                 let mut success_message = format!(
                   "Loaded HOI4 mod from {}\n{}",
                   root.display(),
@@ -1921,14 +1923,20 @@ impl App {
                 | ProjectPathError::MissingStatesDirectory(_))
                 if root.join("map/provinces.bmp").is_file()
                   && root.join("map/definition.csv").is_file() => {
-                  let location = Location::Directory(root);
+                  let location = Location::Directory(root.clone());
                   let success_message = format!(
                     "Loaded Province-only project from {}. State editing is unavailable because history/states is missing.",
                     location
                   );
-                  (Canvas::load(location)?, success_message)
+                  (
+                    Canvas::load(location)
+                      .map_err(|error| compatibility_open_error(&root, error))?,
+                    success_message,
+                  )
                 },
-              Err(err) if ProjectPaths::is_project_root_candidate(&root) => return Err(err.into()),
+              Err(err) if ProjectPaths::is_project_root_candidate(&root) => {
+                return Err(compatibility_open_error(&root, err.into()));
+              },
               Err(_) => {
                 let location = Location::Directory(root);
                 let success_message = format!("Loaded legacy editable map from {}", location);
@@ -2029,6 +2037,59 @@ impl fmt::Debug for App {
             .field("interface", &self.interface)
             .field("painting", &self.painting)
             .finish()
+    }
+}
+
+fn compatibility_open_error(root: &Path, error: Error) -> Error {
+    let report = scan_project(root.to_owned());
+    let Some(finding) = report.primary_blocker() else {
+        return error;
+    };
+    let dimensions = report
+        .bitmap
+        .as_ref()
+        .map(|bitmap| {
+            format!(
+                "; map dimensions: {}x{}",
+                bitmap.dimensions[0], bitmap.dimensions[1]
+            )
+        })
+        .unwrap_or_default();
+    Error::from(format!(
+        "{error}\nCompatibility scan: {}{dimensions} [code: {}]",
+        compatibility_finding_summary(finding),
+        finding.code.identifier(),
+    ))
+}
+
+fn compatibility_finding_summary(finding: &CompatibilityFinding) -> &'static str {
+    match finding.code {
+        CompatibilityCode::SparseProvinceIds => {
+            "sparse Province IDs are supported and will be preserved"
+        }
+        CompatibilityCode::ProvinceBitmapUnreadable => "provinces.bmp could not be read as a BMP",
+        CompatibilityCode::DefinitionMalformed => "definition.csv could not be interpreted",
+        CompatibilityCode::DefinitionEmpty => "definition.csv contains no province records",
+        CompatibilityCode::DuplicateProvinceId => "definition.csv contains duplicate Province IDs",
+        CompatibilityCode::DuplicateProvinceColor => {
+            "definition.csv contains duplicate Province colors"
+        }
+        CompatibilityCode::BitmapColorMissingDefinition => {
+            "provinces.bmp uses colors missing from definition.csv"
+        }
+        CompatibilityCode::StateReferencesMissingProvince => {
+            "State files reference Province IDs missing from definition.csv"
+        }
+        CompatibilityCode::MapDirectoryMissing => "the map directory is missing",
+        CompatibilityCode::ProvinceBitmapMissing => "map/provinces.bmp is missing",
+        CompatibilityCode::DefinitionMissing => "map/definition.csv is missing",
+        CompatibilityCode::InvalidProvinceIdRange => {
+            "definition.csv contains Province ID zero, which the editor cannot interpret"
+        }
+        CompatibilityCode::DefinitionColorUnused
+        | CompatibilityCode::StatesDirectoryMissing
+        | CompatibilityCode::RelatedBitmapUnreadable
+        | CompatibilityCode::RelatedBitmapDimensionsMismatch => "a compatibility issue was found",
     }
 }
 

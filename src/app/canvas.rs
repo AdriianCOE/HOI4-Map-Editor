@@ -575,13 +575,16 @@ impl Canvas {
             for (boundary, _) in bundle.map.iter_boundaries() {
                 let [a, b] = boundary.into_array();
                 if let (Some(a), Some(b)) = (
-                    bundle.map.get_province_at(a).preserved_id,
-                    bundle.map.get_province_at(b).preserved_id,
+                    bundle.map.province_id_for_color(bundle.map.get_color_at(a)),
+                    bundle.map.province_id_for_color(bundle.map.get_color_at(b)),
                 ) {
                     adjacency_pairs.push((a, b));
                 }
                 for position in boundary.into_array() {
-                    if let Some(province_id) = bundle.map.get_province_at(position).preserved_id {
+                    if let Some(province_id) = bundle
+                        .map
+                        .province_id_for_color(bundle.map.get_color_at(position))
+                    {
                         province_boundaries
                             .entry(province_id)
                             .or_default()
@@ -634,12 +637,7 @@ impl Canvas {
                 project.diagnostic_report()
             );
         }
-        // The test map is very small with large ocean provinces, the 'too large box' errors go nuts
-        let problems = if cfg!(any(debug_assertions, feature = "debug-mode")) {
-            Vec::new()
-        } else {
-            bundle.generate_problems()
-        };
+        let problems = bundle.generate_problems();
         let unknown_terrains = bundle.search_unknown_terrains();
         let show_province_ids = bundle.config.preserve_ids;
         let camera = Camera::new(&texture);
@@ -1100,23 +1098,22 @@ impl Canvas {
                 return;
             }
         };
-        let Some(target_color) =
-            self.bundle
-                .map
-                .iter_province_data()
-                .find_map(|(color, province)| {
-                    (province.preserved_id == Some(target_id)).then_some(color)
-                })
-        else {
+        let Some(target_color) = self.bundle.map.color_for_province_id(target_id) else {
             alerts.push(Err(format!(
                 "Province {target_id} does not exist in the map"
             )));
             return;
         };
+        let Some(source_color) = self.bundle.map.color_for_province_id(draft.province_id) else {
+            alerts.push(Err(format!(
+                "Province {} does not exist in the map",
+                draft.province_id
+            )));
+            return;
+        };
         let Some(source_pos) = (0..self.bundle.map.height()).find_map(|y| {
             (0..self.bundle.map.width()).find_map(|x| {
-                (self.bundle.map.get_province_at([x, y]).preserved_id == Some(draft.province_id))
-                    .then_some([x, y])
+                (self.bundle.map.get_color_at([x, y]) == source_color).then_some([x, y])
             })
         }) else {
             alerts.push(Err(format!(
@@ -1141,6 +1138,17 @@ impl Canvas {
                 )));
                 return;
             }
+        }
+        if self
+            .bundle
+            .map
+            .adjacency_references_province_id(draft.province_id)
+        {
+            alerts.push(Err(format!(
+                "Province {} is referenced by adjacencies.csv and cannot be removed until those references are updated",
+                draft.province_id
+            )));
+            return;
         }
         let policy = if transfer {
             ProvinceRemovalPolicy::TransferToProvince(target_id)

@@ -144,6 +144,7 @@ impl History {
             Arc::make_mut(&mut bundle.map.base.province_data_map),
             Arc::make_mut(&mut bundle.map.base.connection_data_map),
         );
+        bundle.map.rebuild_province_id_index();
 
         self.push_map_state(
             &bundle.map,
@@ -518,12 +519,12 @@ mod tests {
             base: MapBase {
                 color_buffer: Arc::new(RgbImage::from_pixel(1, 1, Rgb(color))),
                 province_data_map: Arc::new(province_data_map),
+                province_id_index: Arc::new(crate::app::map::ProvinceIdIndex::default()),
                 connection_data_map: Arc::new(AHashMap::default()),
                 rivers_overlay: None,
             },
             boundaries: AHashMap::default(),
             preserved_unsupported_adjacencies: Vec::new(),
-            preserved_id_count: None,
         }
     }
 

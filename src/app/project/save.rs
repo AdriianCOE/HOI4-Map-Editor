@@ -2750,9 +2750,10 @@ fn contextual_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::format::{Adjacency, AdjacencyKind, ParseCsv};
     use crate::app::map::{
-        Bundle, ProvinceKind, build_province_map_candidate, validate_province_map_candidate,
-        write_rgb_bmp_image,
+        Bundle, History, ProvinceKind, build_province_map_candidate,
+        validate_province_map_candidate, write_rgb_bmp_image,
     };
     use crate::app::project::{
         EditableProvinceData, EditableStateProperties, ProjectPaths, RoundTripCancellation,
@@ -2873,6 +2874,317 @@ mod tests {
             province.files[Path::new("provinces.bmp")]
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn small_nonstandard_project_round_trips_map_and_province_data() {
+        let land = [1, 2, 3];
+        let ocean = [4, 5, 6];
+        let definition = "0;0;0;0;land;false;unknown;0\n\
+1;1;2;3;land;false;plains;1\n\
+2;4;5;6;sea;false;ocean;0\n";
+        let image = image::RgbImage::from_fn(3, 2, |x, y| {
+            image::Rgb(if x == 0 && y == 0 { land } else { ocean })
+        });
+        let (root, project, mut edit) =
+            test_project_with_map("small-nonstandard-round-trip", definition, image);
+        assert_eq!(
+            project.paths.map_directory.join("provinces.bmp"),
+            root.join("map/provinces.bmp")
+        );
+        assert!(
+            edit.update_province_data(
+                1,
+                1,
+                EditableProvinceData {
+                    victory_point: Some(5),
+                    buildings: BTreeMap::new(),
+                },
+            )
+            .unwrap()
+        );
+
+        let mut bundle = Bundle::load(
+            &Location::Directory(project.paths.map_directory.clone()),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(bundle.map.dimensions(), [3, 2]);
+        let mut history = History::new(8, &bundle.map);
+        assert!(history.paint_pixel(&mut bundle, [1, 0], land, 1).is_some());
+        assert_eq!(bundle.map.get_color_at([1, 0]), land);
+        assert!(bundle.map.iter_boundaries().next().is_some());
+
+        let province = build_province_map_candidate(&bundle).unwrap();
+        let state_plan = plan_state_patches(&project, &edit);
+        let validation = RoundTripValidator {
+            policy: RoundTripValidationPolicy {
+                allow_review_required: true,
+                ..Default::default()
+            },
+        }
+        .validate_combined(
+            &project,
+            &edit,
+            &state_plan,
+            Some(&province.files),
+            |map| {
+                validate_province_map_candidate(&province, |path| {
+                    fs::read(map.join(path)).map_err(|error| error.to_string())
+                })
+            },
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        assert!(matches!(
+            validation.round_trip.status,
+            RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
+        ));
+        let allow_review = validation.round_trip.status == RoundTripStatus::PassedWithReview;
+        let plan = ProjectSavePlan::new(
+            &project,
+            edit.revision(),
+            Some(&province),
+            Some(&state_plan),
+        )
+        .unwrap();
+        let saved = execute_project_save(
+            &project,
+            &edit,
+            &plan,
+            &validation,
+            allow_review,
+            &StateSaveCancellation::default(),
+            StateSaveFault::None,
+            |_, _, _| {},
+        );
+        assert_eq!(
+            saved.outcome,
+            StateSaveOutcome::Completed,
+            "{}",
+            saved.summary_text()
+        );
+
+        let reloaded = saved.reloaded_project.as_ref().expect("post-save reload");
+        let reloaded_bundle = Bundle::load(
+            &Location::Directory(reloaded.paths.map_directory.clone()),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let reloaded_edit = StateEditSession::new(reloaded, &reloaded_bundle.map);
+        assert_eq!(reloaded_bundle.map.dimensions(), [3, 2]);
+        assert_eq!(reloaded_bundle.map.get_color_at([1, 0]), land);
+        assert_eq!(
+            reloaded_edit.province_data(1).unwrap().victory_point,
+            Some(5)
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn sparse_project_uses_public_loader_and_combined_save_reload_without_renumbering() {
+        let (root, project, mut edit, mut bundle) = sparse_test_project("combined-save");
+        assert_sparse_bundle(&bundle);
+        assert_sparse_initial_color_mappings(&bundle);
+        assert_eq!(bundle.map.connections_count(), 1);
+        assert_eq!(project.state_by_province.get(&500), Some(&1));
+        assert_eq!(
+            edit.province_data(42).unwrap().buildings.get("bunker"),
+            Some(&1)
+        );
+
+        // A real map edit preserves the external identity while changing its color.
+        let recolored = [90, 80, 70];
+        bundle.map.recolor_province([70, 80, 90], recolored);
+        assert_eq!(bundle.map.province_id_for_color(recolored), Some(42));
+
+        // A real State edit moves an existing sparse ID and its provincial data.
+        edit.create_state(
+            2,
+            EditableStateProperties {
+                state_category: Some("rural".to_owned()),
+                ..Default::default()
+            },
+            false,
+        )
+        .unwrap();
+        edit.reassign_provinces(&[42], Some(2)).unwrap();
+
+        let province = build_province_map_candidate(&bundle).unwrap();
+        let state_plan = plan_state_patches(&project, &edit);
+        let validation = validate_combined_save(&project, &edit, &state_plan, &province);
+        let allow_review = validation.round_trip.status == RoundTripStatus::PassedWithReview;
+        let plan = ProjectSavePlan::new(
+            &project,
+            edit.revision(),
+            Some(&province),
+            Some(&state_plan),
+        )
+        .unwrap();
+        let saved = execute_project_save(
+            &project,
+            &edit,
+            &plan,
+            &validation,
+            allow_review,
+            &StateSaveCancellation::default(),
+            StateSaveFault::None,
+            |_, _, _| {},
+        );
+        assert_eq!(
+            saved.outcome,
+            StateSaveOutcome::Completed,
+            "{}",
+            saved.summary_text()
+        );
+
+        let reloaded = saved.reloaded_project.as_ref().expect("post-save reload");
+        let reloaded_bundle = Bundle::load(
+            &Location::Directory(reloaded.paths.map_directory.clone()),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert_sparse_bundle(&reloaded_bundle);
+        assert_eq!(
+            reloaded_bundle.map.province_id_for_color(recolored),
+            Some(42)
+        );
+        assert_eq!(reloaded.state_by_province.get(&42), Some(&2));
+        assert_eq!(
+            reloaded
+                .state_document(1)
+                .unwrap()
+                .data
+                .as_ref()
+                .unwrap()
+                .history
+                .victory_points
+                .iter()
+                .map(|vp| (vp.province_id, vp.value))
+                .collect::<Vec<_>>(),
+            vec![(500, 5)]
+        );
+        assert_eq!(
+            reloaded
+                .state_document(2)
+                .unwrap()
+                .data
+                .as_ref()
+                .unwrap()
+                .history
+                .province_buildings
+                .get(&42)
+                .and_then(|buildings| buildings.get("bunker")),
+            Some(&1)
+        );
+        let adjacencies = Adjacency::read_records(
+            fs::read(root.join("map/adjacencies.csv"))
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(
+            adjacencies
+                .iter()
+                .map(|adjacency| (adjacency.from_id, adjacency.to_id, adjacency.through))
+                .collect::<Vec<_>>(),
+            vec![(7, 500, None)]
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn sparse_combined_save_rollback_restores_exact_ids_and_project_files() {
+        let (root, project, mut edit, mut bundle) = sparse_test_project("rollback");
+        let before = sparse_project_snapshot(&root);
+        bundle.map.recolor_province([70, 80, 90], [90, 80, 70]);
+        change_manpower(&project, &mut edit, 2);
+        let province = build_province_map_candidate(&bundle).unwrap();
+        let state_plan = plan_state_patches(&project, &edit);
+        let validation = validate_combined_save(&project, &edit, &state_plan, &province);
+        let allow_review = validation.round_trip.status == RoundTripStatus::PassedWithReview;
+        let plan = ProjectSavePlan::new(
+            &project,
+            edit.revision(),
+            Some(&province),
+            Some(&state_plan),
+        )
+        .unwrap();
+        let saved = execute_project_save(
+            &project,
+            &edit,
+            &plan,
+            &validation,
+            allow_review,
+            &StateSaveCancellation::default(),
+            StateSaveFault::FailAfterCommit(1),
+            |_, _, _| {},
+        );
+        assert_eq!(
+            saved.outcome,
+            StateSaveOutcome::RolledBack,
+            "{}",
+            saved.summary_text()
+        );
+        assert_eq!(sparse_project_snapshot(&root), before);
+        let restored = Bundle::load(
+            &Location::Directory(root.join("map")),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert_sparse_bundle(&restored);
+        cleanup(&root);
+    }
+
+    #[test]
+    fn sparse_state_save_recovery_reloads_without_compacting_ids() {
+        let (root, project, mut edit, _) = sparse_test_project("recovery");
+        let before = sparse_project_snapshot(&root);
+        change_manpower(&project, &mut edit, 2);
+        let plan = plan_state_patches(&project, &edit);
+        let validation = validate(&project, &edit, &plan);
+        let authorization = authorize(&project, &edit, &plan, &validation);
+        let interrupted = execute_state_save(
+            &project,
+            &edit,
+            &plan,
+            &validation,
+            &authorization,
+            &StateSaveCancellation::default(),
+            StateSaveFault::LeaveInterruptedAfterCommit(1),
+            |_, _, _| {},
+        );
+        assert_eq!(interrupted.outcome, StateSaveOutcome::RecoveryRequired);
+        let recovered = recover_interrupted_state_save(&root);
+        assert_eq!(
+            recovered.outcome,
+            StateSaveOutcome::RolledBack,
+            "{}",
+            recovered.summary_text()
+        );
+        assert_eq!(sparse_project_snapshot(&root), before);
+        let restored = Bundle::load(
+            &Location::Directory(root.join("map")),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert_sparse_bundle(&restored);
+        cleanup(&root);
     }
 
     #[test]
@@ -3926,6 +4238,114 @@ mod tests {
         assert_no_transaction_siblings(root);
     }
 
+    fn sparse_test_project(name: &str) -> (PathBuf, Hoi4Project, StateEditSession, Bundle) {
+        let colors = [[10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]];
+        let definition = "0;0;0;0;land;false;unknown;0\n\
+1;10;20;30;land;false;plains;1\n\
+7;40;50;60;land;false;plains;1\n\
+42;70;80;90;land;false;plains;1\n\
+500;100;110;120;land;false;plains;1\n";
+        let image = image::RgbImage::from_fn(4, 1, |x, _| image::Rgb(colors[x as usize]));
+        let (root, _, _) = test_project_with_map(name, definition, image);
+        fs::write(
+            root.join("history/states/1-Test.txt"),
+            "state={id=1 state_category=rural provinces={1 42 500} manpower=1 history={owner=TAG victory_points={500 5} buildings={42={bunker=1}}}}",
+        )
+        .unwrap();
+        let adjacency = Adjacency {
+            from_id: 7,
+            to_id: 500,
+            kind: AdjacencyKind::Sea,
+            through: None,
+            start: None,
+            stop: None,
+            rule_name: String::new(),
+            comment: String::new(),
+        };
+        let mut adjacency_bytes = Vec::new();
+        Adjacency::write_records(&[adjacency], &mut adjacency_bytes).unwrap();
+        fs::write(root.join("map/adjacencies.csv"), adjacency_bytes).unwrap();
+
+        let (project, edit) = load_real_project(&root);
+        let bundle = Bundle::load(
+            &Location::Directory(project.paths.map_directory.clone()),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        (root, project, edit, bundle)
+    }
+
+    fn assert_sparse_bundle(bundle: &Bundle) {
+        assert_eq!(bundle.map.provinces_count(), 4);
+        assert_eq!(bundle.map.province_id_index().max_id(), Some(500));
+        assert_eq!(
+            bundle.map.province_ids().collect::<Vec<_>>(),
+            vec![1, 7, 42, 500]
+        );
+        assert!(!bundle.map.contains_province_id(2));
+    }
+
+    fn assert_sparse_initial_color_mappings(bundle: &Bundle) {
+        assert_eq!(bundle.map.province_id_for_color([10, 20, 30]), Some(1));
+        assert_eq!(bundle.map.province_id_for_color([40, 50, 60]), Some(7));
+        assert_eq!(bundle.map.province_id_for_color([70, 80, 90]), Some(42));
+        assert_eq!(bundle.map.province_id_for_color([100, 110, 120]), Some(500));
+    }
+
+    fn sparse_project_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        [
+            "map/provinces.bmp",
+            "map/definition.csv",
+            "map/adjacencies.csv",
+            "history/states/1-Test.txt",
+        ]
+        .into_iter()
+        .map(|relative| {
+            let path = PathBuf::from(relative);
+            (path.clone(), fs::read(root.join(path)).unwrap())
+        })
+        .collect()
+    }
+
+    fn validate_combined_save(
+        project: &Hoi4Project,
+        edit: &StateEditSession,
+        state_plan: &ProjectPatchPlan,
+        province: &crate::app::map::ProvinceMapCandidate,
+    ) -> CombinedRoundTripValidationReport {
+        let validation = RoundTripValidator {
+            policy: RoundTripValidationPolicy {
+                allow_review_required: true,
+                ..Default::default()
+            },
+        }
+        .validate_combined(
+            project,
+            edit,
+            state_plan,
+            Some(&province.files),
+            |map| {
+                validate_province_map_candidate(province, |path| {
+                    fs::read(map.join(path)).map_err(|error| error.to_string())
+                })
+            },
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        assert!(
+            matches!(
+                validation.round_trip.status,
+                RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
+            ),
+            "{}",
+            validation.round_trip.full_text()
+        );
+        validation
+    }
+
     fn test_project(name: &str) -> (PathBuf, Hoi4Project, StateEditSession) {
         test_project_with_definition(
             name,
@@ -3936,6 +4356,18 @@ mod tests {
     fn test_project_with_definition(
         name: &str,
         definition: &str,
+    ) -> (PathBuf, Hoi4Project, StateEditSession) {
+        test_project_with_map(
+            name,
+            definition,
+            image::RgbImage::from_pixel(1, 1, image::Rgb([1, 2, 3])),
+        )
+    }
+
+    fn test_project_with_map(
+        name: &str,
+        definition: &str,
+        image: image::RgbImage,
     ) -> (PathBuf, Hoi4Project, StateEditSession) {
         let root = std::env::current_dir()
             .unwrap()
@@ -3949,7 +4381,6 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("map")).unwrap();
         fs::create_dir_all(root.join("history/states")).unwrap();
-        let image = image::RgbImage::from_pixel(1, 1, image::Rgb([1, 2, 3]));
         let mut bmp = Vec::new();
         write_rgb_bmp_image(&mut bmp, &image).unwrap();
         fs::write(root.join("map/provinces.bmp"), bmp).unwrap();
@@ -3967,7 +4398,12 @@ mod tests {
         let bundle =
             Bundle::load(&Location::Directory(paths.map_directory.clone()), config).unwrap();
         let valid = bundle.map.province_ids().collect::<BTreeSet<_>>();
-        let land = BTreeSet::from([1]);
+        let land = bundle
+            .map
+            .iter_province_data()
+            .filter(|(_, province)| province.kind == ProvinceKind::Land)
+            .filter_map(|(_, province)| province.preserved_id)
+            .collect::<BTreeSet<_>>();
         let mut project = Hoi4Project::new(paths);
         project.load_states(&valid, &land);
         let edit = StateEditSession::new(&project, &bundle.map);

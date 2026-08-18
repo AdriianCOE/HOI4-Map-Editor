@@ -1,5 +1,6 @@
 mod brush;
 mod catalog;
+mod compatibility;
 mod diagnostics;
 mod edit;
 mod indexes;
@@ -18,6 +19,11 @@ pub use brush::{BrushProvinceClassification, StateBrushMode, sample_segment};
 pub use catalog::{
     BuildingCatalogEntry, BuildingScope, CatalogDiagnostic, CatalogDiagnosticSeverity,
     CatalogEntry, DefinitionSource, GameDefinitionCatalog,
+};
+pub use compatibility::{
+    BitmapCompatibilityMetadata, CompatibilityCode, CompatibilityContext, CompatibilityFinding,
+    CompatibilityReport, CompatibilitySeverity, DefinitionCompatibilityMetadata, ProvinceColor,
+    RelatedBitmapCompatibilityMetadata, StateCompatibilityMetadata, scan_project,
 };
 pub use diagnostics::{DiagnosticSeverity, ProjectDiagnostic, ProjectDiagnosticKind};
 pub use edit::{

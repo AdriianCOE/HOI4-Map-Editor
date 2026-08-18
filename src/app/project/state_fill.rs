@@ -366,6 +366,26 @@ mod tests {
     }
 
     #[test]
+    fn sparse_province_ids_remain_distinct_in_state_adjacency_traversal() {
+        let provinces = [1, 7, 42, 500]
+            .into_iter()
+            .map(|province_id| province(province_id, StateFillProvinceKind::Land, Some(10)));
+        let adjacency = ProvinceAdjacency::from_pairs([(1, 7), (7, 42), (42, 500)]);
+        let preview = plan_state_fill(
+            provinces,
+            &adjacency,
+            &BTreeSet::from([10, 20]),
+            StateFillMode::ConnectedSameState,
+            1,
+            Some(20),
+        );
+
+        assert_eq!(preview.found, vec![1, 7, 42, 500]);
+        assert_eq!(preview.applicable, vec![1, 7, 42, 500]);
+        assert!(preview.blocked.is_empty());
+    }
+
+    #[test]
     fn connected_same_state_does_not_cross_sea_or_other_state() {
         let (provinces, adjacency, valid_states) = fixture();
         let preview = plan_state_fill(

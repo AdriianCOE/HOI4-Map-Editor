@@ -6,7 +6,7 @@ Paint provinces, edit terrain, organize states, and review changes without manua
 
 HOI4 Map Editor is based on [ScottyThePilot's HOI4 Province Editor](https://github.com/ScottyThePilot/hoi4_province_editor) and extends it with state editing, map views, project validation, backups, rollback, recovery, and safer file updates.
 
-[Download the latest preview](https://github.com/AdriianCOE/hoi4_state_editor/releases)
+[Download the latest preview](https://github.com/AdriianCOE/HOI4-Map-Editor/releases)
 
 > **Preview software:** keep an independent backup of every mod you edit.
 
@@ -22,7 +22,20 @@ HOI4 Map Editor is based on [ScottyThePilot's HOI4 Province Editor](https://gith
 - Inspect province IDs, colors, terrain, state assignments, and map diagnostics.
 - Search and focus provinces by technical properties.
 - Undo and redo geographic changes.
-- Save `provinces.bmp` and `definition.csv` through validated per-file atomic replacements.
+- Include `provinces.bmp` and `definition.csv` candidates in the validated,
+  coordinated Save Project transaction.
+
+### Map compatibility
+
+- Custom and non-vanilla map dimensions are supported by the editor; this does
+  not assert that every size is valid for Hearts of Iron IV itself.
+- Sparse Province IDs are supported: existing positive IDs are preserved, gaps
+  are allowed, new IDs follow the current maximum, and IDs are not compacted
+  automatically.
+- Opening a project can report actionable compatibility diagnostics for malformed
+  map/definition data, missing colors or definitions, unusual dimensions,
+  invalid Province references, and State/project structure issues. Sparse IDs
+  are informational compatibility data, not a load blocker.
 
 ### State editing
 
@@ -91,8 +104,10 @@ Selecting a result focuses and zooms the map automatically.
 - reloads and verifies the complete project before clearing dirty state;
 - detects external file changes and supports interrupted-save recovery.
 
-This is a transactional, rollback-capable project save. Windows does not offer
-one filesystem operation that atomically replaces the whole multi-file project.
+This is a transactional, rollback-capable project save. Individual files are
+published atomically; it is not one filesystem-atomic operation for the entire
+multi-file project. Unix builds also persist critical file and directory-entry
+changes around the save journal.
 
 Existing state files retain unrelated comments, formatting, unknown fields, and unsupported blocks.
 
@@ -107,7 +122,13 @@ The interface is available in:
 - Русский
 - 简体中文
 
-Application settings are stored under the user's Windows profile.
+Application settings use the platform configuration directory:
+
+```text
+Windows: %APPDATA%\HOI4MapEditor\config.toml
+Linux:   $XDG_CONFIG_HOME/HOI4MapEditor/config.toml
+         (or ~/.config/HOI4MapEditor/config.toml)
+```
 
 Optional project settings are stored in:
 
@@ -121,15 +142,38 @@ State backups and recovery data are stored in:
 <mod>/.hoi4-state-editor/
 ```
 
-## Installation
+## Installation and supported platforms
 
-1. Download the Windows x64 ZIP from [GitHub Releases](https://github.com/AdriianCOE/hoi4_state_editor/releases).
+| Platform | Status | Baseline |
+| --- | --- | --- |
+| Windows x86_64 | Supported preview | Windows desktop x64 |
+| Linux x86_64 | Supported preview | Ubuntu 22.04-compatible glibc desktop with OpenGL |
+
+Linux support does not cover ARM, musl distributions, older glibc systems, or
+every Linux distribution. The desktop stack may use X11 and/or Wayland according
+to the installed runtime libraries.
+
+### Windows
+
+1. Download the Windows x64 ZIP from [GitHub Releases](https://github.com/AdriianCOE/HOI4-Map-Editor/releases).
 2. Extract the ZIP into a writable folder.
 3. Run `HOI4 Map Editor.exe`.
 4. Select **File → Open HOI4 Mod...**
 5. Choose the root folder of your mod.
 
 Do not run the application directly from inside the ZIP.
+
+### Linux
+
+1. Download `HOI4-Map-Editor-v<version>-linux-x86_64.tar.gz` from GitHub Releases.
+2. Verify its adjacent `.sha256` file, extract it into a writable folder, and
+   run `./hoi4-map-editor`.
+3. Select **File → Open HOI4 Mod...** and choose the root folder of your mod.
+
+Do not run the application from inside the tarball. `xdg-open` is optional for
+opening files/folders. Clipboard integration uses `wl-copy`, `xclip`, or `xsel`
+when available; the editor still launches if they are absent. Additional
+Cyrillic/CJK glyph coverage depends on installed system fonts.
 
 A compatible project normally contains:
 
@@ -187,12 +231,15 @@ Map shortcuts are suspended while typing in a field, picker, or search box.
 
 ## Current limitations
 
-- Preview builds currently support Windows x64 only.
+- Linux preview support is limited to x86_64 glibc desktops built and tested on
+  the Ubuntu 22.04 baseline; ARM, musl, and older glibc environments are not
+  supported.
 - The Validation Results window currently offers basic all-domain results;
   advanced report export and persistent ignore policies are planned.
 - Country names, state localizations, and other game-data localizations are not loaded from the game yet.
 - Country flags and game icons are not displayed yet.
-- Adjacencies can be inspected, but the full editing workspace is still planned.
+- Adjacencies can be inspected and preserved, but the full editing workspace is
+  still planned; invalid references require external repair.
 - Strategic Regions and Continents do not yet have complete dedicated editing workspaces.
 - Rivers, supply networks, heightmaps, and tree maps are not directly editable.
 - The executable is not currently digitally signed, so Windows SmartScreen may display a warning for early preview builds.
@@ -254,8 +301,7 @@ Possible additions after the core editor is stable:
 - Supply network editing
 - Heightmap tools
 - Tree map editing
-- Project autosave and workspace recovery
-- External file change detection
+- Project autosave and unsaved-workspace recovery
 - Procedural island and province generation
 - Steam Workshop publishing helpers
 
@@ -284,12 +330,21 @@ To create the portable Windows package:
 
 The packaging script creates the ZIP, SHA-256 checksum, and release manifest in `dist/`.
 
+To create and validate the portable Linux package on Linux:
+
+```sh
+bash scripts/package-linux.sh
+```
+
+See [Linux packaging](docs/development/LINUX_PACKAGING.md) for the exact
+allowlist, runtime expectations, and manual desktop smoke gate.
+
 ## Reporting issues
 
 When reporting a problem, include:
 
 - application version;
-- Windows version;
+- operating system and version;
 - workspace and tool being used;
 - steps to reproduce the problem;
 - relevant local log output;
@@ -298,7 +353,9 @@ When reporting a problem, include:
 Logs are stored under:
 
 ```text
-%LOCALAPPDATA%\HOI4MapEditor\logs
+Windows: %LOCALAPPDATA%\HOI4MapEditor\logs
+Linux:   $XDG_STATE_HOME/HOI4MapEditor/logs
+         (or ~/.local/state/HOI4MapEditor/logs)
 ```
 
 Do not upload an entire mod unless it is necessary and you have permission to share it.

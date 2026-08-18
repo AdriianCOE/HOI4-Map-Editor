@@ -2,6 +2,7 @@
 mod bridge;
 mod history;
 mod problems;
+mod province_id_index;
 mod province_save;
 
 use ahash::{AHashMap, AHashSet};
@@ -20,9 +21,12 @@ use crate::error::Error;
 use crate::util::XYIter;
 use crate::util::files::Location;
 
+#[cfg(test)]
+pub(crate) use self::bridge::construct_map_data_for_sparse_tests;
 pub use self::bridge::{SaveOperation, read_rgb_bmp_image, write_rgb_bmp_image};
 pub use self::history::History;
 pub use self::problems::Problem;
+pub use self::province_id_index::{ProvinceIdIndex, ProvinceIdIndexError};
 pub(crate) use self::province_save::{
     ProvinceMapCandidate, build_province_map_candidate, validate_province_map_candidate,
 };
@@ -177,6 +181,7 @@ impl Bundle {
 pub struct MapBase {
     color_buffer: Arc<RgbImage>,
     province_data_map: Arc<AHashMap<Color, Arc<ProvinceData>>>,
+    province_id_index: Arc<ProvinceIdIndex>,
     connection_data_map: Arc<AHashMap<UOrd<Color>, Arc<ConnectionData>>>,
     rivers_overlay: Option<Arc<RgbaImage>>,
 }
@@ -188,6 +193,10 @@ impl std::fmt::Debug for MapBase {
             .field(
                 "province_data_map",
                 &format_args!("{:p}", self.province_data_map),
+            )
+            .field(
+                "province_id_index",
+                &format_args!("{:p}", self.province_id_index),
             )
             .field(
                 "connection_data_map",
@@ -202,7 +211,6 @@ pub struct Map {
     base: MapBase,
     boundaries: AHashMap<UOrd<Vector2<u32>>, bool>,
     preserved_unsupported_adjacencies: Vec<Adjacency>,
-    preserved_id_count: Option<u32>,
 }
 
 impl Map {
@@ -224,6 +232,18 @@ impl Map {
 
     pub fn connections_count(&self) -> usize {
         self.base.connection_data_map.len()
+    }
+
+    pub fn province_id_index(&self) -> &ProvinceIdIndex {
+        &self.base.province_id_index
+    }
+
+    pub fn color_for_province_id(&self, id: u32) -> Option<Color> {
+        self.base.province_id_index.color_for_id(id)
+    }
+
+    pub fn province_id_for_color(&self, color: Color) -> Option<u32> {
+        self.base.province_id_index.id_for_color(color)
     }
 
     /// Generates a texture buffer, a buffer to be consumed by the canvas to display the map
@@ -315,6 +335,7 @@ impl Map {
 
     fn erase_province_data(&mut self, color: Color) {
         Arc::make_mut(&mut self.base.province_data_map).remove(&color);
+        Arc::make_mut(&mut self.base.province_id_index).remove_color(color);
         self.remove_related_connections(color);
     }
 
@@ -514,6 +535,7 @@ impl Map {
             .expect("province not found with color");
         let result = province_data_map.insert(color, province_data);
         debug_assert_eq!(result, None);
+        Arc::make_mut(&mut self.base.province_id_index).rekey_color(which, color);
     }
 
     /// Replaces the keys of all connections containing one color with another color
@@ -736,17 +758,13 @@ impl Map {
     }
 
     pub fn province_ids(&self) -> impl Iterator<Item = u32> + '_ {
-        self.base
-            .province_data_map
-            .values()
-            .filter_map(|province| province.preserved_id)
+        self.base.province_id_index.ids()
     }
 
     pub fn province_extents_by_id(&self) -> BTreeMap<u32, Extents> {
         let mut extents = BTreeMap::<u32, Extents>::new();
         for pos in XYIter::new(0..self.width(), 0..self.height()) {
-            let Some(province_id) = self.get_province_at(pos).preserved_id.filter(|id| *id != 0)
-            else {
+            let Some(province_id) = self.province_id_for_color(self.get_color_at(pos)) else {
                 continue;
             };
             extents
@@ -758,7 +776,52 @@ impl Map {
     }
 
     pub fn contains_province_id(&self, id: u32) -> bool {
-        self.province_ids().any(|province_id| province_id == id)
+        self.base.province_id_index.contains_id(id)
+    }
+
+    /// Records that could not become renderable connections, including adjacency
+    /// endpoints that do not resolve to an existing province.
+    pub(crate) fn unresolved_adjacencies(&self) -> &[Adjacency] {
+        &self.preserved_unsupported_adjacencies
+    }
+
+    pub fn adjacency_references_province_id(&self, id: u32) -> bool {
+        let Some(color) = self.color_for_province_id(id) else {
+            return self
+                .preserved_unsupported_adjacencies
+                .iter()
+                .any(|adjacency| {
+                    adjacency.from_id == id
+                        || adjacency.to_id == id
+                        || adjacency.through == Some(id)
+                });
+        };
+        self.base
+            .connection_data_map
+            .iter()
+            .any(|(relation, connection)| {
+                relation.contains(&color) || connection.through == Some(color)
+            })
+            || self
+                .preserved_unsupported_adjacencies
+                .iter()
+                .any(|adjacency| {
+                    adjacency.from_id == id
+                        || adjacency.to_id == id
+                        || adjacency.through == Some(id)
+                })
+    }
+
+    pub(crate) fn rebuild_province_id_index(&mut self) {
+        let pairs = self
+            .base
+            .province_data_map
+            .iter()
+            .filter_map(|(&color, province)| province.preserved_id.map(|id| (id, color)));
+        self.base.province_id_index = Arc::new(
+            ProvinceIdIndex::from_pairs(pairs)
+                .expect("province data must not contain duplicate preserved identities"),
+        );
     }
 
     pub fn iter_connection_data(&self) -> impl Iterator<Item = (UOrd<Color>, &ConnectionData)> {

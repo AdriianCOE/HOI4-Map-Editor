@@ -194,8 +194,9 @@ pub enum StateEditError {
 impl StateEditSession {
     pub fn new(project: &Hoi4Project, map: &Map) -> Self {
         let province_kinds = map
-            .iter_province_data()
-            .filter_map(|(_, province)| province.preserved_id.map(|id| (id, province.kind)))
+            .province_id_index()
+            .iter()
+            .map(|(id, color)| (id, map.get_province(color).kind))
             .collect::<BTreeMap<_, _>>();
         let known_state_ids = project
             .states

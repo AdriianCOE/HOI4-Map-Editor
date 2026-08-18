@@ -72,6 +72,7 @@ pub enum ProjectDiagnosticKind {
     StateNameIdMismatch,
     ProvinceBuildingOutsideState,
     VictoryPointOutsideState,
+    UnknownAdjacencyProvince,
     StateEditSession,
     InvalidProvinceBitmap,
     InvalidDefinition,
@@ -118,6 +119,7 @@ impl ProjectDiagnosticKind {
             Self::StateNameIdMismatch => "states.name_id.mismatch",
             Self::ProvinceBuildingOutsideState => "cross.building.outside_state",
             Self::VictoryPointOutsideState => "cross.victory_point.outside_state",
+            Self::UnknownAdjacencyProvince => "cross.adjacency.province.unknown",
             Self::StateEditSession => "states.edit.session",
             Self::InvalidProvinceBitmap => "province.bitmap.invalid",
             Self::InvalidDefinition => "definition.invalid",
@@ -150,6 +152,7 @@ impl ProjectDiagnosticKind {
             | Self::LandProvinceWithoutState
             | Self::ProvinceBuildingOutsideState
             | Self::VictoryPointOutsideState
+            | Self::UnknownAdjacencyProvince
             | Self::MissingDefinitionForColor
             | Self::UnusedDefinition
             | Self::SeaOrLakeAssigned

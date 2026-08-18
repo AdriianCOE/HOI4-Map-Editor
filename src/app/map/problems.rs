@@ -263,7 +263,14 @@ pub fn analyze(bundle: &Bundle) -> Vec<Problem> {
         };
 
         let (_, [province_width, province_height]) = extents.to_offset_size();
-        if province_width > width / 8 || province_height > height / 8 {
+        // The old integer division made every one-pixel province "too large" on
+        // maps smaller than 8 pixels.  Ocean is intentionally exempt: it often
+        // spans the map and is not evidence of an accidental paint operation.
+        let max_width = width.div_ceil(8);
+        let max_height = height.div_ceil(8);
+        if province_data.kind != super::ProvinceKind::Sea
+            && (province_width > max_width || province_height > max_height)
+        {
             problems.push(Problem::TooLargeBox(extents));
         };
     }

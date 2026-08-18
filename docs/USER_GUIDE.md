@@ -19,9 +19,9 @@ visual layers and never mark a project as modified.
 - **Export Province Map As...** creates a folder copy.
 - **Export Province Map Archive...** creates a ZIP copy.
 
-Province Save prepares, validates, and backs up complete BMP/CSV candidates
-before replacing the mod files atomically. Exports never change the current
-project or its modified indicator.
+When Save Project includes province-map changes, it prepares, validates, and
+backs up complete BMP/CSV candidates before the coordinated commit. Exports
+never change the current project or its modified indicator.
 
 ## States workspace
 
@@ -58,13 +58,15 @@ never translated.
 Global settings are optional and created only after an explicit Settings save:
 
 ```text
-%APPDATA%\HOI4MapEditor\config.toml
+Windows: %APPDATA%\HOI4MapEditor\config.toml
+Linux:   $XDG_CONFIG_HOME/HOI4MapEditor/config.toml
+         (or ~/.config/HOI4MapEditor/config.toml)
 ```
 
 **File → Project Settings...** is available for a loaded mod. It controls
-Province ID preservation, coastal calculation on Province Save, extra map
-warnings, and their threshold. Project settings are optional and created only
-after an explicit save:
+Province ID preservation, coastal calculation when Save Project includes
+province-map changes, extra map warnings, and their threshold. Project
+settings are optional and created only after an explicit save:
 
 ```text
 <mod>/.hoi4-map-editor/project.toml
@@ -92,7 +94,9 @@ clear dirty state, or create an Undo command.
 Local logs are written under:
 
 ```text
-%LOCALAPPDATA%\HOI4MapEditor\logs
+Windows: %LOCALAPPDATA%\HOI4MapEditor\logs
+Linux:   $XDG_STATE_HOME/HOI4MapEditor/logs
+         (or ~/.local/state/HOI4MapEditor/logs)
 ```
 
 If something goes wrong, include the application version (see **Help → About

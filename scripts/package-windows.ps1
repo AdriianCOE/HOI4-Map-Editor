@@ -27,6 +27,21 @@ function Test-RepositoryPath([string]$Path) {
         $candidate.StartsWith("$root\", [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Get-Sha256([string]$Path) {
+    $getFileHash = Get-Command Get-FileHash -ErrorAction SilentlyContinue
+    if ($getFileHash) {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    }
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [IO.File]::ReadAllBytes($Path)
+        return ([BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace("-", "")
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
 if (-not (Test-RepositoryPath $dist)) { throw "Refusing package directory outside repository: $dist" }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 foreach ($target in @($stage, $zipPath, $checksumPath, $releaseManifestPath)) {
@@ -85,7 +100,7 @@ try {
     foreach ($required in $allowed) { if ($required -notin $entries) { throw "Package is missing $required." } }
 } finally { $archive.Dispose() }
 
-$hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
+$hash = Get-Sha256 $zipPath
 "$hash  $([IO.Path]::GetFileName($zipPath))" | Set-Content -LiteralPath $checksumPath -Encoding ascii
 @(
     "Name: HOI4 Map Editor"

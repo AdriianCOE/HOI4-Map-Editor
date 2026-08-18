@@ -82,6 +82,7 @@ pub fn validate_project(
 
     validate_provinces(bundle, project, &mut diagnostics);
     validate_states(bundle, project, &mut diagnostics);
+    validate_adjacencies(bundle, project, &mut diagnostics);
     sort_and_dedup(&mut diagnostics);
 
     let summary = summarize(&diagnostics);
@@ -581,14 +582,50 @@ fn validate_states(
     }
 }
 
+fn validate_adjacencies(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+    diagnostics: &mut Vec<ProjectValidationDiagnostic>,
+) {
+    let adjacency_path = project.paths.adjacencies_csv.clone();
+    for adjacency in bundle.map.unresolved_adjacencies() {
+        for (field, province_id) in [
+            ("source", adjacency.from_id),
+            ("destination", adjacency.to_id),
+        ]
+        .into_iter()
+        .chain(
+            adjacency
+                .through
+                .map(|province_id| ("through", province_id)),
+        ) {
+            if bundle.map.contains_province_id(province_id) {
+                continue;
+            }
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::UnknownAdjacencyProvince,
+                    DiagnosticSeverity::Error,
+                    adjacency_path.clone(),
+                    format!(
+                        "adjacency {field} references removed or missing province {province_id}"
+                    ),
+                )
+                .with_domain(ProjectValidationDomain::CrossDomain)
+                .with_province_id(province_id),
+            );
+        }
+    }
+}
+
 fn province_lookup(bundle: &Bundle) -> BTreeMap<u32, (bool, ProvinceKind, bool)> {
     bundle
         .map
-        .iter_province_data()
-        .filter_map(|(_, province)| {
-            province
-                .preserved_id
-                .map(|id| (id, (true, province.kind, province.coastal == Some(true))))
+        .province_id_index()
+        .iter()
+        .map(|(id, color)| {
+            let province = bundle.map.get_province(color);
+            (id, (true, province.kind, province.coastal == Some(true)))
         })
         .collect()
 }
@@ -798,7 +835,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use crate::app::map::{Bundle, write_rgb_bmp_image};
+    use crate::app::format::{Adjacency, AdjacencyKind, Definition, DefinitionKind};
+    use crate::app::map::{Bundle, construct_map_data_for_sparse_tests, write_rgb_bmp_image};
     use crate::app::project::ProjectPaths;
     use crate::app::state::{StateData, StateDocument, StateHistory, VictoryPoint, parse_text};
     use crate::config::Config;
@@ -883,6 +921,48 @@ mod tests {
             "0;0;0;0;land;false;unknown;0\n1;1;0;0;land;true;plains;1\n",
             &[[1, 0, 0]],
         )
+    }
+
+    fn sparse_bundle(adjacencies: Vec<Adjacency>) -> Bundle {
+        let colors = [[10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]];
+        let ids = [1, 7, 42, 500];
+        let image = image::RgbImage::from_fn(4, 1, |x, _| image::Rgb(colors[x as usize]));
+        let definitions = colors
+            .into_iter()
+            .zip(ids)
+            .map(|(rgb, id)| Definition {
+                id,
+                rgb,
+                kind: DefinitionKind::Land,
+                coastal: false,
+                terrain: "plains".to_owned(),
+                continent: 1,
+            })
+            .collect();
+        construct_map_data_for_sparse_tests(
+            image,
+            definitions,
+            adjacencies,
+            None,
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn adjacency(from_id: u32, to_id: u32, through: Option<u32>) -> Adjacency {
+        Adjacency {
+            from_id,
+            to_id,
+            kind: AdjacencyKind::Sea,
+            through,
+            start: None,
+            stop: None,
+            rule_name: String::new(),
+            comment: String::new(),
+        }
     }
 
     #[test]
@@ -971,6 +1051,59 @@ mod tests {
         assert!(codes.contains("cross.victory_point.outside_state"));
         assert!(codes.contains("cross.building.outside_state"));
         assert!(codes.contains("cross.naval_base.non_coastal"));
+    }
+
+    #[test]
+    fn sparse_cross_domain_references_are_valid_while_missing_adjacency_endpoints_are_structured() {
+        let temp = valid_fixture("sparse-cross-domain");
+        let bundle = sparse_bundle(vec![adjacency(7, 500, Some(42))]);
+        let mut valid = state(1, &[1, 42, 500]);
+        valid.history = StateHistory {
+            victory_points: vec![VictoryPoint {
+                province_id: 500,
+                value: 5,
+            }],
+            province_buildings: BTreeMap::from([(42, BTreeMap::from([("bunker".to_owned(), 1)]))]),
+            ..Default::default()
+        };
+        let valid_project = project(&temp, vec![document("1.txt", valid, Vec::new())]);
+        let report = validate_project(
+            &bundle,
+            &valid_project,
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(!report.blocks_save);
+        assert!(report.diagnostics.is_empty());
+
+        let bundle = sparse_bundle(vec![adjacency(7, 999, Some(998))]);
+        let mut invalid = state(1, &[1, 999]);
+        invalid.history = StateHistory {
+            victory_points: vec![VictoryPoint {
+                province_id: 999,
+                value: 5,
+            }],
+            province_buildings: BTreeMap::from([(999, BTreeMap::from([("bunker".to_owned(), 1)]))]),
+            ..Default::default()
+        };
+        let project = project(&temp, vec![document("1.txt", invalid, Vec::new())]);
+        let report = validate_project(&bundle, &project, ProjectValidationTarget::CurrentProject);
+        let adjacency_diagnostics = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "cross.adjacency.province.unknown")
+            .map(|diagnostic| diagnostic.province_id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            adjacency_diagnostics,
+            BTreeSet::from([Some(998), Some(999)])
+        );
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "cross.province.unknown"
+                    && diagnostic.province_id == Some(999))
+        );
     }
 
     #[test]

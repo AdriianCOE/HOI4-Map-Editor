@@ -30,12 +30,13 @@ em acoes; `Canvas` reune sessao visual, camera, ferramentas e texturas;
 rios sao opcionais.
 
 `config.rs` separa preferências globais opcionais em
-`%APPDATA%\HOI4MapEditor\config.toml` de preferências opcionais do mod em
-`<mod>/.hoi4-map-editor/project.toml`. Ambos usam schema versionado, staging no
-mesmo diretório, flush/sync, validação, backup simples e replace atômico. O
-parser lossless `toml_edit` preserva comentários, ordem e chaves desconhecidas.
-Ausência ou erro de configuração nunca impede a abertura do editor e nunca
-marca mapas ou states como modificados.
+`%APPDATA%\HOI4MapEditor\config.toml` no Windows ou
+`$XDG_CONFIG_HOME/HOI4MapEditor/config.toml` (fallback `~/.config`) no Linux,
+de preferências opcionais do mod em `<mod>/.hoi4-map-editor/project.toml`.
+Ambos usam schema versionado, staging no mesmo diretório, flush/sync, validação,
+backup simples e replace atômico. O parser lossless `toml_edit` preserva
+comentários, ordem e chaves desconhecidas. Ausência ou erro de configuração
+nunca impede a abertura do editor e nunca marca mapas ou states como modificados.
 
 `localization.rs` compila os catálogos UTF-8 `en-US`, `pt-BR`, `es-ES`,
 `fr-FR`, `ru-RU` e `zh-CN` no binário.
@@ -295,9 +296,11 @@ fornece os IDs reais ao carregador de estados.
 - Blocos datados sao detectados e preservados, nao interpretados.
 - Arquivos que nao sao UTF-8 recebem diagnostico e representacao lossy somente
   para inspecao; nunca sao reescritos.
-- A camada geografica ainda exige IDs contiguos em `definition.csv`.
+- A camada geografica aceita IDs externos positivos esparsos em `definition.csv`;
+  gaps sao preservados e nunca compactados implicitamente.
 - O Save Project desta fase altera somente `provinces.bmp`, `definition.csv` e
-  `history/states/*.txt`; adjacencies e rivers continuam fora do coordenador.
+  `history/states/*.txt`, alem de `adjacencies.csv` quando o candidato de mapa o
+  contem; rivers continuam fora do coordenador.
 - Sem suporte a ZIP de mod; ZIP permanece apenas no modo legado.
 
 ## Riscos conhecidos

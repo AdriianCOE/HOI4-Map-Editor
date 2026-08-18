@@ -22,8 +22,8 @@ not modify the game itself.
 
 - Province brush, fill, lasso, recolor, terrain/definition editing, and
   coastal recalculation.
-- Atomic Province Map Save: candidate files are validated and backed up
-  before the mod's files are replaced.
+- Coordinated Save Project: province-map and state candidates are validated
+  and backed up before the mod's files are replaced.
 - State creation, removal, and province assignment via Brush, Lasso, and
   Fill.
 - State Inspector for owner, controller, colors, cores, claims, resources,
@@ -42,7 +42,9 @@ game and needs no playset entry.
 
 **Known limitations**
 
-- Windows x64 only.
+- The Workshop staging flow currently packages the Windows executable only.
+  Linux x86_64 previews are distributed as portable tarballs through GitHub
+  Releases, not through Workshop content.
 - Game localization/metadata, flags, and icons (`.gfx`/`.dds`) are not yet
   loaded; the editor shows raw identifiers.
 - Adjacencies, Strategic Regions, and Continents do not yet have complete
@@ -51,7 +53,7 @@ game and needs no playset entry.
 **This is preview software.** Keep an independent backup of your mod,
 separate from the automatic backups the editor creates during a save.
 
-Source and releases: https://github.com/AdriianCOE/hoi4_state_editor
+Source and releases: https://github.com/AdriianCOE/HOI4-Map-Editor
 
 Unofficial community project. Not affiliated with or endorsed by Paradox
 Interactive. No Hearts of Iron IV or Paradox assets are distributed.

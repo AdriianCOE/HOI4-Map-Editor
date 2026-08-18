@@ -279,6 +279,19 @@ mod tests {
     }
 
     #[test]
+    fn sparse_province_values_are_valid_state_keys_without_dense_indexes() {
+        let documents = vec![document("sparse.txt", state(1, &[1, 7, 42, 500]))];
+        let valid = ids(&[1, 7, 42, 500]);
+        let indexes = index_state_documents(&documents, &valid, &valid);
+
+        for province_id in [1, 7, 42, 500] {
+            assert_eq!(indexes.state_by_province.get(&province_id), Some(&1));
+        }
+        assert!(indexes.unassigned_land_provinces.is_empty());
+        assert!(!kinds(&indexes).contains(&ProjectDiagnosticKind::UnknownProvince));
+    }
+
+    #[test]
     fn unknown_and_zero_provinces_are_diagnosed_and_excluded() {
         let documents = vec![document("state.txt", state(1, &[0, 10, 99]))];
 

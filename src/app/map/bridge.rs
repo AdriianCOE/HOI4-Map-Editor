@@ -5,13 +5,14 @@ use image::codecs::bmp::{BmpDecoder, BmpEncoder};
 use image::{ColorType, DynamicImage, Pixel, Rgb, RgbImage, Rgba, RgbaImage};
 use uord::UOrd2 as UOrd;
 
-use super::{Bundle, Color, ConnectionData, Map, MapBase, ProvinceData, random_color_pure};
+use super::{
+    Bundle, Color, ConnectionData, Map, MapBase, ProvinceData, ProvinceIdIndex, random_color_pure,
+};
 use crate::app::format::{Adjacency, Definition, ParseCsv};
 use crate::config::Config;
 use crate::error::Error;
 use crate::util::files::Location;
 
-use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::io::{self, Cursor, Read, Write};
 use std::sync::Arc;
@@ -47,6 +48,39 @@ pub(super) fn construct_map_data(
     rivers: Option<RgbImage>,
     config: Config,
 ) -> Result<Bundle, Error> {
+    construct_map_data_inner(
+        province_image,
+        definition_table,
+        adjacencies_table,
+        rivers,
+        config,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn construct_map_data_for_sparse_tests(
+    province_image: RgbImage,
+    definition_table: Vec<Definition>,
+    adjacencies_table: Vec<Adjacency>,
+    rivers: Option<RgbImage>,
+    config: Config,
+) -> Result<Bundle, Error> {
+    construct_map_data(
+        province_image,
+        definition_table,
+        adjacencies_table,
+        rivers,
+        config,
+    )
+}
+
+fn construct_map_data_inner(
+    province_image: RgbImage,
+    definition_table: Vec<Definition>,
+    adjacencies_table: Vec<Adjacency>,
+    rivers: Option<RgbImage>,
+    config: Config,
+) -> Result<Bundle, Error> {
     let mut color_buffer = province_image;
 
     let preserved_id_count = u32::try_from(definition_table.len())
@@ -55,20 +89,12 @@ pub(super) fn construct_map_data(
         return Err("definition.csv contains no province records".into());
     };
 
-    // Create a sparse array for mapping province ids to colors
-    let mut color_index = vec![None; definition_table.len() + 1];
-    for d in definition_table.iter() {
-        if d.id == 0 || d.id > preserved_id_count {
-            return Err(format!(
-        "definition.csv province IDs must be contiguous from 1 to {preserved_id_count}; found {}",
-        d.id
-      ).into());
-        };
-        let slot = &mut color_index[d.id as usize];
-        if slot.replace(d.rgb).is_some() {
-            return Err(format!("definition.csv contains duplicate province ID {}", d.id).into());
-        };
-    }
+    let definition_id_index = ProvinceIdIndex::from_pairs(
+        definition_table
+            .iter()
+            .map(|definition| (definition.id, definition.rgb)),
+    )
+    .map_err(|error| Error::from(format!("definition.csv {error}")))?;
 
     // Initially convert the definition table into a province data map
     let mut definition_map = definition_table
@@ -94,35 +120,35 @@ pub(super) fn construct_map_data(
         };
     }
 
-    // strip colors from the color index that failed to have province data created for them
-    for color_index_entry in color_index.iter_mut() {
-        *color_index_entry =
-            color_index_entry.filter(|color| province_data_map.contains_key(color));
-    }
-
-    let get_color_index = |id: u32| get_color_index(&color_index, id);
-
     province_data_map.shrink_to_fit();
     let _ = definition_map;
 
-    // Loop through the entries in the adjacencies table, converting ids to colors using `color_index`,
-    // since the adjacencies map is indexed by color instead of id
+    let loaded_id_index = ProvinceIdIndex::from_pairs(
+        definition_id_index
+            .iter()
+            .filter(|(_, color)| province_data_map.contains_key(color)),
+    )
+    .expect("definition index cannot become ambiguous after filtering loaded colors");
+
+    // Adjacency endpoints are external identities. Resolve them by keyed lookup;
+    // malformed or unsupported records are preserved for validation and round-trip.
     let mut preserved_unsupported_adjacencies = Vec::new();
     let mut connection_data_map = AHashMap::with_capacity(adjacencies_table.len());
     for a in adjacencies_table.into_iter() {
-        if let Some(rel) = UOrd::new([a.from_id, a.to_id]).try_map_opt(get_color_index) {
-            if let Some(connection_data) =
-                ConnectionData::from_adjacency(a.clone(), get_color_index)
+        let resolve_color = |id| loaded_id_index.color_for_id(id);
+        if let Some(rel) = UOrd::new([a.from_id, a.to_id]).try_map_opt(resolve_color) {
+            if let Some(connection_data) = ConnectionData::from_adjacency(a.clone(), resolve_color)
             {
                 connection_data_map.insert(rel, Arc::new(connection_data));
             } else {
                 preserved_unsupported_adjacencies.push(a);
             };
+        } else {
+            preserved_unsupported_adjacencies.push(a);
         };
     }
 
     connection_data_map.shrink_to_fit();
-    let _ = color_index;
 
     // Recolor the entire map if `preserve_ids` is false
     if !config.preserve_ids {
@@ -133,20 +159,24 @@ pub(super) fn construct_map_data(
         );
     };
 
-    let id_data = config.preserve_ids.then(|| preserved_id_count);
-
     let rivers_overlay = rivers.as_ref().map(process_and_clear_rivers_image);
+    let province_id_index = ProvinceIdIndex::from_pairs(
+        province_data_map
+            .iter()
+            .filter_map(|(&color, province)| province.preserved_id.map(|id| (id, color))),
+    )
+    .expect("loader has already validated preserved province identities");
 
     let mut map = Map {
         base: MapBase {
             color_buffer: Arc::new(color_buffer),
             province_data_map: Arc::new(province_data_map),
+            province_id_index: Arc::new(province_id_index),
             connection_data_map: Arc::new(connection_data_map),
             rivers_overlay: rivers_overlay.map(Arc::new),
         },
         boundaries: AHashMap::default(),
         preserved_unsupported_adjacencies,
-        preserved_id_count: id_data,
     };
 
     map.recalculate_all_boundaries();
@@ -194,20 +224,14 @@ pub(super) fn recolor_everything(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum IdChange {
-    DeletedRange(u32, u32),
-    CreatedRange(u32, u32),
-    Reassigned(u32, u32),
     AssignedNew(u32),
 }
 
 impl ToString for IdChange {
     fn to_string(&self) -> String {
         match self {
-            IdChange::DeletedRange(start, end) => format!("Deleted IDs {} through {}", start, end),
-            IdChange::CreatedRange(start, end) => format!("Created IDs {} through {}", start, end),
-            IdChange::Reassigned(from, to) => format!("Reassigned ID {} to {}", from, to),
             IdChange::AssignedNew(id) => format!("Assigned ID {} to new province", id),
         }
     }
@@ -233,72 +257,69 @@ pub(super) fn deconstruct_map_data(bundle: &Bundle) -> Result<MapData, Error> {
 }
 
 fn deconstruct_map_data_preserve_ids(bundle: &Bundle) -> Result<MapData, Error> {
-    let preserved_id_count = bundle
-        .map
-        .preserved_id_count
-        .expect("config key `preserve-ids` was true, but map contained no id data");
+    let map = &bundle.map;
+    let mut definitions_table = Vec::with_capacity(map.provinces_count());
+    let mut color_index = AHashMap::with_capacity(map.provinces_count());
 
-    let count = bundle.map.provinces_count();
-    let mut outlier_definitions = Vec::new();
-    let mut sparse_definitions_table = vec![None; count];
-    for (&color, province_data) in bundle.map.base.province_data_map.iter() {
-        if let Some(preserved_id) = province_data.preserved_id {
-            let definition = province_data.to_definition(color)?;
-            let index = (preserved_id - 1) as usize;
-            if index < sparse_definitions_table.len() {
-                sparse_definitions_table[index] = Some(definition);
-            } else {
-                outlier_definitions.push(definition);
-            };
-        } else {
-            outlier_definitions.push(province_data.to_definition_with_id(color, 0)?);
-        };
+    // Existing external identities come from the ordered index, never from a
+    // row position or hash-map iteration. This keeps sparse IDs intact.
+    for (id, color) in map.province_id_index().iter() {
+        let province = map.base.province_data_map.get(&color).ok_or_else(|| {
+            Error::from(format!(
+                "province ID {id} refers to a color missing from the map"
+            ))
+        })?;
+        if province.preserved_id != Some(id) {
+            return Err(format!(
+                "province ID index and province data disagree for color {color:?}"
+            )
+            .into());
+        }
+        let definition = province.to_definition_with_id(color, id)?;
+        color_index.insert(color, id);
+        definitions_table.push(definition);
     }
 
-    outlier_definitions.sort();
+    // Newly painted colors have no external identity yet. Color order is stable
+    // across hash seeds, so multiple allocations are deterministic.
+    let mut new_colors = map
+        .base
+        .province_data_map
+        .iter()
+        .filter_map(|(&color, province)| {
+            map.province_id_index()
+                .id_for_color(color)
+                .is_none()
+                .then_some((color, province))
+        })
+        .collect::<Vec<_>>();
+    new_colors.sort_unstable_by_key(|&(color, _)| color);
 
     let mut changes = Vec::new();
-    // Loop through all of the 'outlier' definitions
-    for mut outlier_definition in outlier_definitions.into_iter().rev() {
-        // Loop through the sparse definitions table until you find an empty spot
-        for (id, slot) in sparse_definitions_table.iter_mut().enumerate().rev() {
-            let id = id as u32 + 1;
-            if slot.is_none() {
-                // Insert the current definition into the sparse definitions table
-                if outlier_definition.id != id {
-                    if outlier_definition.id == 0 {
-                        changes.push(IdChange::AssignedNew(id));
-                    } else {
-                        changes.push(IdChange::Reassigned(outlier_definition.id, id));
-                    };
-                };
-                outlier_definition.id = id;
-                *slot = Some(outlier_definition);
-                break;
-            };
+    let mut next_id = map
+        .province_id_index()
+        .next_allocatable_id()
+        .map_err(|error| Error::from(error.to_string()))?;
+    let new_count = new_colors.len();
+    for (position, (color, province)) in new_colors.into_iter().enumerate() {
+        if province.preserved_id.is_some() {
+            return Err(format!(
+                "province color {color:?} has a preserved ID but is missing from the ID index"
+            )
+            .into());
+        }
+        let definition = province.to_definition_with_id(color, next_id)?;
+        color_index.insert(color, next_id);
+        definitions_table.push(definition);
+        changes.push(IdChange::AssignedNew(next_id));
+        if position + 1 < new_count {
+            next_id = next_id
+                .checked_add(1)
+                .ok_or_else(|| Error::from("no province ID is available after u32::MAX"))?;
         }
     }
 
-    let current_id_count = sparse_definitions_table.len() as u32;
-    match u32::cmp(&preserved_id_count, &current_id_count) {
-        Ordering::Less => changes.push(IdChange::CreatedRange(
-            preserved_id_count + 1,
-            current_id_count,
-        )),
-        Ordering::Greater => changes.push(IdChange::DeletedRange(
-            current_id_count + 1,
-            preserved_id_count,
-        )),
-        Ordering::Equal => (),
-    };
-
-    let mut definitions_table = Vec::with_capacity(count);
-    let mut color_index = AHashMap::with_capacity(definitions_table.len());
-    for definition in sparse_definitions_table {
-        let definition = definition.expect("infallible");
-        color_index.insert(definition.rgb, definition.id);
-        definitions_table.push(definition);
-    }
+    definitions_table.sort_by_key(|definition| definition.id);
 
     let mut adjacencies_table = Vec::with_capacity(bundle.map.connections_count());
     for (&rel, connection_data) in bundle.map.base.connection_data_map.iter() {
@@ -426,8 +447,7 @@ pub(super) fn write_id_changes<W: Write>(
     mut writer: W,
     id_changes: Vec<IdChange>,
 ) -> Result<(), Error> {
-    writeln!(writer, "ID Changes {}", crate::util::now())
-        .context("failed to write id changes to file")?;
+    writeln!(writer, "ID Changes").context("failed to write id changes to file")?;
     for id_change in id_changes {
         writeln!(writer, "- {}", id_change.to_string())
             .context("failed to write id changes to file")?;
@@ -442,19 +462,16 @@ fn read_all<R: Read>(mut reader: R) -> io::Result<Cursor<Vec<u8>>> {
     Ok(Cursor::new(buf))
 }
 
-fn get_color_index(color_index: &[Option<Color>], id: u32) -> Option<Color> {
-    color_index.get(id as usize).and_then(Clone::clone)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::construct_map_data;
-    use crate::app::format::{Definition, DefinitionKind};
-    use crate::app::map::{Bundle, History};
+    use super::{construct_map_data, construct_map_data_for_sparse_tests};
+    use crate::app::format::{Adjacency, AdjacencyKind, Definition, DefinitionKind, ParseCsv};
+    use crate::app::map::{Bundle, History, Problem};
     use crate::config::Config;
     use crate::util::files::Location;
     use image::{Rgb, RgbImage};
     use std::fs;
+    use std::sync::Arc;
 
     #[test]
     fn empty_definition_table_returns_error_instead_of_panicking() {
@@ -467,6 +484,203 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn sparse_definition_ids_load_with_their_exact_external_identity() {
+        let colors = [[10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]];
+        let image = RgbImage::from_fn(4, 1, |x, _| Rgb(colors[x as usize]));
+        let definitions = colors
+            .into_iter()
+            .zip([1, 7, 42, 500])
+            .map(|(rgb, id)| Definition {
+                id,
+                rgb,
+                kind: DefinitionKind::Land,
+                coastal: false,
+                terrain: "plains".to_owned(),
+                continent: 1,
+            })
+            .collect();
+
+        let bundle = construct_map_data(
+            image,
+            definitions,
+            Vec::new(),
+            None,
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(bundle.map.provinces_count(), 4);
+        assert_eq!(bundle.map.province_id_index().max_id(), Some(500));
+        assert_eq!(
+            bundle.map.province_ids().collect::<Vec<_>>(),
+            vec![1, 7, 42, 500]
+        );
+        assert!(!bundle.map.contains_province_id(2));
+    }
+
+    fn bundle_with_forced_ids(ids: &[u32]) -> (Bundle, Vec<[u8; 3]>) {
+        let colors = ids
+            .iter()
+            .enumerate()
+            .map(|(index, _)| [10 + index as u8 * 20, 20, 30])
+            .collect::<Vec<_>>();
+        let image = RgbImage::from_fn(colors.len() as u32, 1, |x, _| Rgb(colors[x as usize]));
+        let definitions = colors
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, rgb)| Definition {
+                id: index as u32 + 1,
+                rgb,
+                kind: DefinitionKind::Land,
+                coastal: false,
+                terrain: "plains".to_owned(),
+                continent: 1,
+            })
+            .collect();
+        let mut bundle = construct_map_data(
+            image,
+            definitions,
+            Vec::new(),
+            None,
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        for (&color, &id) in colors.iter().zip(ids) {
+            let province_data = Arc::make_mut(
+                Arc::make_mut(&mut bundle.map.base.province_data_map)
+                    .get_mut(&color)
+                    .unwrap(),
+            );
+            province_data.preserved_id = Some(id);
+        }
+        bundle.map.rebuild_province_id_index();
+        (bundle, colors)
+    }
+
+    fn sparse_adjacency(from_id: u32, to_id: u32, through: Option<u32>) -> Adjacency {
+        Adjacency {
+            from_id,
+            to_id,
+            kind: AdjacencyKind::Sea,
+            through,
+            start: None,
+            stop: None,
+            rule_name: String::new(),
+            comment: String::new(),
+        }
+    }
+
+    fn sparse_bundle_with_adjacencies(ids: &[u32], adjacencies: Vec<Adjacency>) -> Bundle {
+        let colors = ids
+            .iter()
+            .enumerate()
+            .map(|(index, _)| [10 + index as u8 * 20, 20, 30])
+            .collect::<Vec<_>>();
+        let image = RgbImage::from_fn(colors.len() as u32, 1, |x, _| Rgb(colors[x as usize]));
+        let definitions = colors
+            .iter()
+            .copied()
+            .zip(ids.iter().copied())
+            .map(|(rgb, id)| Definition {
+                id,
+                rgb,
+                kind: DefinitionKind::Land,
+                coastal: false,
+                terrain: "plains".to_owned(),
+                continent: 1,
+            })
+            .collect();
+        construct_map_data_for_sparse_tests(
+            image,
+            definitions,
+            adjacencies,
+            None,
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sparse_adjacency_endpoints_resolve_by_external_id_without_dense_storage() {
+        let bundle = sparse_bundle_with_adjacencies(
+            &[1, 7, 42, 500],
+            vec![
+                sparse_adjacency(7, 500, Some(42)),
+                sparse_adjacency(1, 42, None),
+                sparse_adjacency(42, 500, None),
+            ],
+        );
+        let mut endpoints = bundle
+            .map
+            .iter_connection_data()
+            .map(|(relation, connection)| {
+                let ids = relation.map(|color| bundle.map.province_id_for_color(color).unwrap());
+                (
+                    ids.into_array(),
+                    connection
+                        .through
+                        .map(|color| bundle.map.province_id_for_color(color).unwrap()),
+                )
+            })
+            .collect::<Vec<_>>();
+        endpoints.sort_unstable();
+        assert_eq!(
+            endpoints,
+            vec![([1, 42], None), ([7, 500], Some(42)), ([42, 500], None)]
+        );
+        assert!(bundle.map.adjacency_references_province_id(7));
+        assert!(bundle.map.adjacency_references_province_id(500));
+        assert!(bundle.map.adjacency_references_province_id(42));
+        assert!(bundle.map.unresolved_adjacencies().is_empty());
+
+        let (_, adjacencies, _) = super::deconstruct_map_data(&bundle).unwrap();
+        let mut serialized_endpoints = adjacencies
+            .iter()
+            .map(|adjacency| (adjacency.from_id, adjacency.to_id, adjacency.through))
+            .collect::<Vec<_>>();
+        serialized_endpoints.sort_unstable();
+        assert_eq!(
+            serialized_endpoints,
+            vec![(1, 42, None), (7, 500, Some(42)), (42, 500, None)]
+        );
+    }
+
+    #[test]
+    fn high_and_missing_sparse_adjacency_endpoints_are_keyed_and_preserved() {
+        let bundle = sparse_bundle_with_adjacencies(
+            &[1, 10_000],
+            vec![
+                sparse_adjacency(1, 10_000, None),
+                sparse_adjacency(1, 999, None),
+            ],
+        );
+        assert_eq!(bundle.map.connections_count(), 1);
+        assert_eq!(bundle.map.unresolved_adjacencies().len(), 1);
+        assert!(bundle.map.adjacency_references_province_id(999));
+        assert_eq!(bundle.map.province_id_index().province_count(), 2);
+
+        let (_, adjacencies, _) = super::deconstruct_map_data(&bundle).unwrap();
+        let mut serialized_endpoints = adjacencies
+            .iter()
+            .map(|adjacency| (adjacency.from_id, adjacency.to_id, adjacency.through))
+            .collect::<Vec<_>>();
+        serialized_endpoints.sort_unstable();
+        assert_eq!(
+            serialized_endpoints,
+            vec![(1, 999, None), (1, 10_000, None)]
+        );
     }
 
     #[test]
@@ -491,6 +705,11 @@ mod tests {
             ..Config::default()
         };
         let mut bundle = construct_map_data(image, definitions, Vec::new(), None, config).unwrap();
+        assert_eq!(
+            bundle.map.province_id_index().iter().collect::<Vec<_>>(),
+            vec![(1, first), (2, second)]
+        );
+        assert!(bundle.map.province_id_index().is_contiguous_from_one());
         let mut history = History::new(8, &bundle.map);
 
         assert!(
@@ -523,5 +742,229 @@ mod tests {
         assert_eq!(reloaded.map.get_color_at([1, 0]), second);
         assert_eq!(reloaded.map.get_province(first).terrain, "forest");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn custom_map_dimensions_preserve_texture_boundaries_and_diagnostics() {
+        let land = [10, 20, 30];
+        let ocean = [40, 50, 60];
+        let definitions = vec![
+            Definition {
+                id: 1,
+                rgb: land,
+                kind: DefinitionKind::Land,
+                coastal: true,
+                terrain: "plains".to_owned(),
+                continent: 1,
+            },
+            Definition {
+                id: 2,
+                rgb: ocean,
+                kind: DefinitionKind::Sea,
+                coastal: false,
+                terrain: "ocean".to_owned(),
+                continent: 0,
+            },
+        ];
+        let config = Config {
+            preserve_ids: true,
+            ..Config::default()
+        };
+
+        for [width, height] in [
+            [3, 2],
+            [64, 64],
+            [128, 128],
+            [256, 128],
+            [192, 64],
+            [130, 70],
+        ] {
+            let mut image = RgbImage::from_pixel(width, height, Rgb(ocean));
+            image.put_pixel(0, 0, Rgb(land));
+            let bundle =
+                construct_map_data(image, definitions.clone(), Vec::new(), None, config.clone())
+                    .unwrap();
+
+            assert_eq!(bundle.map.dimensions(), [width, height]);
+            assert_eq!(
+                bundle.map.gen_texture_buffer(|color| color).dimensions(),
+                (width, height)
+            );
+            assert!(bundle.map.iter_boundaries().next().is_some());
+            assert!(
+                !bundle
+                    .generate_problems()
+                    .iter()
+                    .any(|problem| matches!(problem, Problem::TooLargeBox(_))),
+                "small or ocean-heavy {width}x{height} map produced a false large-box warning"
+            );
+        }
+
+        let image = RgbImage::from_pixel(130, 70, Rgb(ocean));
+        let bundle = construct_map_data(image, definitions, Vec::new(), None, config).unwrap();
+        let problems = bundle.generate_problems();
+        assert!(
+            problems
+                .iter()
+                .any(|problem| matches!(problem, Problem::InvalidWidth))
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|problem| matches!(problem, Problem::InvalidHeight))
+        );
+    }
+
+    #[test]
+    fn preserve_id_deconstruction_keeps_sparse_ids_through_csv_round_trip() {
+        let (bundle, _) = bundle_with_forced_ids(&[1, 7, 42, 500]);
+        let (definitions, _, changes) = super::deconstruct_map_data(&bundle).unwrap();
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| definition.id)
+                .collect::<Vec<_>>(),
+            vec![1, 7, 42, 500]
+        );
+        assert_eq!(changes, None, "existing sparse IDs are not renumbered");
+
+        let mut csv = Vec::new();
+        super::write_definition_table(&mut csv, definitions).unwrap();
+        let parsed = Definition::read_records(csv.as_slice()).unwrap();
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|definition| definition.id)
+                .collect::<Vec<_>>(),
+            vec![1, 7, 42, 500]
+        );
+    }
+
+    #[test]
+    fn deletion_keeps_the_remaining_sparse_ids_and_gap() {
+        let (mut bundle, colors) = bundle_with_forced_ids(&[1, 7, 42, 500]);
+        bundle.map.merge_province_into(colors[2], colors[1]);
+
+        let (definitions, _, changes) = super::deconstruct_map_data(&bundle).unwrap();
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| definition.id)
+                .collect::<Vec<_>>(),
+            vec![1, 7, 500]
+        );
+        assert_eq!(changes, None);
+    }
+
+    #[test]
+    fn new_provinces_are_assigned_above_sparse_maximum_in_color_order() {
+        let colors = [[10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]];
+        let image_colors = [
+            colors[0], colors[1], colors[0], colors[2], colors[0], colors[3],
+        ];
+        let image = RgbImage::from_fn(6, 1, |x, _| Rgb(image_colors[x as usize]));
+        let definitions = colors
+            .into_iter()
+            .enumerate()
+            .map(|(index, rgb)| Definition {
+                id: index as u32 + 1,
+                rgb,
+                kind: DefinitionKind::Land,
+                coastal: false,
+                terrain: "plains".to_owned(),
+                continent: 1,
+            })
+            .collect();
+        let mut bundle = construct_map_data(
+            image,
+            definitions,
+            Vec::new(),
+            None,
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        for (color, id) in colors.into_iter().zip([1, 7, 42, 500]) {
+            Arc::make_mut(
+                Arc::make_mut(&mut bundle.map.base.province_data_map)
+                    .get_mut(&color)
+                    .unwrap(),
+            )
+            .preserved_id = Some(id);
+        }
+        bundle.map.rebuild_province_id_index();
+        bundle.map.merge_province_into(colors[1], colors[2]);
+
+        let lower_color = [1, 2, 3];
+        let higher_color = [250, 2, 3];
+        bundle.map.flood_fill_province([0, 0], higher_color);
+        bundle.map.flood_fill_province([2, 0], lower_color);
+        for color in [lower_color, higher_color] {
+            let province = bundle.map.get_province_mut(color);
+            province.kind = super::super::ProvinceKind::Land;
+            province.terrain = "plains".to_owned();
+            province.continent = 1;
+            province.coastal = Some(false);
+        }
+
+        let (definitions, _, changes) = super::deconstruct_map_data(&bundle).unwrap();
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| (definition.id, definition.rgb))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, colors[0]),
+                (42, colors[2]),
+                (500, colors[3]),
+                (501, lower_color),
+                (502, higher_color),
+            ]
+        );
+        let changes = changes.unwrap();
+        assert_eq!(
+            changes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec![
+                "Assigned ID 501 to new province",
+                "Assigned ID 502 to new province"
+            ]
+        );
+        let mut output = Vec::new();
+        super::write_id_changes(&mut output, changes).unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "ID Changes\n- Assigned ID 501 to new province\n- Assigned ID 502 to new province\n"
+        );
+    }
+
+    #[test]
+    fn high_sparse_ids_do_not_create_gap_records_and_overflow_is_an_error() {
+        let (bundle, _) = bundle_with_forced_ids(&[1, 10_000]);
+        let (definitions, _, _) = super::deconstruct_map_data(&bundle).unwrap();
+        assert_eq!(definitions.len(), 2);
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| definition.id)
+                .collect::<Vec<_>>(),
+            vec![1, 10_000]
+        );
+
+        let (mut exhausted, colors) = bundle_with_forced_ids(&[1, u32::MAX]);
+        exhausted.map.flood_fill_province([0, 0], [1, 2, 3]);
+        let province = exhausted.map.get_province_mut([1, 2, 3]);
+        province.kind = super::super::ProvinceKind::Land;
+        province.terrain = "plains".to_owned();
+        province.continent = 1;
+        province.coastal = Some(false);
+        assert!(
+            super::deconstruct_map_data(&exhausted)
+                .unwrap_err()
+                .to_string()
+                .contains("u32::MAX")
+        );
+        assert_eq!(colors.len(), 2);
     }
 }
