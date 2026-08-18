@@ -16,7 +16,10 @@ use super::{
     CombinedRoundTripValidationReport, Hoi4Project, PatchSafety, ProjectPatchPlan, RoundTripStatus,
     RoundTripValidationReport, SourceFingerprint, StateEditSession,
 };
-use crate::util::files::{atomic_move_new_file, atomic_replace_file};
+use crate::util::files::{
+    atomic_move_new_file, atomic_replace_file, create_dir_all_durable, remove_file_durable,
+    sync_parent_directory,
+};
 
 static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const INTERNAL_DIRECTORY: &str = ".hoi4-state-editor";
@@ -638,8 +641,8 @@ fn execute_patch_plan_save(
     let journal_path = transaction_directory.join("journal.toml");
     let backup_manifest_path = backup_directory.join("manifest.toml");
     let lock_path = internal.join(LOCK_FILE);
-    if let Err(error) = fs::create_dir_all(&transaction_directory)
-        .and_then(|_| fs::create_dir_all(backup_directory.join("files")))
+    if let Err(error) = create_dir_all_durable(&transaction_directory)
+        .and_then(|_| create_dir_all_durable(&backup_directory.join("files")))
     {
         return bare_report(
             StateSaveOutcome::FailedBeforeCommit,
@@ -663,7 +666,7 @@ fn execute_patch_plan_save(
     let resolved = match resolve_operations(&root, plan, &transaction_id) {
         Ok(resolved) => resolved,
         Err(error) => {
-            let _ = fs::remove_file(&lock_path);
+            let _ = remove_file_durable(&lock_path);
             return bare_report(StateSaveOutcome::FailedBeforeCommit, counts, error);
         }
     };
@@ -683,7 +686,7 @@ fn execute_patch_plan_save(
         failure: None,
     };
     if let Err(error) = write_journal(&journal_path, &journal) {
-        let _ = fs::remove_file(&lock_path);
+        let _ = remove_file_durable(&lock_path);
         return contextual_report(
             StateSaveOutcome::FailedBeforeCommit,
             counts,
@@ -995,7 +998,17 @@ fn execute_patch_plan_save(
             ),
         );
     }
-    let _ = fs::remove_file(&lock_path);
+    if let Err(error) = remove_file_durable(&lock_path) {
+        return contextual_report(
+            StateSaveOutcome::RecoveryRequired,
+            counts,
+            &transaction_id,
+            SaveTransactionState::Completed,
+            Some(&backup_directory),
+            Some(&journal_path),
+            format!("Save completed, but lock cleanup was not made durable: {error}"),
+        );
+    }
     progress(
         SaveTransactionState::Completed,
         resolved.len(),
@@ -1488,7 +1501,7 @@ fn create_and_verify_backup(
             let parent = path
                 .parent()
                 .ok_or_else(|| format!("Backup path has no parent: {}", path.display()))?;
-            fs::create_dir_all(parent)
+            create_dir_all_durable(parent)
                 .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
             write_new_synced(path, bytes)?;
         }
@@ -1649,7 +1662,7 @@ fn commit_operations(
                 ..
             } => {
                 ensure_absent(rollback_path)?;
-                fs::rename(final_path, rollback_path).map_err(|error| {
+                atomic_move_new_file(final_path, rollback_path).map_err(|error| {
                     rename_error("move removed state to rollback", final_path, error)
                 })?;
                 journal.operations[index].progress = FileOperationProgress::Removed;
@@ -1798,7 +1811,7 @@ fn rollback_after_failure(
             SaveTransactionState::RolledBack,
             "rollback verified",
         );
-        let _ = fs::remove_file(lock_path);
+        let _ = remove_file_durable(lock_path);
         StateSaveReport {
             outcome: StateSaveOutcome::RolledBack,
             transaction_id: Some(transaction_id),
@@ -1903,14 +1916,14 @@ fn restore_modified(
                     final_path.display()
                 )
             })?;
-            fs::remove_file(final_path).map_err(|error| {
+            remove_file_durable(final_path).map_err(|error| {
                 format!(
                     "Cannot remove failed candidate {}: {error}",
                     final_path.display()
                 )
             })?;
         }
-        return fs::rename(rollback_path, final_path)
+        return atomic_move_new_file(rollback_path, final_path)
             .map_err(|error| rename_error("restore rollback", rollback_path, error));
     }
     if matches!(
@@ -1938,12 +1951,14 @@ fn rollback_created(
                 final_path.display()
             )
         })?;
-        fs::remove_file(final_path).map_err(|error| {
-            format!(
-                "Cannot remove created state {}: {error}",
-                final_path.display()
-            )
-        })
+        remove_file_durable(final_path)
+            .map(|_| ())
+            .map_err(|error| {
+                format!(
+                    "Cannot remove created state {}: {error}",
+                    final_path.display()
+                )
+            })
     } else if matches!(
         progress,
         FileOperationProgress::Pending
@@ -1973,7 +1988,7 @@ fn restore_removed(
                 final_path.display()
             ));
         }
-        return fs::rename(rollback_path, final_path)
+        return atomic_move_new_file(rollback_path, final_path)
             .map_err(|error| rename_error("restore removed state", rollback_path, error));
     }
     if matches!(
@@ -2045,7 +2060,7 @@ fn fail_before_commit(
         SaveTransactionState::FailedBeforeCommit,
         "failed before first final-file rename",
     );
-    let _ = fs::remove_file(lock_path);
+    let _ = remove_file_durable(lock_path);
     StateSaveReport {
         outcome: StateSaveOutcome::FailedBeforeCommit,
         transaction_id: Some(journal.transaction_id.clone()),
@@ -2080,7 +2095,7 @@ fn cancel_before_commit(
         SaveTransactionState::Cancelled,
         "cancelled before commit",
     );
-    let _ = fs::remove_file(lock_path);
+    let _ = remove_file_durable(lock_path);
     StateSaveReport {
         outcome: StateSaveOutcome::Cancelled,
         transaction_id: Some(journal.transaction_id.clone()),
@@ -2183,7 +2198,7 @@ pub fn recover_interrupted_state_save(root: &Path) -> StateSaveReport {
                         format!("Completed Save cleanup is still required: {error}"),
                     );
                 }
-                let _ = fs::remove_file(&lock_path);
+                let _ = remove_file_durable(&lock_path);
                 StateSaveReport {
                     outcome: StateSaveOutcome::Completed,
                     transaction_id: Some(journal.transaction_id),
@@ -2251,7 +2266,7 @@ pub fn recover_interrupted_state_save(root: &Path) -> StateSaveReport {
             SaveTransactionState::RolledBack,
             "startup recovery rollback completed",
         );
-        let _ = fs::remove_file(&lock_path);
+        let _ = remove_file_durable(&lock_path);
         let reloaded_project = reload_project_for_save(&root)
             .ok()
             .map(|(project, _)| project);
@@ -2354,14 +2369,14 @@ fn rollback_journal_operation(
                         operation.candidate_fingerprint.as_ref(),
                         "candidate",
                     )?;
-                    fs::remove_file(final_path).map_err(|error| {
+                    remove_file_durable(final_path).map_err(|error| {
                         format!(
                             "Cannot remove failed candidate {}: {error}",
                             final_path.display()
                         )
                     })?;
                 }
-                fs::rename(rollback, final_path)
+                atomic_move_new_file(rollback, final_path)
                     .map_err(|error| rename_error("restore modification", rollback, error))?;
                 verify_persisted_file(
                     final_path,
@@ -2391,7 +2406,7 @@ fn rollback_journal_operation(
                     operation.candidate_fingerprint.as_ref(),
                     "created candidate",
                 )?;
-                fs::remove_file(final_path).map_err(|error| {
+                remove_file_durable(final_path).map_err(|error| {
                     format!(
                         "Cannot remove created state {}: {error}",
                         final_path.display()
@@ -2412,7 +2427,7 @@ fn rollback_journal_operation(
                         final_path.display()
                     ));
                 }
-                fs::rename(rollback, final_path)
+                atomic_move_new_file(rollback, final_path)
                     .map_err(|error| rename_error("restore removed state", rollback, error))?;
                 verify_persisted_file(
                     final_path,
@@ -2529,7 +2544,7 @@ fn create_lock(path: &Path, lock: &SaveLock) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("Lock has no parent: {}", path.display()))?;
-    fs::create_dir_all(parent)
+    create_dir_all_durable(parent)
         .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
     let bytes =
         toml::to_vec(lock).map_err(|error| format!("Cannot serialize save lock: {error}"))?;
@@ -2545,7 +2560,9 @@ fn create_lock(path: &Path, lock: &SaveLock) -> Result<(), String> {
         })?;
     file.write_all(&bytes)
         .and_then(|_| file.sync_all())
-        .map_err(|error| format!("Cannot persist save lock {}: {error}", path.display()))
+        .map_err(|error| format!("Cannot persist save lock {}: {error}", path.display()))?;
+    sync_parent_directory(path)
+        .map_err(|error| format!("Cannot persist save lock entry {}: {error}", path.display()))
 }
 
 fn write_journal(path: &Path, journal: &SaveTransactionJournal) -> Result<(), String> {
@@ -2561,20 +2578,33 @@ fn write_toml_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
         .to_string_lossy();
     let temporary = path.with_file_name(format!("{filename}.tmp"));
     let previous = path.with_file_name(format!("{filename}.previous"));
-    let _ = fs::remove_file(&temporary);
-    let _ = fs::remove_file(&previous);
+    let _ = remove_file_durable(&temporary);
+    let _ = remove_file_durable(&previous);
     write_new_synced(&temporary, &bytes)?;
     if path.exists() {
         fs::rename(path, &previous)
             .map_err(|error| format!("Cannot preserve metadata {}: {error}", path.display()))?;
+        sync_parent_directory(path).map_err(|error| {
+            format!(
+                "Cannot persist prior metadata rename for {}: {error}",
+                path.display()
+            )
+        })?;
     }
     if let Err(error) = fs::rename(&temporary, path) {
         if previous.exists() {
             let _ = fs::rename(&previous, path);
+            let _ = sync_parent_directory(path);
         }
         return Err(rename_error("publish metadata", &temporary, error));
     }
-    let _ = fs::remove_file(previous);
+    sync_parent_directory(path).map_err(|error| {
+        format!(
+            "Cannot persist metadata publish for {}: {error}",
+            path.display()
+        )
+    })?;
+    let _ = remove_file_durable(&previous);
     Ok(())
 }
 
@@ -2608,16 +2638,20 @@ fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("Cannot create {}: {error}", path.display()))?;
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
-        .map_err(|error| format!("Cannot persist {}: {error}", path.display()))
+        .map_err(|error| format!("Cannot persist {}: {error}", path.display()))?;
+    sync_parent_directory(path).map_err(|error| {
+        format!(
+            "Cannot persist directory entry for {}: {error}",
+            path.display()
+        )
+    })
 }
 
 fn remove_if_exists(path: Option<&Path>) -> Result<(), String> {
     let Some(path) = path else { return Ok(()) };
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Cannot remove {}: {error}", path.display())),
-    }
+    remove_file_durable(path)
+        .map(|_| ())
+        .map_err(|error| format!("Cannot remove {}: {error}", path.display()))
 }
 
 fn ensure_absent(path: &Path) -> Result<(), String> {

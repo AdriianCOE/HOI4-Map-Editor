@@ -207,6 +207,23 @@ Stages e rollbacks ficam ao lado do destino com sufixos `.hse-stage-<id>` e
 O fluxo e journaled, coordenado e capaz de rollback, mas nao promete
 atomicidade filesystem de projeto inteiro entre todos os arquivos e plataformas.
 
+### Limites de durabilidade do Save Project
+
+Tres garantias distintas sao mantidas separadas. A **correcao transacional da
+aplicacao** vem de candidatos validados, ordem deterministica, backups verificados,
+journal, rollback e recovery. A **atomicidade de namespace por arquivo** vem da
+substituicao especifica da plataforma; stages e rollbacks sao siblings do destino,
+portanto o `rename` Unix nao depende de cruzar filesystems. A **durabilidade contra
+queda de energia** exige barreiras adicionais: os arquivos novos/staged, backups,
+locks e journals usam `sync_all`; no Unix o diretorio-pai tambem e sincronizado
+depois de criar, publicar, renomear ou remover entradas que fazem parte do protocolo.
+
+Essas barreiras pressupõem um filesystem local com semantica POSIX normal de
+`rename` e `fsync` (por exemplo ext4, btrfs ou XFS configurados pelo sistema). Elas
+nao prometem seguranca universal em filesystems de rede, FUSE ou montagens com
+semantica incomum. Windows conserva `ReplaceFileW`/`MoveFileExW`; nao tenta abrir
+diretorios como arquivos comuns.
+
 A ordem de commit e deterministica: substituicoes de arquivos existentes por
 caminho relativo normalizado, depois criacoes por caminho e, por ultimo,
 remocoes por caminho. Todo destino ja possui backup verificado antes dessa

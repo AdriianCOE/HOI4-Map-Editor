@@ -6,7 +6,7 @@ use super::{Bundle, SaveOperation};
 use crate::app::format::{Definition, ParseCsv};
 use crate::util::files::{
     Location, ZipArchiveFilesMap, atomic_move_new_file, atomic_replace_file,
-    write_new_complete_file,
+    create_dir_all_durable, remove_file_durable, sync_parent_directory, write_new_complete_file,
 };
 
 use serde::{Deserialize, Serialize};
@@ -457,7 +457,7 @@ fn execute_directory(
     mut timings: ProvinceSaveTimings,
     progress: &mut impl FnMut(ProvinceSaveProgress),
 ) -> Result<ProvinceSaveReport, String> {
-    fs::create_dir_all(root)
+    create_dir_all_durable(root)
         .map_err(|error| format!("Cannot create export directory {}: {error}", root.display()))?;
     let internal_root = internal_root(root);
     let lock_path = mode.clears_dirty().then(|| {
@@ -750,7 +750,7 @@ fn execute_directory(
     if let Some(lock) = lock_path
         && !recovery_required
     {
-        let _ = fs::remove_file(lock);
+        let _ = remove_file_durable(&lock);
     }
     result
 }
@@ -771,7 +771,7 @@ fn execute_archive(
     let parent = path
         .parent()
         .ok_or_else(|| format!("Archive has no parent: {}", path.display()))?;
-    fs::create_dir_all(parent)
+    create_dir_all_durable(parent)
         .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
     let stage = sibling_path(path, "stage", &transaction_id)?;
     let rollback = sibling_path(path, "rollback", &transaction_id)?;
@@ -1018,7 +1018,7 @@ fn create_backup(
     progress: &mut impl FnMut(ProvinceSaveProgress),
 ) -> Result<PathBuf, String> {
     let files_directory = backup_directory.join("files");
-    fs::create_dir_all(&files_directory)
+    create_dir_all_durable(&files_directory)
         .map_err(|error| format!("Cannot create {}: {error}", files_directory.display()))?;
     let mut entries = Vec::with_capacity(prepared.len());
     for (index, file) in prepared.iter().enumerate() {
@@ -1268,7 +1268,7 @@ fn create_lock(path: &Path, transaction_id: &str) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("Lock has no parent: {}", path.display()))?;
-    fs::create_dir_all(parent)
+    create_dir_all_durable(parent)
         .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
     let mut file = OpenOptions::new()
         .write(true)
@@ -1282,7 +1282,9 @@ fn create_lock(path: &Path, transaction_id: &str) -> Result<(), String> {
         })?;
     file.write_all(transaction_id.as_bytes())
         .and_then(|_| file.sync_all())
-        .map_err(|error| format!("Cannot persist {}: {error}", path.display()))
+        .map_err(|error| format!("Cannot persist {}: {error}", path.display()))?;
+    sync_parent_directory(path)
+        .map_err(|error| format!("Cannot persist lock entry {}: {error}", path.display()))
 }
 
 fn write_journal(path: &Path, journal: &ProvinceSaveJournal) -> Result<(), String> {
@@ -1317,7 +1319,7 @@ fn write_toml_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
 
 fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
+        create_dir_all_durable(parent)
             .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
     }
     write_new_complete_file(path, bytes)
@@ -1389,11 +1391,9 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
 }
 
 fn remove_if_exists(path: &Path) -> Result<(), String> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Cannot remove {}: {error}", path.display())),
-    }
+    remove_file_durable(path)
+        .map(|_| ())
+        .map_err(|error| format!("Cannot remove {}: {error}", path.display()))
 }
 
 fn check_cancel(cancellation: &ProvinceSaveCancellation) -> Result<(), String> {

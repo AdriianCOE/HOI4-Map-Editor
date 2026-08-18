@@ -539,7 +539,11 @@ pub(crate) fn write_complete_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 pub(crate) fn write_new_complete_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    write_file(path, bytes, true)
+    write_file(path, bytes, true)?;
+    // A synced file alone does not make its new directory entry durable after
+    // a power loss on Unix filesystems. The caller uses this for staged and
+    // metadata files whose name must survive the next transaction barrier.
+    sync_parent_directory(path)
 }
 
 fn write_file(path: &Path, bytes: &[u8], create_new: bool) -> io::Result<()> {
@@ -554,16 +558,77 @@ fn write_file(path: &Path, bytes: &[u8], create_new: bool) -> io::Result<()> {
     file.sync_all()
 }
 
+/// Makes a directory entry change for `path` durable on Unix filesystems.
+///
+/// Windows keeps its existing replacement API behavior; opening a directory as
+/// a regular file there is intentionally avoided. This is a durability barrier,
+/// not a claim that an entire multi-file transaction is filesystem-atomic.
+pub(crate) fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path has no parent directory: {}", path.display()),
+        )
+    })?;
+    sync_directory(parent)
+}
+
+/// Creates a directory tree and persists each newly-created directory entry on
+/// Unix before it is used for transaction metadata or backups.
+pub(crate) fn create_dir_all_durable(path: &Path) -> io::Result<()> {
+    let mut created = Vec::new();
+    let mut current = path;
+    while !current.exists() {
+        created.push(current.to_owned());
+        current = current.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("directory has no parent: {}", path.display()),
+            )
+        })?;
+    }
+    std::fs::create_dir_all(path)?;
+    for directory in created.into_iter().rev() {
+        sync_parent_directory(&directory)?;
+        sync_directory(&directory)?;
+    }
+    Ok(())
+}
+
+/// Removes a file and persists the parent directory entry change on Unix.
+pub(crate) fn remove_file_durable(path: &Path) -> io::Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            sync_parent_directory(path)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 pub(crate) fn atomic_replace_file(
     replacement: &Path,
     destination: &Path,
     backup: Option<&Path>,
 ) -> io::Result<()> {
-    atomic_replace_existing(replacement, destination, backup)
+    atomic_replace_existing(replacement, destination, backup)?;
+    sync_parent_directory(destination)
 }
 
 pub(crate) fn atomic_move_new_file(source: &Path, destination: &Path) -> io::Result<()> {
-    atomic_move_new(source, destination)
+    atomic_move_new(source, destination)?;
+    sync_parent_directory(destination)
 }
 
 #[cfg(windows)]
@@ -641,6 +706,7 @@ fn atomic_replace_existing(
             .read(true)
             .open(backup)?
             .sync_all()?;
+        sync_parent_directory(backup)?;
     }
     std::fs::rename(replacement, destination)
 }
@@ -652,7 +718,10 @@ fn atomic_move_new(source: &Path, destination: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::ZipArchiveFilesMap;
+    use super::{
+        ZipArchiveFilesMap, atomic_move_new_file, atomic_replace_file, create_dir_all_durable,
+        remove_file_durable, write_new_complete_file,
+    };
     use std::fs;
 
     #[test]
@@ -676,5 +745,37 @@ mod tests {
         assert_eq!(loaded.get("definition.csv").unwrap(), b"data");
         assert_eq!(before, after);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn durable_publication_keeps_same_directory_replacements_and_creations_recoverable() {
+        let root = std::env::temp_dir().join(format!(
+            "hoi4-state-editor-durable-files-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let directory = root.join("project").join("map");
+        create_dir_all_durable(&directory).unwrap();
+
+        let destination = directory.join("definition.csv");
+        let replacement = directory.join("definition.csv.stage");
+        let backup = directory.join("definition.csv.rollback");
+        write_new_complete_file(&destination, b"before").unwrap();
+        write_new_complete_file(&replacement, b"after").unwrap();
+        atomic_replace_file(&replacement, &destination, Some(&backup)).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"after");
+        assert_eq!(fs::read(&backup).unwrap(), b"before");
+
+        let staged_new = directory.join("new-state.stage");
+        let published_new = directory.join("new-state.txt");
+        write_new_complete_file(&staged_new, b"created").unwrap();
+        atomic_move_new_file(&staged_new, &published_new).unwrap();
+        assert_eq!(fs::read(&published_new).unwrap(), b"created");
+        assert!(remove_file_durable(&published_new).unwrap());
+        assert!(!published_new.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }
