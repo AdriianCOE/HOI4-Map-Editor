@@ -3903,11 +3903,15 @@ mod tests {
         name: &str,
         definition: &str,
     ) -> (PathBuf, Hoi4Project, StateEditSession) {
-        let root = std::env::temp_dir().join(format!(
-            "phase4c-{name}-{}-{}",
-            std::process::id(),
-            TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
-        ));
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("test-projects")
+            .join(format!(
+                "phase4c-{name}-{}-{}",
+                std::process::id(),
+                TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
+            ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("map")).unwrap();
         fs::create_dir_all(root.join("history/states")).unwrap();
