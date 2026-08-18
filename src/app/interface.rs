@@ -1606,6 +1606,7 @@ pub enum ButtonId {
     ToolbarViewProvinceMap,
     ToolbarViewStateMap,
     ToolbarViewPoliticalMap,
+    ToolbarViewResourcesMap,
     ToolbarViewToggleAdjacencies,
     ToolbarViewToggleImageOverlay,
     ToolbarViewImageOverlayPanel,
@@ -1663,6 +1664,10 @@ fn map_view_button_active(id: ButtonId, view: Option<MapViewMode>) -> bool {
             | (
                 ButtonId::ToolbarViewPoliticalMap,
                 Some(MapViewMode::Political)
+            )
+            | (
+                ButtonId::ToolbarViewResourcesMap,
+                Some(MapViewMode::Resources)
             )
     )
 }
@@ -1774,7 +1779,11 @@ fn button_visible(id: ButtonId, ictx: InterfaceDrawContext) -> bool {
     ) {
         return ictx.state_actions.state_view && ictx.state_actions.fill_active;
     }
-    if matches!(id, ToolbarViewStateMap | ToolbarViewPoliticalMap) && !ictx.states_available {
+    if matches!(
+        id,
+        ToolbarViewStateMap | ToolbarViewPoliticalMap | ToolbarViewResourcesMap
+    ) && !ictx.states_available
+    {
         return false;
     }
     true
@@ -1890,7 +1899,9 @@ impl StateActionAvailability {
                 self.project_loaded
             }
             ToolbarPatchClear => self.has_patch_preview,
-            ToolbarViewStateMap | ToolbarViewPoliticalMap => self.state_view,
+            ToolbarViewStateMap | ToolbarViewPoliticalMap | ToolbarViewResourcesMap => {
+                self.state_view
+            }
             _ => true,
         }
     }
@@ -1919,6 +1930,7 @@ const WORKSPACE_DROPDOWNS: &[(&str, &[(&str, &str, ButtonId)], bool, bool)] = &[
             ("Coastal Provinces", "5", ButtonId::ToolbarViewMode5),
             ("States", "6", ButtonId::ToolbarViewStateMap),
             ("Political", "7", ButtonId::ToolbarViewPoliticalMap),
+            ("Resources", "", ButtonId::ToolbarViewResourcesMap),
         ],
         true,
         false,
@@ -2081,6 +2093,7 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
             ("Coastal Provinces", "5", ButtonId::ToolbarViewMode5),
             ("States", "6", ButtonId::ToolbarViewStateMap),
             ("Political", "7", ButtonId::ToolbarViewPoliticalMap),
+            ("Resources", "", ButtonId::ToolbarViewResourcesMap),
             ("Rivers", "", ButtonId::ToolbarViewToggleRiverOverlay),
             ("Adjacencies", "", ButtonId::ToolbarViewToggleAdjacencies),
             ("Province IDs", "9", ButtonId::ToolbarViewToggleProvinceIds),
@@ -2303,6 +2316,10 @@ mod tests {
             ButtonId::ToolbarViewPoliticalMap,
             Some(MapViewMode::Political)
         ));
+        assert!(map_view_button_active(
+            ButtonId::ToolbarViewResourcesMap,
+            Some(MapViewMode::Resources)
+        ));
         assert!(!map_view_button_active(
             ButtonId::ToolbarViewMode1,
             Some(MapViewMode::States)
@@ -2314,14 +2331,14 @@ mod tests {
     }
 
     #[test]
-    fn map_view_menu_contains_only_the_seven_distinct_views() {
+    fn map_view_menu_contains_the_eight_distinct_views() {
         let (_, entries, _, _) = WORKSPACE_DROPDOWNS
             .iter()
             .find(|(label, _, _, _)| *label == "Map View")
             .unwrap();
         let ids = entries.iter().map(|entry| entry.2).collect::<Vec<_>>();
 
-        assert_eq!(ids.len(), 7);
+        assert_eq!(ids.len(), 8);
         assert!(!ids.contains(&ButtonId::ToolbarViewProvinceMap));
         assert!(!ids.contains(&ButtonId::ToolbarViewMode6));
         assert_eq!(
@@ -2334,6 +2351,7 @@ mod tests {
                 ButtonId::ToolbarViewMode5,
                 ButtonId::ToolbarViewStateMap,
                 ButtonId::ToolbarViewPoliticalMap,
+                ButtonId::ToolbarViewResourcesMap,
             ]
         );
     }

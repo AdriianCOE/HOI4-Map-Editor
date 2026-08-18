@@ -53,6 +53,10 @@ use super::project::{
     save_confirmation_text, select_state_at_for as resolve_state_at_for, selection_overlay_for,
     state_save_eligibility, validate_project,
 };
+use super::resources::{
+    ResourceIconResolver, ResourceMapLabel, ResourceMapState, prepare_resource_labels,
+    resource_label_visible,
+};
 use super::{FontGlyphCache, colors};
 use crate::config::{Config, ImageOverlayProjectSettings, ProjectConfig};
 use crate::error::Error;
@@ -108,6 +112,9 @@ pub struct Canvas {
     political_flag_textures: BTreeMap<String, Texture>,
     political_adjacency_pairs: Vec<(u32, u32)>,
     political_language: String,
+    resource_labels: Vec<ResourceMapLabel>,
+    resource_icon_resolver: Option<ResourceIconResolver>,
+    resource_icon_textures: BTreeMap<String, Option<Texture>>,
     image_overlay_texture: Option<Texture>,
     image_overlay_status: String,
     state_boundaries: Vec<UOrd<Vector2<u32>>>,
@@ -711,6 +718,11 @@ impl Canvas {
             political_flag_textures: BTreeMap::new(),
             political_adjacency_pairs: adjacency_pairs.clone(),
             political_language: crate::localization::language().to_owned(),
+            resource_labels: Vec::new(),
+            resource_icon_resolver: project.as_ref().map(|project| {
+                ResourceIconResolver::load(&project.paths.root, base_game_root.as_deref())
+            }),
+            resource_icon_textures: BTreeMap::new(),
             image_overlay_texture,
             image_overlay_status,
             state_boundaries,
@@ -800,6 +812,7 @@ impl Canvas {
             camera,
         };
         canvas.refresh_political_texture();
+        canvas.refresh_resource_labels();
         Ok(canvas)
     }
 
@@ -3141,7 +3154,9 @@ impl Canvas {
             | MapBaseView::Terrain
             | MapBaseView::Continents
             | MapBaseView::Coastal => &self.texture,
-            MapBaseView::States => self.state_texture.as_ref().unwrap_or(&self.texture),
+            MapBaseView::States | MapBaseView::Resources => {
+                self.state_texture.as_ref().unwrap_or(&self.texture)
+            }
             MapBaseView::Political => self.political_texture.as_ref().unwrap_or(&self.texture),
         };
         graphics::image(texture, transform, gl);
@@ -3173,6 +3188,9 @@ impl Canvas {
         }
         if political_labels_visible_in_view(self.map_layers.base_view) {
             self.draw_political_country_labels(ctx, interface, glyph_cache, gl);
+        }
+        if self.map_layers.base_view == MapBaseView::Resources {
+            self.draw_resource_labels(ctx, interface, glyph_cache, gl);
         }
         if self.map_layers.show_adjacencies {
             self.draw_adjacencies(ctx, interface, cursor_pos, gl);
@@ -3881,7 +3899,9 @@ impl Canvas {
                 .preserved_id
                 .map_or_else(|| "X".to_owned(), |id| id.to_string());
             let color = match self.map_layers.base_view {
-                MapBaseView::States | MapBaseView::Political => colors::BLACK,
+                MapBaseView::States | MapBaseView::Political | MapBaseView::Resources => {
+                    colors::BLACK
+                }
                 MapBaseView::ProvinceColors => match province_data.kind {
                     ProvinceKind::Land | ProvinceKind::Lake => colors::BLACK,
                     ProvinceKind::Sea | ProvinceKind::Unknown => colors::WHITE,
@@ -4009,7 +4029,8 @@ impl Canvas {
                     MapBaseView::ProvinceTypes
                     | MapBaseView::Terrain
                     | MapBaseView::States
-                    | MapBaseView::Political => colors::BLACK,
+                    | MapBaseView::Political
+                    | MapBaseView::Resources => colors::BLACK,
                     MapBaseView::Continents => colors::WHITE,
                     MapBaseView::Coastal => colors::NEUTRAL,
                 };
@@ -6059,6 +6080,7 @@ impl Canvas {
         self.definition_catalog = Some(GameDefinitionCatalog::build(project, root.as_deref()));
         self.definition_base_game_root = root;
         self.reload_political_country_catalog();
+        self.reload_resource_icons();
         let catalog = self.definition_catalog.as_ref().unwrap();
         alerts.push(Ok(format!(
             "Definition catalog: {} categories, {} resources, {} buildings, {} tags",
@@ -6384,6 +6406,15 @@ impl Canvas {
             alerts.push(Err(
                 "States and Political views are available only for loaded state projects",
             ));
+        } else if map_view_mode == MapViewMode::Resources
+            && self
+                .project
+                .as_ref()
+                .is_some_and(|project| !project.state_load_is_complete())
+        {
+            alerts.push(Err(
+                "Resources view is unavailable because State loading is incomplete",
+            ));
         } else if map_view_mode != self.map_layers.base_view {
             match map_view_mode {
                 MapViewMode::ProvinceColors => {
@@ -6411,11 +6442,17 @@ impl Canvas {
                 }
                 MapViewMode::States => {}
                 MapViewMode::Political => self.refresh_political_texture(),
+                MapViewMode::Resources => self.refresh_resource_labels(),
             }
             self.map_layers.base_view = map_view_mode;
             self.workspace_views
                 .remember(self.workspace_mode, map_view_mode);
-            alerts.push(Ok(format!("Map View: {}", map_view_mode.label())));
+            let label = if map_view_mode == MapViewMode::Resources {
+                crate::localization::tr("view.resources").to_owned()
+            } else {
+                map_view_mode.label().to_owned()
+            };
+            alerts.push(Ok(format!("Map View: {label}")));
         } else {
             self.workspace_views
                 .remember(self.workspace_mode, map_view_mode);
@@ -7328,6 +7365,12 @@ impl Canvas {
             .as_ref()
             .ok_or_else(|| "The project state edit session is unavailable.".to_owned())?;
         let state_plan = plan_state_patches(project, edit);
+        if state_plan.files_len() != 0 && !project.state_load_is_complete() {
+            return Err(format!(
+                "Save Project blocked: {}",
+                project.state_load_failure_message()
+            ));
+        }
         let geometry_changed = self.history.has_geometry_changes(&self.bundle.map);
         let mut candidate_bundle = self.bundle.clone();
         let coastal_flags_recalculated =
@@ -9108,6 +9151,7 @@ impl Canvas {
             .unwrap_or_default();
         if changed.is_empty() {
             self.refresh_political_texture();
+            self.refresh_resource_labels();
             self.refresh_state_target_overlay();
             self.refresh_selected_province_boundaries();
             self.refresh_state_information();
@@ -9179,6 +9223,7 @@ impl Canvas {
         self.state_texture = Some(Texture::from_image(&state_view.image, &settings));
         self.state_boundaries = state_view.state_boundaries;
         self.refresh_political_texture();
+        self.refresh_resource_labels();
         if let Some(edit) = self.state_edit_session.as_mut() {
             edit.set_visual_timings(texture_time, boundary_time);
         }
@@ -9227,6 +9272,7 @@ impl Canvas {
         });
         self.state_boundaries.extend(region.state_boundaries);
         self.refresh_political_texture();
+        self.refresh_resource_labels();
 
         let texture_time = region.generated_in;
         let boundary_time = region.boundary_scan_in;
@@ -9426,6 +9472,125 @@ impl Canvas {
                 graphics::Image::new()
                     .rect([anchor[0] - width / 2.0, top, width, height])
                     .draw(flag, &graphics::DrawState::default(), ctx.transform, gl);
+            }
+        }
+    }
+
+    fn refresh_resource_labels(&mut self) {
+        let Some(project) = self.project.as_ref() else {
+            self.resource_labels.clear();
+            return;
+        };
+        if !project.state_load_is_complete() {
+            self.resource_labels.clear();
+            return;
+        }
+        let Some(edit) = self.state_edit_session.as_ref() else {
+            self.resource_labels.clear();
+            return;
+        };
+        let states = edit
+            .valid_state_ids()
+            .iter()
+            .filter_map(|state_id| {
+                let state = edit.state_data(*state_id)?;
+                Some(ResourceMapState {
+                    state_id: *state_id,
+                    provinces: state.provinces.iter().copied().collect(),
+                    resources: state.resources.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let provinces = self
+            .bundle
+            .map
+            .iter_province_data()
+            .filter_map(|(_, province)| {
+                Some(PoliticalProvince {
+                    id: province.preserved_id?,
+                    is_land: province.kind == ProvinceKind::Land,
+                    center: province.center_of_mass(),
+                    pixel_count: province.pixel_count,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.resource_labels =
+            prepare_resource_labels(&states, &provinces, &self.political_adjacency_pairs);
+    }
+
+    fn reload_resource_icons(&mut self) {
+        self.resource_icon_resolver = self.project.as_ref().map(|project| {
+            ResourceIconResolver::load(
+                &project.paths.root,
+                self.definition_base_game_root.as_deref(),
+            )
+        });
+        self.resource_icon_textures.clear();
+    }
+
+    fn resource_icon_texture(&mut self, key: &str) -> Option<&Texture> {
+        if !self.resource_icon_textures.contains_key(key) {
+            let texture = self
+                .resource_icon_resolver
+                .as_mut()
+                .and_then(|resolver| resolver.icon(key))
+                .map(|image| {
+                    Texture::from_image(image, &TextureSettings::new().mag(Filter::Nearest))
+                });
+            self.resource_icon_textures.insert(key.to_owned(), texture);
+        }
+        self.resource_icon_textures
+            .get(key)
+            .and_then(Option::as_ref)
+    }
+
+    fn draw_resource_labels(
+        &mut self,
+        ctx: Context,
+        interface: &Interface,
+        glyph_cache: &mut FontGlyphCache,
+        gl: &mut GlGraphics,
+    ) {
+        let zoom = self.camera.scale_factor();
+        let labels = self.resource_labels.clone();
+        for label in labels {
+            if !resource_label_visible(label.territory_pixels, zoom) {
+                continue;
+            }
+            let anchor = self.camera.compute_position(interface, label.anchor);
+            if !self.camera.within_viewport(interface, anchor) {
+                continue;
+            }
+            let scale = zoom.clamp(0.75, 1.25);
+            let icon_size = 16.0 * scale;
+            let row_height = icon_size + 3.0;
+            let top = anchor[1] - label.rows.len() as f64 * row_height / 2.0;
+            for (index, row) in label.rows.iter().enumerate() {
+                let y = top + index as f64 * row_height;
+                let text = format!("{} {}", row.key, row.amount);
+                if let Some(icon) = self.resource_icon_texture(&row.key) {
+                    graphics::Image::new()
+                        .rect([anchor[0] - icon_size / 2.0, y, icon_size, icon_size])
+                        .draw(icon, &graphics::DrawState::default(), ctx.transform, gl);
+                    let caption = format!("{}", row.amount);
+                    draw_resource_caption(
+                        ctx,
+                        glyph_cache,
+                        gl,
+                        &caption,
+                        [anchor[0] + icon_size / 2.0 + 2.0, y + icon_size - 2.0],
+                        scale,
+                    );
+                } else {
+                    draw_resource_caption(
+                        ctx,
+                        glyph_cache,
+                        gl,
+                        &text,
+                        [anchor[0] - 18.0 * scale, y + icon_size - 2.0],
+                        scale,
+                    );
+                }
             }
         }
     }
@@ -12041,6 +12206,35 @@ fn active_province_information(
         edit_status,
         diagnostics.join(" | "),
     ))
+}
+
+fn draw_resource_caption(
+    ctx: Context,
+    glyph_cache: &mut FontGlyphCache,
+    gl: &mut GlGraphics,
+    text: &str,
+    position: [f64; 2],
+    scale: f64,
+) {
+    let font_size = (FONT_SIZE as f64 * scale).round() as u32;
+    graphics::text(
+        colors::BLACK,
+        font_size,
+        text,
+        glyph_cache,
+        ctx.transform.trans(position[0] + 1.0, position[1] + 1.0),
+        gl,
+    )
+    .expect("unable to draw resource label shadow");
+    graphics::text(
+        colors::WHITE,
+        font_size,
+        text,
+        glyph_cache,
+        ctx.transform.trans_pos(position),
+        gl,
+    )
+    .expect("unable to draw resource label");
 }
 
 impl fmt::Debug for Canvas {

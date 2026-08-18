@@ -8,6 +8,7 @@ pub mod map;
 pub mod map_layers;
 pub mod political;
 pub mod project;
+pub mod resources;
 pub mod state;
 
 use glutin::window::CursorIcon;
@@ -1513,6 +1514,9 @@ impl App {
             (Some(_), ToolbarViewPoliticalMap) => {
                 self.action_change_map_view_mode(MapViewMode::Political)
             }
+            (Some(_), ToolbarViewResourcesMap) => {
+                self.action_change_map_view_mode(MapViewMode::Resources)
+            }
             (Some(canvas), ToolbarViewToggleAdjacencies | SidebarOptionAdjacencies) => {
                 canvas.toggle_adjacencies_overlay()
             }
@@ -1572,7 +1576,7 @@ impl App {
             (Some(_), ToolbarViewChooseBaseGameDefinitions) => unreachable!(),
             (Some(canvas), ToolbarViewResetZoom) => canvas.camera.reset(),
             (_, ToolbarHelpAbout) => {
-                show_about_dialog();
+                self.handle_result_none(show_about_dialog());
             }
             (_, ToolbarHelpCopyVersion) => {
                 let summary = format!(
@@ -2123,6 +2127,7 @@ fn map_view_preference(mode: MapViewMode) -> &'static str {
         MapViewMode::Coastal => "coastal",
         MapViewMode::States => "states",
         MapViewMode::Political => "political",
+        MapViewMode::Resources => "resources",
     }
 }
 
@@ -2135,6 +2140,7 @@ fn map_view_from_preference(value: &str) -> Option<MapViewMode> {
         "coastal" => Some(MapViewMode::Coastal),
         "states" => Some(MapViewMode::States),
         "political" => Some(MapViewMode::Political),
+        "resources" => Some(MapViewMode::Resources),
         _ => None,
     }
 }
@@ -2319,19 +2325,32 @@ pub struct InterfaceDrawContext {
 
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 
-fn show_about_dialog() {
-    MessageDialog::new()
+const KOFI_URL: &str = "https://ko-fi.com/adriiancoe";
+
+fn about_support_url() -> &'static str {
+    KOFI_URL
+}
+
+fn show_about_dialog() -> Result<(), Error> {
+    let support = MessageDialog::new()
         .set_level(MessageLevel::Info)
         .set_title(crate::localization::tr("about.title"))
         .set_description(format!(
-            "HOI4 Map Editor · Version {}\n{}\n\n{}\n\n{}\n\nMIT License\nhttps://github.com/AdriianCOE/HOI4-Map-Editor",
+            "HOI4 Map Editor · Version {}\n{}\n\n{}\n\n{}\n\n{}\n{}\n\n{}\n\nMIT License\nhttps://github.com/AdriianCOE/HOI4-Map-Editor",
             crate::APP_VERSION,
             crate::localization::tr("about.subtitle"),
             crate::localization::tr("about.credits"),
             crate::localization::tr("about.disclaimer"),
+            crate::localization::tr("about.support"),
+            crate::localization::tr("about.support_action"),
+            crate::localization::tr("about.support_hint"),
         ))
-        .set_buttons(MessageButtons::Ok)
+        .set_buttons(MessageButtons::YesNo)
         .show();
+    if support == MessageDialogResult::Yes {
+        open_url_default(about_support_url())?;
+    }
+    Ok(())
 }
 
 fn file_dialog_image_overlay() -> Option<PathBuf> {
@@ -2660,6 +2679,10 @@ pub fn open_file_default(path: impl AsRef<Path>) -> Result<(), Error> {
     crate::platform::desktop::open_file(&path).map_err(|error| Error::from(error.to_string()))
 }
 
+pub fn open_url_default(url: &str) -> Result<(), Error> {
+    crate::platform::desktop::open_url(url).map_err(|error| Error::from(error.to_string()))
+}
+
 pub fn copy_text_to_clipboard(text: &str) -> Result<(), Error> {
     crate::platform::clipboard::copy_to_clipboard(text)
         .map_err(|error| Error::from(error.to_string()))
@@ -2667,7 +2690,10 @@ pub fn copy_text_to_clipboard(text: &str) -> Result<(), Error> {
 
 #[cfg(test)]
 mod source_open_tests {
-    use super::{PreferencesDialog, map_view_from_preference, open_source_with, preference_rows};
+    use super::{
+        PreferencesDialog, about_support_url, map_view_from_preference, open_source_with,
+        preference_rows,
+    };
     use crate::app::project::MapViewMode;
     use crate::config::{GlobalConfig, ProjectConfig};
     use std::cell::Cell;
@@ -2682,6 +2708,11 @@ mod source_open_tests {
         })
         .unwrap();
         assert!(called.get());
+    }
+
+    #[test]
+    fn about_support_action_uses_the_documented_kofi_destination() {
+        assert_eq!(about_support_url(), "https://ko-fi.com/adriiancoe");
     }
 
     #[test]

@@ -65,6 +65,7 @@ Switch between:
 - Coastal Provinces
 - States
 - Political
+- Resources
 
 Political View resolves country colors, localized country names, and available
 normal flags from the user's mod/base-game installation. It remains read-only:
@@ -75,6 +76,11 @@ its per-country definitions, then the equivalent base-game sources. The
 `color` entry is used (never `color_ui`). Localization scans every
 `localisation/<language>/**/*.yml` file; it prefers `TAG`, then the country's
 initial ruling-ideology key, and uses the raw tag only as a final fallback.
+
+Resources View is read-only and shows the current working State resource
+quantities, including unsaved edits. Icons are resolved at runtime from the
+mod/base-game resource strip; missing or custom icons fall back to text. No
+Paradox assets are distributed with the editor.
 
 Optional overlays include:
 
@@ -229,7 +235,7 @@ state.
 | `Ctrl+2` | States workspace |
 | `Ctrl+Tab` | Switch workspace |
 | `Ctrl+F` | Search |
-| `1`–`7` | Change Map View |
+| `1`–`7` | Change Map View (Resources is available from Map View) |
 | `B` | Brush |
 | `F` | Fill |
 | `L` | Lasso |

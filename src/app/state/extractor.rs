@@ -48,7 +48,10 @@ impl<'a> Extractor<'a> {
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                entry.key_text() == Some("state") && entry.value.as_block().is_some()
+                entry
+                    .key_text()
+                    .is_some_and(|key| key.eq_ignore_ascii_case("state"))
+                    && entry.value.as_block().is_some()
             })
             .map(|(index, _)| index)
             .collect();
@@ -617,7 +620,12 @@ fn parse_u64(text: &str) -> Option<u64> {
 }
 
 fn parse_i64(text: &str) -> Option<i64> {
-    text.parse::<i64>().ok()
+    text.parse::<i64>().ok().or_else(|| {
+        let (whole, fraction) = text.split_once('.')?;
+        (!fraction.is_empty() && fraction.bytes().all(|byte| byte == b'0'))
+            .then(|| whole.parse::<i64>().ok())
+            .flatten()
+    })
 }
 
 fn parse_f64(text: &str) -> Option<f64> {
@@ -712,7 +720,7 @@ mod tests {
     fn tolerates_custom_fields_and_accumulates_repeats() {
         let result = extract_state(&parse_text(
             "custom.txt",
-            "state={ id=1 name=a state_category=city provinces={ 1 } resources={ steel=2 steel=3 } custom=yes history={ owner=TAG add_core_of=TAG add_core_of=ABC buildings={ arms_factory=1 arms_factory=2 1={ bunker=1 bunker=2 } } } }",
+            "state={ id=1 name=a state_category=city provinces={ 1 } resources={ steel=2.000 steel=3 } custom=yes history={ owner=TAG add_core_of=TAG add_core_of=ABC buildings={ arms_factory=1 arms_factory=2 1={ bunker=1 bunker=2 } } } }",
         ));
 
         let state = result.data.expect("state data");

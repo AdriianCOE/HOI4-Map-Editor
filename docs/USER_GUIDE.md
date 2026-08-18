@@ -12,6 +12,11 @@ A Workspace chooses what you edit. A Map View changes only the rendered base
 map. Borders, labels, rivers, adjacencies, and Image Overlay are independent
 visual layers and never mark a project as modified.
 
+**Resources** is a read-only Map View. It visualizes the current working State
+resource quantities, so inspector edits appear before Save Project. Resource
+icons are loaded from the local mod/base-game installation; unresolved or
+custom icons use a textual fallback.
+
 ## Province workspace
 
 - **Save Project** reviews and saves pending province-map and state changes

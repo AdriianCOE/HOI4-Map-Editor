@@ -597,6 +597,16 @@ pub fn execute_project_save(
         patch_plan.created_files.len(),
         patch_plan.removed_files.len(),
     );
+    if plan.dirty().state_files != 0 && !project.state_load_is_complete() {
+        return bare_report(
+            StateSaveOutcome::FailedBeforeCommit,
+            counts,
+            format!(
+                "State save blocked: {}",
+                project.state_load_failure_message()
+            ),
+        );
+    }
     let authorization = match authorize_project_save_plan(plan, report, allow_review_required) {
         Ok(authorization) => authorization,
         Err(error) => return bare_report(StateSaveOutcome::FailedBeforeCommit, counts, error),
@@ -2757,7 +2767,8 @@ mod tests {
     };
     use crate::app::project::{
         EditableProvinceData, EditableStateProperties, ProjectPaths, RoundTripCancellation,
-        RoundTripValidationPolicy, RoundTripValidator, StateRemovalPolicy, plan_state_patches,
+        RoundTripValidationPolicy, RoundTripValidator, StateEditSession, StateRemovalPolicy,
+        plan_state_patches,
     };
     use crate::config::Config;
     use crate::util::files::Location;
@@ -2791,6 +2802,56 @@ mod tests {
         assert!(fingerprint.matches(b"before"));
         assert!(!fingerprint.matches(b"after"));
         assert_ne!(fingerprint.content_hash, 0);
+    }
+
+    #[test]
+    fn project_save_refuses_state_writes_after_an_incomplete_state_load() {
+        let (root, mut project, _) = test_project("incomplete-state-load");
+        let original = fs::read(root.join("history/states/1-Test.txt")).unwrap();
+        fs::write(root.join("history/states/broken.txt"), "state={id=").unwrap();
+        project.load_states(&BTreeSet::from([1]), &BTreeSet::from([1]));
+        assert!(!project.state_load_is_complete());
+
+        let bundle = Bundle::load(
+            &Location::Directory(project.paths.map_directory.clone()),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let mut edit = StateEditSession::new(&project, &bundle.map);
+        change_manpower(&project, &mut edit, 2);
+        let state_plan = plan_state_patches(&project, &edit);
+        let validation = RoundTripValidator::default().validate_combined(
+            &project,
+            &edit,
+            &state_plan,
+            None,
+            |_| Ok(()),
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        let plan =
+            ProjectSavePlan::new(&project, edit.revision(), None, Some(&state_plan)).unwrap();
+        let report = execute_project_save(
+            &project,
+            &edit,
+            &plan,
+            &validation,
+            false,
+            &StateSaveCancellation::default(),
+            StateSaveFault::None,
+            |_, _, _| {},
+        );
+
+        assert_eq!(report.outcome, StateSaveOutcome::FailedBeforeCommit);
+        assert!(report.error.unwrap().contains("broken.txt"));
+        assert_eq!(
+            fs::read(root.join("history/states/1-Test.txt")).unwrap(),
+            original
+        );
+        cleanup(&root);
     }
 
     #[test]

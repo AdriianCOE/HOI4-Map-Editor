@@ -20,6 +20,13 @@ impl DesktopCommand {
             arguments: vec![path.as_os_str().to_owned()],
         }
     }
+
+    fn for_argument(program: &'static str, argument: impl Into<OsString>) -> Self {
+        Self {
+            program,
+            arguments: vec![argument.into()],
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -51,6 +58,10 @@ pub fn open_font_license(path: &Path) -> Result<(), DesktopError> {
     execute(font_license_command(Platform::current(), path)?)
 }
 
+pub fn open_url(url: &str) -> Result<(), DesktopError> {
+    execute(open_url_command(Platform::current(), url)?)
+}
+
 pub fn open_file_command(platform: Platform, path: &Path) -> Result<DesktopCommand, DesktopError> {
     command_for_path(platform, path)
 }
@@ -60,6 +71,16 @@ pub fn open_folder_command(
     path: &Path,
 ) -> Result<DesktopCommand, DesktopError> {
     command_for_path(platform, path)
+}
+
+pub fn open_url_command(platform: Platform, url: &str) -> Result<DesktopCommand, DesktopError> {
+    let program = match platform {
+        Platform::Windows => "explorer",
+        Platform::MacOS => "open",
+        Platform::Linux => "xdg-open",
+        Platform::Other => return Err(DesktopError::Unsupported),
+    };
+    Ok(DesktopCommand::for_argument(program, url))
 }
 
 pub fn font_license_command(
@@ -114,6 +135,7 @@ fn execute_with(
 mod tests {
     use super::{
         DesktopError, execute_with, font_license_command, open_file_command, open_folder_command,
+        open_url_command,
     };
     use crate::platform::Platform;
     use std::io;
@@ -140,6 +162,13 @@ mod tests {
                 .program,
             "notepad"
         );
+    }
+
+    #[test]
+    fn url_opener_uses_the_platform_desktop_path_without_network_io() {
+        let command = open_url_command(Platform::Linux, "https://ko-fi.com/adriiancoe").unwrap();
+        assert_eq!(command.program, "xdg-open");
+        assert_eq!(command.arguments, ["https://ko-fi.com/adriiancoe"]);
     }
 
     #[test]

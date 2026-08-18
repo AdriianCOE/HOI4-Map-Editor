@@ -17,6 +17,7 @@ pub enum MapBaseView {
     Coastal,
     States,
     Political,
+    Resources,
 }
 
 impl MapBaseView {
@@ -42,11 +43,12 @@ impl MapBaseView {
             Self::Coastal => "Coastal Provinces",
             Self::States => "States",
             Self::Political => "Political",
+            Self::Resources => "Resources",
         }
     }
 
     pub const fn requires_state_history(self) -> bool {
-        matches!(self, Self::States | Self::Political)
+        matches!(self, Self::States | Self::Political | Self::Resources)
     }
 
     pub const fn is_province_view(self) -> bool {
@@ -332,6 +334,12 @@ mod tests {
         );
         assert_eq!(WorkspaceMode::Provinces.next(), WorkspaceMode::States);
         assert_eq!(WorkspaceMode::States.next(), WorkspaceMode::Provinces);
+    }
+
+    #[test]
+    fn resources_requires_loaded_state_history_without_claiming_a_new_shortcut() {
+        assert!(MapBaseView::Resources.requires_state_history());
+        assert_eq!(MapBaseView::from_canonical_shortcut('8'), None);
     }
 
     #[test]

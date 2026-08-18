@@ -118,6 +118,8 @@ fn load_document(path: PathBuf, batch: &mut StateLoadBatch) -> StateDocument {
 #[cfg(test)]
 mod tests {
     use super::load_state_documents;
+    use crate::app::project::index_state_documents;
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -204,5 +206,31 @@ mod tests {
         assert!(batch.documents[0].exact_utf8);
         assert_eq!(batch.documents[1].original_bytes(), invalid);
         assert!(!batch.documents[1].exact_utf8);
+    }
+
+    #[test]
+    fn loads_high_sparse_ids_from_content_with_unusual_filenames() {
+        let states = TempStates::new("high-sparse-ids");
+        let state_ids = [127, 128, 143, 200, 255, 256, 500, 1000];
+        for state_id in state_ids {
+            fs::write(
+                states.path().join(format!("custom-{state_id}.txt")),
+                format!(
+                    "# custom mod field\nState={{id={state_id} name=STATE_{state_id} state_category=city provinces={{{state_id}}} unknown_field={{ value=yes }} history={{owner=TAG}}}}"
+                ),
+            )
+            .unwrap();
+        }
+
+        let batch = load_state_documents(states.path());
+        let province_ids = state_ids.into_iter().collect::<BTreeSet<_>>();
+        let indexes = index_state_documents(&batch.documents, &province_ids, &province_ids);
+
+        assert_eq!(batch.files_found, state_ids.len());
+        assert_eq!(indexes.states_by_id.len(), state_ids.len());
+        for state_id in state_ids {
+            assert!(indexes.states_by_id.contains_key(&state_id));
+            assert_eq!(indexes.state_by_province.get(&state_id), Some(&state_id));
+        }
     }
 }

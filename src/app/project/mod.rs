@@ -100,6 +100,7 @@ pub struct Hoi4Project {
 
 #[derive(Debug, Clone, Default)]
 pub struct StateLoadSummary {
+    pub report: StateLoadReport,
     pub files_found: usize,
     pub files_read: usize,
     pub documents_parsed: usize,
@@ -116,6 +117,45 @@ pub struct StateLoadSummary {
     pub state_loading_ms: u128,
     pub state_texture_generation_ms: u128,
     pub state_boundary_generation_ms: u128,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StateLoadReport {
+    pub files_seen: usize,
+    pub files_read: usize,
+    pub states_loaded: usize,
+    pub files_failed: Vec<StateLoadFailure>,
+    pub duplicate_ids: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateLoadFailure {
+    pub path: std::path::PathBuf,
+    pub stage: StateLoadFailureStage,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateLoadFailureStage {
+    Discovery,
+    Read,
+    Parse,
+    StateBlock,
+    StateId,
+    Index,
+}
+
+impl StateLoadFailureStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery",
+            Self::Read => "read",
+            Self::Parse => "parse",
+            Self::StateBlock => "state block",
+            Self::StateId => "state id",
+            Self::Index => "index",
+        }
+    }
 }
 
 impl Hoi4Project {
@@ -206,6 +246,27 @@ impl Hoi4Project {
             .and_then(|&index| self.states.get(index))
     }
 
+    pub fn state_load_is_complete(&self) -> bool {
+        self.load_summary.report.files_failed.is_empty()
+    }
+
+    pub fn state_load_failure_message(&self) -> String {
+        let failures = &self.load_summary.report.files_failed;
+        let mut message = format!(
+            "{} State file(s) could not be loaded safely. Open Validate Project for details.",
+            failures.len()
+        );
+        for failure in failures {
+            message.push_str(&format!(
+                "\n{}: {}: {}",
+                failure.path.display(),
+                failure.stage.label(),
+                failure.reason
+            ));
+        }
+        message
+    }
+
     pub fn diagnostics_for_province(
         &self,
         province_id: u32,
@@ -249,6 +310,7 @@ impl StateLoadSummary {
         };
 
         Self {
+            report: StateLoadReport::from_load(batch, indexes),
             files_found: batch.files_found,
             files_read: batch.files_read,
             documents_parsed: batch.documents.len(),
@@ -278,9 +340,93 @@ impl StateLoadSummary {
     }
 }
 
+impl StateLoadReport {
+    fn from_load(batch: &StateLoadBatch, indexes: &StateIndexes) -> Self {
+        let indexed_documents = indexes
+            .states_by_id
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut files_failed = batch
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+            .filter_map(|diagnostic| {
+                diagnostic.path.clone().map(|path| StateLoadFailure {
+                    path,
+                    stage: StateLoadFailureStage::Discovery,
+                    reason: diagnostic.message.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for (document_index, document) in batch.documents.iter().enumerate() {
+            let document_diagnostic = document
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error);
+            if indexed_documents.contains(&document_index) && document_diagnostic.is_none() {
+                continue;
+            }
+            let diagnostic = document_diagnostic.or_else(|| {
+                indexes.diagnostics.iter().find(|diagnostic| {
+                    diagnostic.severity == DiagnosticSeverity::Error
+                        && diagnostic.path.as_ref() == Some(&document.path)
+                })
+            });
+            files_failed.push(StateLoadFailure {
+                path: document.path.clone(),
+                stage: failure_stage(document, diagnostic.map(|diagnostic| diagnostic.kind)),
+                reason: diagnostic.map_or_else(
+                    || "state was not inserted into the State index".to_owned(),
+                    |diagnostic| diagnostic.message.clone(),
+                ),
+            });
+        }
+        files_failed.sort_by(|left, right| left.path.cmp(&right.path));
+        files_failed.dedup_by(|left, right| left.path == right.path);
+        Self {
+            files_seen: batch.files_found,
+            files_read: batch.files_read,
+            states_loaded: indexes.indexed_state_count,
+            duplicate_ids: indexes
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.kind == ProjectDiagnosticKind::DuplicateStateId)
+                .count(),
+            files_failed,
+        }
+    }
+}
+
+fn failure_stage(
+    document: &StateDocument,
+    kind: Option<ProjectDiagnosticKind>,
+) -> StateLoadFailureStage {
+    if !document.exact_utf8 && document.original_bytes().is_empty() {
+        return StateLoadFailureStage::Read;
+    }
+    match kind {
+        Some(ProjectDiagnosticKind::InvalidStateFile) => StateLoadFailureStage::Read,
+        Some(ProjectDiagnosticKind::SyntaxError | ProjectDiagnosticKind::EmptyStateFile) => {
+            StateLoadFailureStage::Parse
+        }
+        Some(
+            ProjectDiagnosticKind::MissingStateBlock | ProjectDiagnosticKind::MultipleStateBlocks,
+        ) => StateLoadFailureStage::StateBlock,
+        Some(
+            ProjectDiagnosticKind::MissingStateId
+            | ProjectDiagnosticKind::InvalidStateId
+            | ProjectDiagnosticKind::ZeroStateId,
+        ) => StateLoadFailureStage::StateId,
+        _ => StateLoadFailureStage::Index,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Hoi4Project, ProjectPaths};
+    use super::{Hoi4Project, ProjectPaths, StateLoadFailureStage};
+    use crate::app::state::load_state_documents;
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -326,6 +472,20 @@ mod tests {
 
         assert_eq!(project.load_summary.files_found, 2);
         assert_eq!(project.load_summary.valid_states, 1);
+        assert_eq!(project.load_summary.report.files_seen, 2);
+        assert_eq!(project.load_summary.report.states_loaded, 1);
+        assert_eq!(project.load_summary.report.files_failed.len(), 1);
+        assert_eq!(
+            project.load_summary.report.files_failed[0].stage,
+            StateLoadFailureStage::Parse
+        );
+        assert!(
+            project.load_summary.report.files_failed[0]
+                .path
+                .ends_with("invalid.txt")
+        );
+        assert!(!project.state_load_is_complete());
+        assert!(project.state_load_failure_message().contains("invalid.txt"));
         assert_eq!(project.load_summary.assigned_provinces, 2);
         assert_eq!(project.load_summary.land_provinces_without_state, 1);
         assert_eq!(project.unassigned_land_provinces, BTreeSet::from([3]));
@@ -335,5 +495,79 @@ mod tests {
                 .contains("- indexed states: 1")
         );
         assert_eq!(fs::read_to_string(state_path).unwrap(), original);
+    }
+
+    #[test]
+    fn reports_duplicate_state_file_without_losing_the_first_state() {
+        let temp = TempProject::new("duplicate");
+        fs::write(
+            temp.path().join("history/states/first.txt"),
+            "state={id=143 provinces={1}}",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("history/states/second.txt"),
+            "state={id=143 provinces={2}}",
+        )
+        .unwrap();
+
+        let mut project = Hoi4Project::new(ProjectPaths::discover(temp.path()).unwrap());
+        project.load_states(&BTreeSet::from([1, 2]), &BTreeSet::from([1, 2]));
+
+        assert_eq!(project.states_by_id.len(), 1);
+        assert_eq!(project.state_by_province.get(&1), Some(&143));
+        assert_eq!(project.state_by_province.get(&2), None);
+        assert_eq!(project.load_summary.report.duplicate_ids, 1);
+        assert_eq!(project.load_summary.report.files_failed.len(), 1);
+        assert_eq!(
+            project.load_summary.report.files_failed[0].stage,
+            StateLoadFailureStage::Index
+        );
+        assert!(
+            project.load_summary.report.files_failed[0]
+                .path
+                .ends_with("second.txt")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires HOI4_STATE_EDITOR_AZARYA_ROOT"]
+    fn azarya_state_loader_smoke() {
+        let root = std::env::var_os("HOI4_STATE_EDITOR_AZARYA_ROOT")
+            .map(PathBuf::from)
+            .expect("set HOI4_STATE_EDITOR_AZARYA_ROOT to the Azarya mod root");
+        let paths = ProjectPaths::discover(&root).expect("discover Azarya project paths");
+        let state_ids = load_state_documents(&paths.states_directory)
+            .documents
+            .iter()
+            .filter_map(|document| document.data.as_ref())
+            .flat_map(|state| state.provinces.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let mut project = Hoi4Project::new(paths);
+        project.load_states(&state_ids, &state_ids);
+
+        println!(
+            "Azarya States: files={}, loaded={}, failed={}",
+            project.load_summary.report.files_seen,
+            project.load_summary.report.states_loaded,
+            project.load_summary.report.files_failed.len()
+        );
+        for failure in &project.load_summary.report.files_failed {
+            println!(
+                "FAILED {} [{}]: {}",
+                failure.path.display(),
+                failure.stage.label(),
+                failure.reason
+            );
+        }
+        for state_id in [143, 200] {
+            let state = project
+                .state_document(state_id)
+                .expect("Azarya State must load");
+            let data = state.data.as_ref().expect("loaded State data");
+            assert!(data.provinces.iter().all(|province_id| {
+                project.state_by_province.get(province_id) == Some(&state_id)
+            }));
+        }
     }
 }

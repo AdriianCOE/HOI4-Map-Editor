@@ -445,6 +445,42 @@ fn anchor_for_component(
         .map(|province| province.center)
 }
 
+/// Stable largest-connected-territory anchor shared by non-political overlays.
+pub(crate) fn territory_anchor(
+    owned: &BTreeSet<u32>,
+    provinces: &[PoliticalProvince],
+    adjacency_pairs: &[(u32, u32)],
+) -> Option<([f64; 2], u64)> {
+    let provinces_by_id = provinces
+        .iter()
+        .copied()
+        .map(|province| (province.id, province))
+        .collect::<BTreeMap<_, _>>();
+    let owned = owned
+        .iter()
+        .copied()
+        .filter(|id| {
+            provinces_by_id
+                .get(id)
+                .is_some_and(|province| province.is_land)
+        })
+        .collect::<BTreeSet<_>>();
+    let mut neighbors = BTreeMap::<u32, BTreeSet<u32>>::new();
+    for &(left, right) in adjacency_pairs {
+        if left != right {
+            neighbors.entry(left).or_default().insert(right);
+            neighbors.entry(right).or_default().insert(left);
+        }
+    }
+    let component = largest_component(&owned, &neighbors, &provinces_by_id)?;
+    let pixels = component
+        .iter()
+        .filter_map(|id| provinces_by_id.get(id))
+        .map(|province| province.pixel_count)
+        .sum();
+    Some((anchor_for_component(&component, &provinces_by_id)?, pixels))
+}
+
 fn squared_distance(left: [f64; 2], right: [f64; 2]) -> f64 {
     let dx = left[0] - right[0];
     let dy = left[1] - right[1];
