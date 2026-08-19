@@ -35,8 +35,59 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const APPNAME: &str = concat!("HOI4 Map Editor v", env!("CARGO_PKG_VERSION"));
 const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app-icon-256.png");
 
+#[cfg(windows)]
+const APP_USER_MODEL_ID: &[u16] = &[
+    b'c' as u16,
+    b'o' as u16,
+    b'm' as u16,
+    b'.' as u16,
+    b'a' as u16,
+    b'd' as u16,
+    b'r' as u16,
+    b'i' as u16,
+    b'i' as u16,
+    b'a' as u16,
+    b'n' as u16,
+    b'c' as u16,
+    b'o' as u16,
+    b'e' as u16,
+    b'.' as u16,
+    b'h' as u16,
+    b'o' as u16,
+    b'i' as u16,
+    b'4' as u16,
+    b'm' as u16,
+    b'a' as u16,
+    b'p' as u16,
+    b'e' as u16,
+    b'd' as u16,
+    b'i' as u16,
+    b't' as u16,
+    b'o' as u16,
+    b'r' as u16,
+    0,
+];
+
+#[cfg(windows)]
+fn configure_windows_identity() {
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn SetCurrentProcessExplicitAppUserModelID(app_id: *const u16) -> i32;
+    }
+
+    // This identity makes Windows associate the running window with this executable's
+    // embedded icon instead of a cached fallback identity from the legacy editor.
+    unsafe {
+        let _ = SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID.as_ptr());
+    }
+}
+
+#[cfg(not(windows))]
+fn configure_windows_identity() {}
+
 fn main() {
     install_handler();
+    configure_windows_identity();
 
     let root = root_dir().expect("unable to find root dir");
     env::set_current_dir(root).expect("unable to set root dir");

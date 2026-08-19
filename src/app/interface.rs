@@ -648,7 +648,18 @@ impl Interface {
                 }
                 _ => true,
             };
-            button.draw(ctx, pos, active, enabled, glyph_cache, gl);
+            if matches!(
+                button.id,
+                ButtonId::WorkspaceReviewChanges | ButtonId::WorkspaceApplyToMod
+            ) {
+                // These project actions reserve the top-right affordance even
+                // before a project session is available. The old disabled
+                // palette was visually indistinguishable from the toolbar,
+                // making Save Project and View Changes appear to disappear.
+                button.base.draw(ctx, false, active, glyph_cache, gl);
+            } else {
+                button.draw(ctx, pos, active, enabled, glyph_cache, gl);
+            }
         }
         for dropdown in &self.workspace_dropdowns {
             self.draw_toolbar_button(dropdown, ctx, ictx, pos, glyph_cache, gl);
@@ -1607,6 +1618,7 @@ pub enum ButtonId {
     ToolbarViewStateMap,
     ToolbarViewPoliticalMap,
     ToolbarViewResourcesMap,
+    ToolbarViewToggleResourcesOverlay,
     ToolbarViewToggleAdjacencies,
     ToolbarViewToggleImageOverlay,
     ToolbarViewImageOverlayPanel,
@@ -1665,14 +1677,10 @@ fn map_view_button_active(id: ButtonId, view: Option<MapViewMode>) -> bool {
                 ButtonId::ToolbarViewPoliticalMap,
                 Some(MapViewMode::Political)
             )
-            | (
-                ButtonId::ToolbarViewResourcesMap,
-                Some(MapViewMode::Resources)
-            )
     )
 }
 
-fn overlay_button_active(id: ButtonId, enabled: [bool; 6]) -> bool {
+fn overlay_button_active(id: ButtonId, enabled: [bool; 7]) -> bool {
     let index = match id {
         ButtonId::ToolbarViewToggleRiverOverlay => 0,
         ButtonId::ToolbarViewToggleAdjacencies => 1,
@@ -1680,12 +1688,13 @@ fn overlay_button_active(id: ButtonId, enabled: [bool; 6]) -> bool {
         ButtonId::ToolbarViewToggleProvinceBoundaries => 3,
         ButtonId::ToolbarViewToggleStateBoundaries => 4,
         ButtonId::ToolbarViewToggleImageOverlay | ButtonId::ToolbarImageToggleVisible => 5,
+        ButtonId::ToolbarViewToggleResourcesOverlay => 6,
         _ => return false,
     };
     enabled[index]
 }
 
-fn overlay_summary(enabled: [bool; 6]) -> String {
+fn overlay_summary(enabled: [bool; 7]) -> String {
     let labels = [
         "Rivers",
         "Adjacencies",
@@ -1693,6 +1702,7 @@ fn overlay_summary(enabled: [bool; 6]) -> String {
         "Province Borders",
         "State Borders",
         "Image",
+        "Resources",
     ];
     let active = labels
         .into_iter()
@@ -1902,6 +1912,9 @@ impl StateActionAvailability {
             ToolbarViewStateMap | ToolbarViewPoliticalMap | ToolbarViewResourcesMap => {
                 self.state_view
             }
+            // Resources are a layer: once a State project is loaded they can be
+            // inspected over any current map view, including Provinces.
+            ToolbarViewToggleResourcesOverlay => self.project_loaded,
             _ => true,
         }
     }
@@ -1930,7 +1943,6 @@ const WORKSPACE_DROPDOWNS: &[(&str, &[(&str, &str, ButtonId)], bool, bool)] = &[
             ("Coastal Provinces", "5", ButtonId::ToolbarViewMode5),
             ("States", "6", ButtonId::ToolbarViewStateMap),
             ("Political", "7", ButtonId::ToolbarViewPoliticalMap),
-            ("Resources", "", ButtonId::ToolbarViewResourcesMap),
         ],
         true,
         false,
@@ -1951,6 +1963,7 @@ const WORKSPACE_DROPDOWNS: &[(&str, &[(&str, &str, ButtonId)], bool, bool)] = &[
                 "",
                 ButtonId::ToolbarViewToggleStateBoundaries,
             ),
+            ("Resources", "", ButtonId::ToolbarViewToggleResourcesOverlay),
         ],
         false,
         true,
@@ -2093,7 +2106,7 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
             ("Coastal Provinces", "5", ButtonId::ToolbarViewMode5),
             ("States", "6", ButtonId::ToolbarViewStateMap),
             ("Political", "7", ButtonId::ToolbarViewPoliticalMap),
-            ("Resources", "", ButtonId::ToolbarViewResourcesMap),
+            ("Resources", "", ButtonId::ToolbarViewToggleResourcesOverlay),
             ("Rivers", "", ButtonId::ToolbarViewToggleRiverOverlay),
             ("Adjacencies", "", ButtonId::ToolbarViewToggleAdjacencies),
             ("Province IDs", "9", ButtonId::ToolbarViewToggleProvinceIds),
@@ -2289,8 +2302,8 @@ mod tests {
             view_mode: Some(ViewMode::Color),
             selected_tool: Some(0),
             state_tool: None,
-            enabled_options: [false; 6],
-            available_options: [true; 6],
+            enabled_options: [false; 7],
+            available_options: [true; 7],
             states_available: true,
             state_actions: StateActionAvailability {
                 state_view,
@@ -2316,10 +2329,6 @@ mod tests {
             ButtonId::ToolbarViewPoliticalMap,
             Some(MapViewMode::Political)
         ));
-        assert!(map_view_button_active(
-            ButtonId::ToolbarViewResourcesMap,
-            Some(MapViewMode::Resources)
-        ));
         assert!(!map_view_button_active(
             ButtonId::ToolbarViewMode1,
             Some(MapViewMode::States)
@@ -2331,14 +2340,14 @@ mod tests {
     }
 
     #[test]
-    fn map_view_menu_contains_the_eight_distinct_views() {
+    fn map_view_menu_contains_the_seven_base_views() {
         let (_, entries, _, _) = WORKSPACE_DROPDOWNS
             .iter()
             .find(|(label, _, _, _)| *label == "Map View")
             .unwrap();
         let ids = entries.iter().map(|entry| entry.2).collect::<Vec<_>>();
 
-        assert_eq!(ids.len(), 8);
+        assert_eq!(ids.len(), 7);
         assert!(!ids.contains(&ButtonId::ToolbarViewProvinceMap));
         assert!(!ids.contains(&ButtonId::ToolbarViewMode6));
         assert_eq!(
@@ -2351,7 +2360,6 @@ mod tests {
                 ButtonId::ToolbarViewMode5,
                 ButtonId::ToolbarViewStateMap,
                 ButtonId::ToolbarViewPoliticalMap,
-                ButtonId::ToolbarViewResourcesMap,
             ]
         );
     }
@@ -2481,7 +2489,7 @@ mod tests {
 
     #[test]
     fn view_menu_reflects_independent_overlay_states() {
-        let enabled = [true, false, true, false, true, true];
+        let enabled = [true, false, true, false, true, true, false];
 
         assert!(overlay_button_active(
             ButtonId::ToolbarViewToggleRiverOverlay,
@@ -2521,10 +2529,10 @@ mod tests {
     #[test]
     fn compact_overlay_summary_lists_only_enabled_layers() {
         assert_eq!(
-            overlay_summary([true, false, false, false, true, false]),
+            overlay_summary([true, false, false, false, true, false, false]),
             "Rivers, State Borders"
         );
-        assert_eq!(overlay_summary([false; 6]), "None");
+        assert_eq!(overlay_summary([false; 7]), "None");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 [package]
-name = "hoi4_state_editor"
+name = "hoi4_map_editor"
 version = "0.1.0-preview.3"
 authors = ["ScottyThePilot <scotty.codes@gmail.com>", "AdriianCOE <tommycramos@gmail.com>"]
 edition = "2024"

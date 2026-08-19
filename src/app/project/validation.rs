@@ -288,6 +288,32 @@ pub struct RoundTripDiagnostic {
     pub action: String,
 }
 
+/// The concrete integrity condition that stopped a candidate from being saved.
+/// It deliberately remains separate from ProjectValidationDiagnostic: a
+/// round-trip mismatch is not a source-file validation error.
+#[derive(Debug, Clone)]
+pub enum RoundTripFailure {
+    Semantic(SemanticDifference),
+    Byte(ByteDifference),
+    Diagnostic(RoundTripDiagnostic),
+}
+
+impl RoundTripFailure {
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Semantic(difference) => difference.describe(),
+            Self::Byte(difference) => format!(
+                "File {} differs at byte {} (expected {} bytes, reloaded {} bytes)",
+                difference.path.display(),
+                difference.first_different_offset,
+                difference.source_len,
+                difference.candidate_len,
+            ),
+            Self::Diagnostic(diagnostic) => diagnostic.message.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RoundTripValidationReport {
     pub status: RoundTripStatus,
@@ -302,6 +328,7 @@ pub struct RoundTripValidationReport {
     pub diagnostics_comparison: DiagnosticComparison,
     pub timings: RoundTripTimings,
     pub diagnostics: Vec<RoundTripDiagnostic>,
+    pub failure: Option<RoundTripFailure>,
     pub eligible_for_atomic_save_preparation: bool,
     pub no_candidate_changes: bool,
 }
@@ -364,6 +391,7 @@ impl RoundTripValidationReport {
             diagnostics_comparison: DiagnosticComparison::default(),
             timings: RoundTripTimings::default(),
             diagnostics: Vec::new(),
+            failure: None,
             eligible_for_atomic_save_preparation: false,
             no_candidate_changes: false,
         }
@@ -462,6 +490,9 @@ impl RoundTripValidationReport {
         if self.no_candidate_changes {
             text.push_str("\nNo candidate changes to validate.");
         }
+        if let Some(failure) = &self.failure {
+            text.push_str(&format!("\nIntegrity failure: {}", failure.summary()));
+        }
         if self.eligible_for_atomic_save_preparation {
             text.push_str("\nEligible for atomic-save preparation (informational only; Save remains disabled).");
         }
@@ -551,6 +582,10 @@ impl RoundTripValidator {
                         } else {
                             RoundTripStatus::Failed
                         };
+                        if report.failure.is_none() {
+                            report.failure =
+                                Some(RoundTripFailure::Diagnostic(failure.diagnostic.clone()));
+                        }
                         report.diagnostics.push(failure.diagnostic);
                         finish_report(
                             &self.policy,
@@ -675,6 +710,12 @@ impl RoundTripValidator {
             || !report.semantic_comparison.indexes_match
             || !report.semantic_comparison.province_coverage_match
         {
+            report.failure = report
+                .semantic_comparison
+                .differences
+                .first()
+                .cloned()
+                .map(RoundTripFailure::Semantic);
             gate!(Err(Failure::new(
                 RoundTripStage::SemanticComparison,
                 None,
@@ -697,6 +738,9 @@ impl RoundTripValidator {
             &snapshot,
             &manifest
         ));
+        if let Some(difference) = report.byte_comparison.differences.first().cloned() {
+            report.failure = Some(RoundTripFailure::Byte(difference));
+        }
         report.timings.byte_comparison_ms = started.elapsed().as_millis();
 
         progress(RoundTripStage::DiagnosticComparison);
@@ -768,6 +812,9 @@ impl RoundTripValidator {
                 } else {
                     RoundTripStatus::Failed
                 };
+                if report.failure.is_none() {
+                    report.failure = Some(RoundTripFailure::Diagnostic(failure.diagnostic.clone()));
+                }
                 report.diagnostics.push(failure.diagnostic);
                 finish_report(
                     &self.policy,
@@ -929,6 +976,12 @@ impl RoundTripValidator {
             || !report.semantic_comparison.indexes_match
             || !report.semantic_comparison.province_coverage_match
         {
+            report.failure = report
+                .semantic_comparison
+                .differences
+                .first()
+                .cloned()
+                .map(RoundTripFailure::Semantic);
             return fail!(Failure::new(
                 RoundTripStage::SemanticComparison,
                 None,
@@ -952,6 +1005,9 @@ impl RoundTripValidator {
             &manifest,
             map_candidate_files,
         ));
+        if let Some(difference) = report.byte_comparison.differences.first().cloned() {
+            report.failure = Some(RoundTripFailure::Byte(difference));
+        }
         report.timings.byte_comparison_ms = started.elapsed().as_millis();
 
         progress(RoundTripStage::DiagnosticComparison);
@@ -3136,6 +3192,166 @@ mod tests {
         );
         assert!(report.round_trip.workspace.cleaned);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn structured_semantic_failure_names_the_mismatched_province() {
+        let failure = RoundTripFailure::Semantic(SemanticDifference::ProvinceAssignmentMismatch {
+            province_id: 521,
+            expected: Some(45),
+            actual: None,
+        });
+        let summary = failure.summary();
+        assert!(summary.contains("Province 521"));
+        assert!(summary.contains("Some(45)"));
+        assert!(summary.contains("None"));
+    }
+
+    #[test]
+    fn created_province_with_inherited_state_roundtrips_as_one_final_candidate() {
+        let root = std::env::temp_dir().join(format!(
+            "phase4b-created-province-{}-{}",
+            std::process::id(),
+            WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("map")).unwrap();
+        fs::create_dir_all(root.join("history/states")).unwrap();
+        let image = image::RgbImage::from_pixel(2, 1, image::Rgb([1, 2, 3]));
+        let mut bmp = Vec::new();
+        crate::app::map::write_rgb_bmp_image(&mut bmp, &image).unwrap();
+        fs::write(root.join("map/provinces.bmp"), bmp).unwrap();
+        fs::write(
+            root.join("map/definition.csv"),
+            "0;0;0;0;land;false;unknown;0\n1;1;2;3;land;false;plains;1\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("history/states/1-Test.txt"),
+            "state={id=1 state_category=rural provinces={1} history={owner=TAG}}",
+        )
+        .unwrap();
+
+        let paths = ProjectPaths::discover(&root).unwrap();
+        let config = Config {
+            preserve_ids: true,
+            ..Config::default()
+        };
+        let mut bundle =
+            Bundle::load(&Location::Directory(paths.map_directory.clone()), config).unwrap();
+        let valid = bundle.map.province_ids().collect::<BTreeSet<_>>();
+        let mut project = Hoi4Project::new(paths);
+        project.load_states(&valid, &BTreeSet::from([1]));
+        let mut edit = StateEditSession::new(&project, &bundle.map);
+        let mut history = crate::app::map::History::new(8, &bundle.map);
+        history
+            .paint_pixel(&mut bundle, [1, 0], [4, 5, 6], 1)
+            .unwrap();
+        let created_id = bundle.map.province_id_for_color([4, 5, 6]).unwrap();
+        assert_eq!(created_id, 2);
+        edit.register_created_province(created_id, crate::app::map::ProvinceKind::Land, Some(1));
+
+        let province = crate::app::map::build_province_map_candidate(&bundle).unwrap();
+        let plan = plan_state_patches(&project, &edit);
+        let report = RoundTripValidator::default().validate_combined(
+            &project,
+            &edit,
+            &plan,
+            Some(&province.files),
+            |map| {
+                crate::app::map::validate_province_map_candidate(&province, |path| {
+                    fs::read(map.join(path)).map_err(|error| error.to_string())
+                })
+            },
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        assert!(
+            matches!(
+                report.round_trip.status,
+                RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
+            ),
+            "{}",
+            report.round_trip.full_text()
+        );
+        assert!(report.round_trip.semantic_comparison.indexes_match);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires HOI4_STATE_EDITOR_AZARYA_ROOT; mutates only an in-memory candidate"]
+    fn local_azarya_created_unassigned_province_roundtrips_with_its_stable_id() {
+        let root = PathBuf::from(std::env::var("HOI4_STATE_EDITOR_AZARYA_ROOT").unwrap());
+        let paths = ProjectPaths::discover(&root).unwrap();
+        let config = Config {
+            preserve_ids: true,
+            ..Config::default()
+        };
+        let mut bundle =
+            Bundle::load(&Location::Directory(paths.map_directory.clone()), config).unwrap();
+        let valid = bundle.map.province_ids().collect::<BTreeSet<_>>();
+        let land = bundle
+            .map
+            .iter_province_data()
+            .filter(|(_, province)| province.kind == crate::app::map::ProvinceKind::Land)
+            .filter_map(|(_, province)| province.preserved_id)
+            .collect::<BTreeSet<_>>();
+        let mut project = Hoi4Project::new(paths);
+        project.load_states(&valid, &land);
+        let mut edit = StateEditSession::new(&project, &bundle.map);
+        let (source_color, source_id, position) = bundle
+            .map
+            .iter_province_data()
+            .find_map(|(color, province)| {
+                let id = province.preserved_id?;
+                (province.kind == crate::app::map::ProvinceKind::Land
+                    && project.state_by_province.contains_key(&id))
+                .then_some((
+                    color,
+                    id,
+                    [
+                        province.center_of_mass()[0].round() as u32,
+                        province.center_of_mass()[1].round() as u32,
+                    ],
+                ))
+            })
+            .expect("Azarya must contain an assigned land province");
+        assert_eq!(bundle.map.get_color_at(position), source_color);
+        assert!(project.state_by_province.contains_key(&source_id));
+        let created_color = bundle.random_color_pure(crate::app::map::ProvinceKind::Land);
+        let mut history = crate::app::map::History::new(8, &bundle.map);
+        history
+            .paint_pixel(&mut bundle, position, created_color, 1)
+            .unwrap();
+        let created_id = bundle.map.province_id_for_color(created_color).unwrap();
+        edit.register_created_province(created_id, crate::app::map::ProvinceKind::Land, None);
+        let province = crate::app::map::build_province_map_candidate(&bundle).unwrap();
+        let plan = plan_state_patches(&project, &edit);
+        let report = RoundTripValidator::default().validate_combined(
+            &project,
+            &edit,
+            &plan,
+            Some(&province.files),
+            |map| {
+                crate::app::map::validate_province_map_candidate(&province, |path| {
+                    fs::read(map.join(path)).map_err(|error| error.to_string())
+                })
+            },
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        assert!(
+            matches!(
+                report.round_trip.status,
+                RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
+            ),
+            "{}",
+            report.round_trip.full_text()
+        );
+        assert_eq!(
+            bundle.map.province_id_for_color(created_color),
+            Some(created_id)
+        );
     }
 
     fn test_project(name: &str) -> (PathBuf, Hoi4Project, StateEditSession) {

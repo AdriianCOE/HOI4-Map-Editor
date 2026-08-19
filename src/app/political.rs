@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ahash::{AHashMap, AHashSet};
 use image::RgbaImage;
 
 use super::map::Color;
@@ -279,6 +280,63 @@ pub struct PoliticalLabel {
     pub flag_available: bool,
 }
 
+/// Geometry that is independent from a view's ownership or resource data.
+///
+/// It is intentionally reusable by Political and Resources views: constructing
+/// either view must not rebuild a province lookup and the full adjacency graph
+/// for every State label.
+#[derive(Debug, Clone)]
+pub(crate) struct TerritoryAnchorIndex {
+    provinces_by_id: BTreeMap<u32, PoliticalProvince>,
+    neighbors: AHashMap<u32, AHashSet<u32>>,
+}
+
+impl TerritoryAnchorIndex {
+    pub(crate) fn new(provinces: &[PoliticalProvince], adjacency_pairs: &[(u32, u32)]) -> Self {
+        let provinces_by_id = provinces
+            .iter()
+            .copied()
+            .map(|province| (province.id, province))
+            .collect();
+        // `iter_boundaries` reports many pixel edges for the same province
+        // border. Hash sets make this one-time de-duplication linear instead
+        // of repeatedly rebalancing ordered sets for every duplicate edge.
+        let mut neighbors = AHashMap::<u32, AHashSet<u32>>::new();
+        for &(left, right) in adjacency_pairs {
+            if left != right {
+                neighbors.entry(left).or_default().insert(right);
+                neighbors.entry(right).or_default().insert(left);
+            }
+        }
+        Self {
+            provinces_by_id,
+            neighbors,
+        }
+    }
+
+    pub(crate) fn territory_anchor(&self, owned: &BTreeSet<u32>) -> Option<([f64; 2], u64)> {
+        let owned = owned
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.provinces_by_id
+                    .get(id)
+                    .is_some_and(|province| province.is_land)
+            })
+            .collect::<BTreeSet<_>>();
+        let component = largest_component(&owned, &self.neighbors, &self.provinces_by_id)?;
+        let pixels = component
+            .iter()
+            .filter_map(|id| self.provinces_by_id.get(id))
+            .map(|province| province.pixel_count)
+            .sum();
+        Some((
+            anchor_for_component(&component, &self.provinces_by_id)?,
+            pixels,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoliticalLabelVisibility {
     Hidden,
@@ -297,11 +355,15 @@ pub fn prepare_country_labels(
     provinces: &[PoliticalProvince],
     adjacency_pairs: &[(u32, u32)],
 ) -> Vec<PoliticalLabel> {
-    let provinces_by_id = provinces
-        .iter()
-        .copied()
-        .map(|province| (province.id, province))
-        .collect::<BTreeMap<_, _>>();
+    let index = TerritoryAnchorIndex::new(provinces, adjacency_pairs);
+    prepare_country_labels_with_index(metadata, states, &index)
+}
+
+pub(crate) fn prepare_country_labels_with_index(
+    metadata: &PoliticalCountryCatalog,
+    states: &[PoliticalStateOwnership],
+    index: &TerritoryAnchorIndex,
+) -> Vec<PoliticalLabel> {
     let mut owned_by_country = BTreeMap::<String, BTreeSet<u32>>::new();
     for state in states {
         let Some(owner) = state
@@ -313,29 +375,24 @@ pub fn prepare_country_labels(
         };
         let owned = owned_by_country.entry(owner.to_owned()).or_default();
         owned.extend(state.provinces.iter().copied().filter(|province_id| {
-            provinces_by_id
+            index
+                .provinces_by_id
                 .get(province_id)
                 .is_some_and(|province| province.is_land)
         }));
-    }
-    let mut neighbors = BTreeMap::<u32, BTreeSet<u32>>::new();
-    for &(left, right) in adjacency_pairs {
-        if left != right {
-            neighbors.entry(left).or_default().insert(right);
-            neighbors.entry(right).or_default().insert(left);
-        }
     }
 
     owned_by_country
         .into_iter()
         .filter_map(|(tag, owned)| {
-            let main_component = largest_component(&owned, &neighbors, &provinces_by_id)?;
+            let main_component =
+                largest_component(&owned, &index.neighbors, &index.provinces_by_id)?;
             let territory_pixels = main_component
                 .iter()
-                .filter_map(|province_id| provinces_by_id.get(province_id))
+                .filter_map(|province_id| index.provinces_by_id.get(province_id))
                 .map(|province| province.pixel_count)
                 .sum();
-            let anchor = anchor_for_component(&main_component, &provinces_by_id)?;
+            let anchor = anchor_for_component(&main_component, &index.provinces_by_id)?;
             let country = metadata.metadata(&tag)?;
             Some(PoliticalLabel {
                 tag,
@@ -378,7 +435,7 @@ pub fn political_label_visibility(
 
 fn largest_component(
     owned: &BTreeSet<u32>,
-    neighbors: &BTreeMap<u32, BTreeSet<u32>>,
+    neighbors: &AHashMap<u32, AHashSet<u32>>,
     provinces: &BTreeMap<u32, PoliticalProvince>,
 ) -> Option<BTreeSet<u32>> {
     let mut remaining = owned.clone();
@@ -443,42 +500,6 @@ fn anchor_for_component(
                 .total_cmp(&squared_distance(right.center, average))
         })
         .map(|province| province.center)
-}
-
-/// Stable largest-connected-territory anchor shared by non-political overlays.
-pub(crate) fn territory_anchor(
-    owned: &BTreeSet<u32>,
-    provinces: &[PoliticalProvince],
-    adjacency_pairs: &[(u32, u32)],
-) -> Option<([f64; 2], u64)> {
-    let provinces_by_id = provinces
-        .iter()
-        .copied()
-        .map(|province| (province.id, province))
-        .collect::<BTreeMap<_, _>>();
-    let owned = owned
-        .iter()
-        .copied()
-        .filter(|id| {
-            provinces_by_id
-                .get(id)
-                .is_some_and(|province| province.is_land)
-        })
-        .collect::<BTreeSet<_>>();
-    let mut neighbors = BTreeMap::<u32, BTreeSet<u32>>::new();
-    for &(left, right) in adjacency_pairs {
-        if left != right {
-            neighbors.entry(left).or_default().insert(right);
-            neighbors.entry(right).or_default().insert(left);
-        }
-    }
-    let component = largest_component(&owned, &neighbors, &provinces_by_id)?;
-    let pixels = component
-        .iter()
-        .filter_map(|id| provinces_by_id.get(id))
-        .map(|province| province.pixel_count)
-        .sum();
-    Some((anchor_for_component(&component, &provinces_by_id)?, pixels))
 }
 
 fn squared_distance(left: [f64; 2], right: [f64; 2]) -> f64 {

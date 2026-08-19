@@ -115,6 +115,9 @@ pub struct StateLoadSummary {
     pub errors: usize,
     pub warnings: usize,
     pub state_loading_ms: u128,
+    pub state_discovery_ms: u128,
+    pub state_read_parse_ms: u128,
+    pub state_indexing_ms: u128,
     pub state_texture_generation_ms: u128,
     pub state_boundary_generation_ms: u128,
 }
@@ -179,8 +182,10 @@ impl Hoi4Project {
     ) {
         let started = Instant::now();
         let batch = load_state_documents(&self.paths.states_directory);
+        let indexing_started = Instant::now();
         let indexes =
             index_state_documents(&batch.documents, valid_province_ids, land_province_ids);
+        let indexing_in = indexing_started.elapsed().as_millis();
         let mut diagnostics = batch.diagnostics.clone();
         diagnostics.extend(indexes.diagnostics.iter().cloned());
         let load_summary = StateLoadSummary::from_load(
@@ -188,6 +193,7 @@ impl Hoi4Project {
             &indexes,
             &diagnostics,
             started.elapsed().as_millis(),
+            indexing_in,
         );
 
         self.states = batch.documents;
@@ -218,6 +224,9 @@ impl Hoi4Project {
        - errors: {}\n\
        - warnings: {}\n\
        - state loading: {} ms\n\
+       - State discovery: {} ms\n\
+       - State read + parse: {} ms\n\
+       - State indexes: {} ms\n\
        - state texture generation: {} ms\n\
        - state boundary generation: {} ms",
             self.load_summary.files_found,
@@ -235,6 +244,9 @@ impl Hoi4Project {
             self.load_summary.errors,
             self.load_summary.warnings,
             self.load_summary.state_loading_ms,
+            self.load_summary.state_discovery_ms,
+            self.load_summary.state_read_parse_ms,
+            self.load_summary.state_indexing_ms,
             self.load_summary.state_texture_generation_ms,
             self.load_summary.state_boundary_generation_ms
         )
@@ -301,6 +313,7 @@ impl StateLoadSummary {
         indexes: &StateIndexes,
         diagnostics: &[ProjectDiagnostic],
         state_loading_ms: u128,
+        state_indexing_ms: u128,
     ) -> Self {
         let count = |kind| {
             diagnostics
@@ -334,6 +347,9 @@ impl StateLoadSummary {
                 .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning)
                 .count(),
             state_loading_ms,
+            state_discovery_ms: batch.discovery_in.as_millis(),
+            state_read_parse_ms: batch.read_parse_in.as_millis(),
+            state_indexing_ms,
             state_texture_generation_ms: 0,
             state_boundary_generation_ms: 0,
         }
@@ -426,9 +442,14 @@ fn failure_stage(
 #[cfg(test)]
 mod tests {
     use super::{Hoi4Project, ProjectPaths, StateLoadFailureStage};
-    use crate::app::state::load_state_documents;
+    use crate::app::map::{Bundle, ProvinceKind};
+    use crate::app::project::StateEditSession;
+    use crate::config::Config;
+    use crate::util::files::Location;
+    use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
     use std::collections::BTreeSet;
     use std::fs;
+    use std::io::Cursor;
     use std::path::{Path, PathBuf};
 
     struct TempProject(PathBuf);
@@ -449,6 +470,64 @@ mod tests {
 
         fn path(&self) -> &Path {
             &self.0
+        }
+
+        fn write_map_and_states(
+            &self,
+            dimensions: [u32; 2],
+            definitions: &[(u32, [u8; 3])],
+            state_id: u32,
+            owner: &str,
+        ) {
+            let colors = definitions
+                .iter()
+                .map(|(_, color)| *color)
+                .collect::<Vec<_>>();
+            let image = RgbImage::from_fn(dimensions[0], dimensions[1], |x, y| {
+                Rgb(colors[((y * dimensions[0] + x) as usize) % colors.len()])
+            });
+            let mut bytes = Cursor::new(Vec::new());
+            DynamicImage::ImageRgb8(image)
+                .write_to(&mut bytes, ImageFormat::Bmp)
+                .unwrap();
+            fs::write(self.path().join("map/provinces.bmp"), bytes.into_inner()).unwrap();
+
+            let mut csv = String::from("0;0;0;0;land;false;unknown;0\r\n");
+            for (id, [red, green, blue]) in definitions {
+                csv.push_str(&format!(
+                    "{id};{red};{green};{blue};land;false;plains;1\r\n"
+                ));
+            }
+            fs::write(self.path().join("map/definition.csv"), csv).unwrap();
+            let provinces = definitions
+                .iter()
+                .map(|(id, _)| id.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            fs::write(
+                self.path()
+                    .join(format!("history/states/{state_id}-Fixture.txt")),
+                format!(
+                    "state={{id={state_id} provinces={{ {provinces} }} history={{owner={owner}}}}}"
+                ),
+            )
+            .unwrap();
+        }
+
+        fn load(&self) -> (Bundle, Hoi4Project) {
+            let paths = ProjectPaths::discover(self.path()).unwrap();
+            let bundle = Bundle::load(
+                &Location::Directory(paths.map_directory.clone()),
+                Config {
+                    preserve_ids: true,
+                    ..Config::default()
+                },
+            )
+            .unwrap();
+            let province_ids = bundle.map.province_ids().collect::<BTreeSet<_>>();
+            let mut project = Hoi4Project::new(paths);
+            project.load_states(&province_ids, &province_ids);
+            (bundle, project)
         }
     }
 
@@ -531,26 +610,99 @@ mod tests {
     }
 
     #[test]
+    fn independent_project_loads_replace_dimensions_ids_and_state_sessions() {
+        let large = TempProject::new("switch-large");
+        large.write_map_and_states(
+            [130, 70],
+            &[(1, [1, 2, 3]), (50_000, [4, 5, 6])],
+            900,
+            "AAA",
+        );
+        let small = TempProject::new("switch-small");
+        small.write_map_and_states([3, 2], &[(7, [7, 8, 9]), (9, [10, 11, 12])], 2, "BBB");
+
+        let (large_map, large_project) = large.load();
+        let mut large_session = StateEditSession::new(&large_project, &large_map.map);
+        let _ = large_session.apply_lasso_selection(&BTreeSet::from([50_000]), Default::default());
+        assert_eq!(large_map.map.dimensions(), [130, 70]);
+        assert_eq!(large_project.state_by_province.get(&50_000), Some(&900));
+        assert!(large_session.selected_provinces().contains(&50_000));
+
+        let (small_map, small_project) = small.load();
+        let small_session = StateEditSession::new(&small_project, &small_map.map);
+        assert_eq!(small_map.map.dimensions(), [3, 2]);
+        assert_eq!(small_map.map.province_ids().collect::<Vec<_>>(), vec![7, 9]);
+        assert_eq!(small_project.state_by_province.get(&7), Some(&2));
+        assert!(!small_project.state_by_province.contains_key(&50_000));
+        assert!(!small_session.selected_provinces().contains(&50_000));
+        assert!(!small_session.valid_state_ids().contains(&900));
+
+        // A fresh load back to the first source restores that source only;
+        // nothing from the small project is retained in its indexes/session.
+        let (reloaded_large_map, reloaded_large_project) = large.load();
+        assert_eq!(reloaded_large_map.map.dimensions(), [130, 70]);
+        assert_eq!(
+            reloaded_large_map.map.province_ids().collect::<Vec<_>>(),
+            vec![1, 50_000]
+        );
+        assert_eq!(
+            reloaded_large_project.state_by_province.get(&50_000),
+            Some(&900)
+        );
+        assert!(!reloaded_large_project.state_by_province.contains_key(&7));
+    }
+
+    #[test]
+    fn failed_candidate_discovery_leaves_the_active_project_data_unchanged() {
+        let active = TempProject::new("active-after-failed-open");
+        active.write_map_and_states([2, 1], &[(1, [1, 2, 3])], 77, "AAA");
+        let (active_map, active_project) = active.load();
+
+        let invalid =
+            std::env::temp_dir().join(format!("hoi4-invalid-project-open-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&invalid);
+        fs::create_dir_all(&invalid).unwrap();
+        assert!(ProjectPaths::discover(&invalid).is_err());
+        let _ = fs::remove_dir_all(&invalid);
+
+        assert_eq!(active_map.map.dimensions(), [2, 1]);
+        assert_eq!(active_project.state_by_province.get(&1), Some(&77));
+        assert_eq!(active_project.paths.root, active.path());
+    }
+
+    #[test]
     #[ignore = "requires HOI4_STATE_EDITOR_AZARYA_ROOT"]
     fn azarya_state_loader_smoke() {
         let root = std::env::var_os("HOI4_STATE_EDITOR_AZARYA_ROOT")
             .map(PathBuf::from)
             .expect("set HOI4_STATE_EDITOR_AZARYA_ROOT to the Azarya mod root");
         let paths = ProjectPaths::discover(&root).expect("discover Azarya project paths");
-        let state_ids = load_state_documents(&paths.states_directory)
-            .documents
-            .iter()
-            .filter_map(|document| document.data.as_ref())
-            .flat_map(|state| state.provinces.iter().copied())
+        let bundle = Bundle::load(
+            &Location::Directory(paths.map_directory.clone()),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .expect("load Azarya province map");
+        let province_ids = bundle.map.province_ids().collect::<BTreeSet<_>>();
+        let land_province_ids = bundle
+            .map
+            .iter_province_data()
+            .filter(|(_, province)| province.kind == ProvinceKind::Land)
+            .filter_map(|(_, province)| province.preserved_id)
             .collect::<BTreeSet<_>>();
         let mut project = Hoi4Project::new(paths);
-        project.load_states(&state_ids, &state_ids);
+        project.load_states(&province_ids, &land_province_ids);
 
         println!(
-            "Azarya States: files={}, loaded={}, failed={}",
+            "Azarya States: files={}, loaded={}, failed={}, discovery={} ms, read + parse={} ms, indexes={} ms",
             project.load_summary.report.files_seen,
             project.load_summary.report.states_loaded,
-            project.load_summary.report.files_failed.len()
+            project.load_summary.report.files_failed.len(),
+            project.load_summary.state_discovery_ms,
+            project.load_summary.state_read_parse_ms,
+            project.load_summary.state_indexing_ms,
         );
         for failure in &project.load_summary.report.files_failed {
             println!(
@@ -569,5 +721,213 @@ mod tests {
                 project.state_by_province.get(province_id) == Some(&state_id)
             }));
         }
+    }
+
+    #[test]
+    #[ignore = "requires HOI4_STATE_EDITOR_AZARYA_ROOT; prints reusable real-project profile"]
+    fn azarya_project_open_component_profile() {
+        use std::time::Instant;
+
+        use crate::app::political::PoliticalCountryCatalog;
+        use crate::app::project::{GameDefinitionCatalog, generate_state_view};
+        use crate::app::resources::ResourceIconResolver;
+
+        let root = std::env::var_os("HOI4_STATE_EDITOR_AZARYA_ROOT")
+            .map(PathBuf::from)
+            .expect("set HOI4_STATE_EDITOR_AZARYA_ROOT to the Azarya mod root");
+        let base_game_root =
+            std::env::var_os("HOI4_STATE_EDITOR_BASE_GAME_ROOT").map(PathBuf::from);
+        let total_started = Instant::now();
+        let paths_started = Instant::now();
+        let paths = ProjectPaths::discover(&root).expect("discover Azarya project paths");
+        let paths_in = paths_started.elapsed();
+
+        let bundle_started = Instant::now();
+        let bundle = Bundle::load(
+            &Location::Directory(paths.map_directory.clone()),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .expect("load Azarya province map");
+        let bundle_in = bundle_started.elapsed();
+        let province_ids = bundle.map.province_ids().collect::<BTreeSet<_>>();
+        let land_province_ids = bundle
+            .map
+            .iter_province_data()
+            .filter(|(_, province)| province.kind == ProvinceKind::Land)
+            .filter_map(|(_, province)| province.preserved_id)
+            .collect::<BTreeSet<_>>();
+
+        let states_started = Instant::now();
+        let mut project = Hoi4Project::new(paths);
+        project.load_states(&province_ids, &land_province_ids);
+        let states_in = states_started.elapsed();
+
+        let definitions_started = Instant::now();
+        let _definitions = GameDefinitionCatalog::build(&project, base_game_root.as_deref());
+        let definitions_in = definitions_started.elapsed();
+
+        let state_view_started = Instant::now();
+        let _state_view = generate_state_view(&bundle.map, &project);
+        let state_view_in = state_view_started.elapsed();
+
+        let political_started = Instant::now();
+        let _political = PoliticalCountryCatalog::load(&root, base_game_root.as_deref());
+        let political_in = political_started.elapsed();
+
+        let resources_started = Instant::now();
+        let _resources = ResourceIconResolver::load(&root, base_game_root.as_deref());
+        let resources_in = resources_started.elapsed();
+
+        println!(
+            "Azarya release-open component profile:\n\
+             paths={} ms; map bundle={} ms; States={} ms; definitions={} ms; State view={} ms; \\
+             Political eager work={} ms; Resources eager work={} ms; core total={} ms; with eager presentation={} ms",
+            paths_in.as_millis(),
+            bundle_in.as_millis(),
+            states_in.as_millis(),
+            definitions_in.as_millis(),
+            state_view_in.as_millis(),
+            political_in.as_millis(),
+            resources_in.as_millis(),
+            total_started
+                .elapsed()
+                .as_millis()
+                .saturating_sub(political_in.as_millis() + resources_in.as_millis()),
+            total_started.elapsed().as_millis(),
+        );
+        assert_eq!(project.load_summary.report.files_seen, 519);
+        assert_eq!(project.load_summary.report.states_loaded, 519);
+        assert!(project.load_summary.report.files_failed.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires local HOI4_STATE_EDITOR_AZARYA_ROOT; prints Resources activation profile"]
+    fn azarya_resources_activation_profile() {
+        use std::time::Instant;
+
+        use crate::app::political::{PoliticalProvince, TerritoryAnchorIndex};
+        use crate::app::resources::{
+            ResourceIconResolver, ResourceMapState, prepare_resource_labels,
+            prepare_resource_labels_with_index,
+        };
+
+        let root = std::env::var_os("HOI4_STATE_EDITOR_AZARYA_ROOT")
+            .map(PathBuf::from)
+            .expect("set HOI4_STATE_EDITOR_AZARYA_ROOT to the Azarya mod root");
+        let base_game_root =
+            std::env::var_os("HOI4_STATE_EDITOR_BASE_GAME_ROOT").map(PathBuf::from);
+        let paths = ProjectPaths::discover(&root).expect("discover Azarya project paths");
+        let bundle = Bundle::load(
+            &Location::Directory(paths.map_directory.clone()),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .expect("load Azarya province map");
+        let province_ids = bundle.map.province_ids().collect::<BTreeSet<_>>();
+        let land_province_ids = bundle
+            .map
+            .iter_province_data()
+            .filter(|(_, province)| province.kind == ProvinceKind::Land)
+            .filter_map(|(_, province)| province.preserved_id)
+            .collect::<BTreeSet<_>>();
+        let mut project = Hoi4Project::new(paths);
+        project.load_states(&province_ids, &land_province_ids);
+
+        let states = project
+            .states
+            .iter()
+            .filter_map(|document| document.data.as_ref())
+            .filter_map(|state| {
+                Some(ResourceMapState {
+                    state_id: state.id?,
+                    provinces: state.provinces.iter().copied().collect(),
+                    resources: state.resources.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let provinces = bundle
+            .map
+            .iter_province_data()
+            .filter_map(|(_, province)| {
+                Some(PoliticalProvince {
+                    id: province.preserved_id?,
+                    is_land: province.kind == ProvinceKind::Land,
+                    center: province.center_of_mass(),
+                    pixel_count: province.pixel_count,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut adjacency_pairs = Vec::new();
+        for (boundary, _) in bundle.map.iter_boundaries() {
+            let [left, right] = boundary.into_array();
+            if let (Some(left), Some(right)) = (
+                bundle
+                    .map
+                    .province_id_for_color(bundle.map.get_color_at(left)),
+                bundle
+                    .map
+                    .province_id_for_color(bundle.map.get_color_at(right)),
+            ) {
+                adjacency_pairs.push((left, right));
+            }
+        }
+
+        let index_started = Instant::now();
+        let anchors = TerritoryAnchorIndex::new(&provinces, &adjacency_pairs);
+        let anchor_index_in = index_started.elapsed();
+        let labels_started = Instant::now();
+        let labels = prepare_resource_labels_with_index(&states, &anchors);
+        let labels_in = labels_started.elapsed();
+        let legacy_in = std::env::var_os("HOI4_MAP_EDITOR_PROFILE_LEGACY_RESOURCES").map(|_| {
+            let legacy_started = Instant::now();
+            let legacy_labels = states
+                .iter()
+                .flat_map(|state| {
+                    prepare_resource_labels(
+                        std::slice::from_ref(state),
+                        &provinces,
+                        &adjacency_pairs,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(labels, legacy_labels);
+            legacy_started.elapsed()
+        });
+
+        let resolver_started = Instant::now();
+        let mut resolver = ResourceIconResolver::load(&root, base_game_root.as_deref());
+        let resolver_in = resolver_started.elapsed();
+        let unique_keys = labels
+            .iter()
+            .flat_map(|label| label.rows.iter().map(|row| row.key.clone()))
+            .collect::<BTreeSet<_>>();
+        let icon_started = Instant::now();
+        for key in &unique_keys {
+            let _ = resolver.icon(key);
+        }
+        let icons_in = icon_started.elapsed();
+        let resource_entries = labels.iter().map(|label| label.rows.len()).sum::<usize>();
+        println!(
+            "Azarya Resources activation profile: states={}, states with resources={}, entries={}, unique keys={}; legacy anchors={}; shared anchor index={} ms; labels={} ms; resolver={} ms; unique icon decode={} ms",
+            states.len(),
+            labels.len(),
+            resource_entries,
+            unique_keys.len(),
+            legacy_in.map_or_else(
+                || "not requested".to_owned(),
+                |elapsed| format!("{} ms", elapsed.as_millis())
+            ),
+            anchor_index_in.as_millis(),
+            labels_in.as_millis(),
+            resolver_in.as_millis(),
+            icons_in.as_millis(),
+        );
+        assert_eq!(project.load_summary.report.states_loaded, 519);
+        assert!(project.load_summary.report.files_failed.is_empty());
     }
 }

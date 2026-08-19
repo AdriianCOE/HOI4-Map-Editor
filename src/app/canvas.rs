@@ -31,8 +31,8 @@ use super::map_layers::{
 };
 use super::political::{
     PoliticalCountryCatalog, PoliticalLabel, PoliticalLabelVisibility, PoliticalProvince,
-    PoliticalStateOwnership, political_label_visibility, political_labels_visible_in_view,
-    prepare_country_labels,
+    PoliticalStateOwnership, TerritoryAnchorIndex, political_label_visibility,
+    political_labels_visible_in_view, prepare_country_labels_with_index,
 };
 use super::project::{
     BrushProvinceClassification, BuildingScope, CombinedRoundTripValidationReport,
@@ -54,7 +54,7 @@ use super::project::{
     state_save_eligibility, validate_project,
 };
 use super::resources::{
-    ResourceIconResolver, ResourceMapLabel, ResourceMapState, prepare_resource_labels,
+    ResourceIconResolver, ResourceMapLabel, ResourceMapState, prepare_resource_labels_with_index,
     resource_label_visible,
 };
 use super::{FontGlyphCache, colors};
@@ -102,19 +102,27 @@ const STATE_PROPERTY_FIELD_KEYS: [&str; StatePropertyDraft::TEXT_FIELD_COUNT] = 
 ];
 
 pub struct Canvas {
+    // Assigned by App only after a complete replacement succeeds. Every field
+    // below is owned by this Canvas, so dropping a Canvas is also the atomic
+    // invalidation boundary for project-scoped CPU/GPU/cache state.
+    project_generation: ProjectGeneration,
     bundle: Bundle,
     history: History,
     texture: Texture,
     state_texture: Option<Texture>,
     political_texture: Option<Texture>,
     political_country_catalog: Option<PoliticalCountryCatalog>,
+    political_cache_generation: Option<ProjectGeneration>,
     political_labels: Vec<PoliticalLabel>,
     political_flag_textures: BTreeMap<String, Texture>,
     political_adjacency_pairs: Vec<(u32, u32)>,
+    territory_anchor_index: Option<TerritoryAnchorIndex>,
+    territory_anchor_generation: Option<ProjectGeneration>,
     political_language: String,
     resource_labels: Vec<ResourceMapLabel>,
     resource_icon_resolver: Option<ResourceIconResolver>,
     resource_icon_textures: BTreeMap<String, Option<Texture>>,
+    resource_cache_generation: Option<ProjectGeneration>,
     image_overlay_texture: Option<Texture>,
     image_overlay_status: String,
     state_boundaries: Vec<UOrd<Vector2<u32>>>,
@@ -148,6 +156,7 @@ pub struct Canvas {
     patch_preview: Option<ProjectPatchPlan>,
     patch_preview_file: usize,
     round_trip_report: Option<RoundTripValidationReport>,
+    round_trip_failure_snapshot: Option<RoundTripFailureSnapshot>,
     round_trip_task: Option<RoundTripTask>,
     round_trip_status: Option<String>,
     state_save_report: Option<StateSaveReport>,
@@ -265,8 +274,34 @@ enum StateApplyDialog {
     Progress,
     Result,
     ValidationResults,
+    IntegrityProblem,
     ImageOverlay,
     ProvinceRemoval,
+}
+
+/// Identity assigned to a fully loaded project context. It intentionally does
+/// not track edit revisions: it distinguishes one loaded map/mod from another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ProjectGeneration(pub(crate) u64);
+
+#[derive(Debug, Clone)]
+struct RoundTripFailureSnapshot {
+    generation: ProjectGeneration,
+    summary: String,
+    details: String,
+}
+
+impl RoundTripFailureSnapshot {
+    fn from_report(generation: ProjectGeneration, report: &RoundTripValidationReport) -> Self {
+        Self {
+            generation,
+            summary: report
+                .failure
+                .as_ref()
+                .map_or_else(|| report.summary_text(), |failure| failure.summary()),
+            details: report.full_text(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,11 +468,17 @@ struct ProjectSavePresentationSummary {
 enum ProjectSaveReviewPrimaryAction {
     ConfirmSave,
     ViewBlockingProblems,
+    ViewIntegrityProblem,
 }
 
-fn project_save_review_primary_action(blocked: bool) -> ProjectSaveReviewPrimaryAction {
-    if blocked {
+fn project_save_review_primary_action(
+    validation_blocked: bool,
+    round_trip_failed: bool,
+) -> ProjectSaveReviewPrimaryAction {
+    if validation_blocked {
         ProjectSaveReviewPrimaryAction::ViewBlockingProblems
+    } else if round_trip_failed {
+        ProjectSaveReviewPrimaryAction::ViewIntegrityProblem
     } else {
         ProjectSaveReviewPrimaryAction::ConfirmSave
     }
@@ -558,6 +599,20 @@ impl StateLifecycleDraft {
 }
 
 impl Canvas {
+    /// Bind this newly built Canvas to the active App project generation.
+    /// Canvas loading is deliberately complete before this call; no existing
+    /// project is mutated while a replacement can still fail.
+    pub(crate) fn bind_project_generation(&mut self, generation: ProjectGeneration) {
+        debug_assert!(self.political_country_catalog.is_none());
+        debug_assert!(self.resource_icon_resolver.is_none());
+        debug_assert!(self.territory_anchor_index.is_none());
+        debug_assert!(self.political_cache_generation.is_none());
+        debug_assert!(self.resource_cache_generation.is_none());
+        self.project_generation = generation;
+        self.territory_anchor_generation = None;
+        self.round_trip_failure_snapshot = None;
+    }
+
     pub fn load(location: Location) -> Result<Canvas, Error> {
         Self::load_with_access(
             location,
@@ -590,7 +645,11 @@ impl Canvas {
         config: Config,
         overlay_settings: Option<ImageOverlayProjectSettings>,
     ) -> Result<Canvas, Error> {
+        let profile_open = std::env::var_os("HOI4_MAP_EDITOR_PROFILE_OPEN").is_some();
+        let open_started = Instant::now();
         let bundle = Bundle::load(&location, config)?;
+        let bundle_loaded_in = open_started.elapsed();
+        let state_loading_started = Instant::now();
         if let Some(project) = project.as_mut() {
             let province_ids = bundle.map.province_ids().collect::<BTreeSet<_>>();
             let land_province_ids = bundle
@@ -601,16 +660,28 @@ impl Canvas {
                 .collect::<BTreeSet<_>>();
             project.load_states(&province_ids, &land_province_ids);
         }
+        let state_loading_in = state_loading_started.elapsed();
+        let state_discovery_ms = project
+            .as_ref()
+            .map_or(0, |project| project.load_summary.state_discovery_ms);
+        let state_read_parse_ms = project
+            .as_ref()
+            .map_or(0, |project| project.load_summary.state_read_parse_ms);
+        let state_indexing_ms = project
+            .as_ref()
+            .map_or(0, |project| project.load_summary.state_indexing_ms);
+        let definitions_started = Instant::now();
         let base_game_root = discover_base_game_root();
         let definition_catalog = project
             .as_ref()
             .map(|project| GameDefinitionCatalog::build(project, base_game_root.as_deref()));
-        let political_country_catalog = project.as_ref().map(|project| {
-            PoliticalCountryCatalog::load(&project.paths.root, base_game_root.as_deref())
-        });
+        let definitions_in = definitions_started.elapsed();
         let history = History::new(bundle.config.max_undo_states, &bundle.map);
         let texture_settings = TextureSettings::new().mag(Filter::Nearest);
+        let map_texture_started = Instant::now();
         let texture = Texture::from_image(&bundle.texture_buffer_color(), &texture_settings);
+        let map_texture_in = map_texture_started.elapsed();
+        let state_view_started = Instant::now();
         let state_view = project
             .as_ref()
             .map(|project| generate_state_view(&bundle.map, project));
@@ -625,6 +696,8 @@ impl Canvas {
         let state_boundaries = state_view
             .map(|state_view| state_view.state_boundaries)
             .unwrap_or_default();
+        let state_view_in = state_view_started.elapsed();
+        let adjacency_started = Instant::now();
         let mut province_boundaries = BTreeMap::<u32, Vec<_>>::new();
         let mut adjacency_pairs = Vec::new();
         if project.is_some() {
@@ -649,12 +722,14 @@ impl Canvas {
                 }
             }
         }
+        let adjacency_in = adjacency_started.elapsed();
         let map_view_mode = if state_texture.is_some() {
             MapViewMode::States
         } else {
             MapViewMode::ProvinceColors
         };
         let overlay_settings = overlay_settings.unwrap_or_default();
+        let overlay_started = Instant::now();
         let (
             image_overlay_source,
             image_overlay_texture,
@@ -667,6 +742,8 @@ impl Canvas {
             bundle.map.dimensions(),
             &texture_settings,
         );
+        let overlay_in = overlay_started.elapsed();
+        let session_started = Instant::now();
         let state_edit_session = project
             .as_ref()
             .map(|project| StateEditSession::new(project, &bundle.map));
@@ -681,6 +758,7 @@ impl Canvas {
         let project_status = project.as_ref().map(|project| {
             project_status_message_with_session(project, state_edit_session.as_ref(), 0, "initial")
         });
+        let session_in = session_started.elapsed();
         if let Some(project) = project.as_ref() {
             println!("{}", project.load_summary_message());
             println!(
@@ -707,22 +785,27 @@ impl Canvas {
             map_layers.image_overlay.enabled = overlay_settings.visible;
         }
 
-        let mut canvas = Canvas {
+        let canvas = Canvas {
+            project_generation: ProjectGeneration::default(),
             bundle,
             history,
             texture,
             state_texture,
             political_texture: None,
-            political_country_catalog,
+            // Political country files/localization and Resources presentation are view-only.
+            // Loading them here used to make ordinary State/Province project open pay for both.
+            political_country_catalog: None,
+            political_cache_generation: None,
             political_labels: Vec::new(),
             political_flag_textures: BTreeMap::new(),
             political_adjacency_pairs: adjacency_pairs.clone(),
+            territory_anchor_index: None,
+            territory_anchor_generation: None,
             political_language: crate::localization::language().to_owned(),
             resource_labels: Vec::new(),
-            resource_icon_resolver: project.as_ref().map(|project| {
-                ResourceIconResolver::load(&project.paths.root, base_game_root.as_deref())
-            }),
+            resource_icon_resolver: None,
             resource_icon_textures: BTreeMap::new(),
+            resource_cache_generation: None,
             image_overlay_texture,
             image_overlay_status,
             state_boundaries,
@@ -757,6 +840,7 @@ impl Canvas {
             patch_preview: None,
             patch_preview_file: 0,
             round_trip_report: None,
+            round_trip_failure_snapshot: None,
             round_trip_task: None,
             round_trip_status: None,
             state_save_report: None,
@@ -811,8 +895,32 @@ impl Canvas {
             modified: false,
             camera,
         };
-        canvas.refresh_political_texture();
-        canvas.refresh_resource_labels();
+        if profile_open {
+            println!(
+                "Project open profile (optional Political/Resources assets deferred):\n\
+                 - core map bundle: {} ms\n\
+                 - State files + indexes: {} ms (discovery {} ms, read + parse {} ms, indexes {} ms)\n\
+                 - definition catalog: {} ms\n\
+                 - base map GPU texture: {} ms\n\
+                 - State texture + boundaries: {} ms\n\
+                 - province adjacency/boundaries: {} ms\n\
+                 - image overlay: {} ms\n\
+                 - State edit session: {} ms\n\
+                 - TOTAL usable core: {} ms",
+                bundle_loaded_in.as_millis(),
+                state_loading_in.as_millis(),
+                state_discovery_ms,
+                state_read_parse_ms,
+                state_indexing_ms,
+                definitions_in.as_millis(),
+                map_texture_in.as_millis(),
+                state_view_in.as_millis(),
+                adjacency_in.as_millis(),
+                overlay_in.as_millis(),
+                session_in.as_millis(),
+                open_started.elapsed().as_millis(),
+            );
+        }
         Ok(canvas)
     }
 
@@ -3144,6 +3252,18 @@ impl Canvas {
         if self.political_language != crate::localization::language() {
             self.reload_political_country_catalog();
         }
+        debug_assert!(
+            self.political_cache_generation
+                .is_none_or(|generation| generation == self.project_generation)
+        );
+        debug_assert!(
+            self.resource_cache_generation
+                .is_none_or(|generation| generation == self.project_generation)
+        );
+        debug_assert!(
+            self.territory_anchor_generation
+                .is_none_or(|generation| generation == self.project_generation)
+        );
         let transform = ctx
             .transform
             .append_transform(self.camera.display_matrix(interface));
@@ -3189,7 +3309,7 @@ impl Canvas {
         if political_labels_visible_in_view(self.map_layers.base_view) {
             self.draw_political_country_labels(ctx, interface, glyph_cache, gl);
         }
-        if self.map_layers.base_view == MapBaseView::Resources {
+        if self.map_layers.show_resources || self.map_layers.base_view == MapBaseView::Resources {
             self.draw_resource_labels(ctx, interface, glyph_cache, gl);
         }
         if self.map_layers.show_adjacencies {
@@ -3400,8 +3520,12 @@ impl Canvas {
                 let dirty = plan.map(ProjectSavePlan::dirty).unwrap_or_default();
                 let files = plan.map_or(0, |plan| plan.patch_plan().files_len());
                 let coastal = plan.map_or(0, ProjectSavePlan::coastal_flags_recalculated);
-                let blocked = report.is_some_and(|report| report.delta.blocks_save())
-                    || !matches!(self.current_round_trip_status(), Some(RoundTripStatus::Passed | RoundTripStatus::PassedWithReview));
+                let validation_blocked = report.is_some_and(|report| report.delta.blocks_save());
+                let round_trip_failed = !matches!(
+                    self.project_save_round_trip_status(),
+                    Some(RoundTripStatus::Passed | RoundTripStatus::PassedWithReview)
+                );
+                let blocked = validation_blocked || round_trip_failed;
                 let blocking = project_validation_blockers(report);
                 let mut lines = vec![
                     tr("project_validation.changes").to_owned(),
@@ -3424,8 +3548,14 @@ impl Canvas {
                         lines.extend(blocking.iter().take(3).map(|(source, diagnostic)| {
                             validation_problem_summary(source, diagnostic)
                         }));
-                    } else {
-                        lines.push(tr("project_validation.round_trip_save_blocked").to_owned());
+                    } else if round_trip_failed {
+                        lines.push("Round-trip verification failed.".to_owned());
+                        lines.push(
+                            self.active_round_trip_failure_snapshot().map_or_else(
+                                || tr("project_validation.round_trip_save_blocked").to_owned(),
+                                |snapshot| snapshot.summary.clone(),
+                            ),
+                        );
                     }
                 } else {
                     lines.push(tr("project_validation.no_new_blockers").to_owned());
@@ -3444,10 +3574,31 @@ impl Canvas {
                     } else {
                         tr("project_validation.ready_to_save")
                     },
-                    if blocked { tr("project_validation.view_blocking_problems") } else { tr("workspace.save_project") },
+                    if validation_blocked {
+                        tr("project_validation.view_blocking_problems")
+                    } else if round_trip_failed {
+                        "View Integrity Problem"
+                    } else {
+                        tr("workspace.save_project")
+                    },
                     if blocked { tr("project_validation.view_existing_issues") } else { tr("project_validation.view_problems") },
                     tr("project_validation.close"),
                     lines,
+                )
+            }
+            StateApplyDialog::IntegrityProblem => {
+                let detail = self
+                    .active_round_trip_failure_snapshot()
+                    .map_or_else(
+                        || "Round-trip verification failed before a detailed report could be retained. Prepare Save Project again to capture a fresh report.".to_owned(),
+                        |snapshot| snapshot.details.clone(),
+                    );
+                (
+                    "ROUND-TRIP INTEGRITY PROBLEM",
+                    "Close",
+                    "Copy Details",
+                    "",
+                    detail.lines().map(str::to_owned).collect(),
                 )
             }
             StateApplyDialog::Blocked => (
@@ -6137,7 +6288,33 @@ impl Canvas {
         self.map_layers.show_adjacencies = !self.map_layers.show_adjacencies;
     }
 
-    pub fn enabled_options(&self) -> [bool; 6] {
+    pub fn toggle_resources_overlay(&mut self, alerts: &mut Alerts) {
+        let available = self
+            .project
+            .as_ref()
+            .is_some_and(Hoi4Project::state_load_is_complete)
+            && self.state_edit_session.is_some();
+        if !available {
+            alerts.push(Err(
+                "Resources overlay is available only for fully loaded HOI4 state projects",
+            ));
+            return;
+        }
+        self.map_layers.show_resources = !self.map_layers.show_resources;
+        if self.map_layers.show_resources {
+            self.refresh_resource_labels();
+        }
+        alerts.push(Ok(format!(
+            "Resources overlay: {}",
+            if self.map_layers.show_resources {
+                "shown"
+            } else {
+                "hidden"
+            }
+        )));
+    }
+
+    pub fn enabled_options(&self) -> [bool; 7] {
         [
             self.map_layers.show_rivers,
             self.map_layers.show_adjacencies,
@@ -6145,10 +6322,11 @@ impl Canvas {
             self.map_layers.show_province_boundaries,
             self.map_layers.show_state_boundaries,
             self.map_layers.image_overlay.enabled,
+            self.map_layers.show_resources,
         ]
     }
 
-    pub fn available_options(&self) -> [bool; 6] {
+    pub fn available_options(&self) -> [bool; 7] {
         [
             self.bundle.map.get_rivers_overlay().is_some(),
             self.bundle.map.connections_count() > 0,
@@ -6156,6 +6334,10 @@ impl Canvas {
             true,
             self.is_state_workspace(),
             self.image_overlay_texture.is_some(),
+            self.project
+                .as_ref()
+                .is_some_and(Hoi4Project::state_load_is_complete)
+                && self.state_edit_session.is_some(),
         ]
     }
 
@@ -6406,16 +6588,19 @@ impl Canvas {
             alerts.push(Err(
                 "States and Political views are available only for loaded state projects",
             ));
-        } else if map_view_mode == MapViewMode::Resources
-            && self
-                .project
-                .as_ref()
-                .is_some_and(|project| !project.state_load_is_complete())
-        {
-            alerts.push(Err(
-                "Resources view is unavailable because State loading is incomplete",
-            ));
+        } else if map_view_mode == MapViewMode::Resources {
+            // Compatibility for saved pre-overlay preferences. Resources no longer
+            // replaces the map view; it is displayed over the active base layer.
+            if self.map_layers.base_view == MapViewMode::Resources {
+                self.map_layers.base_view = MapViewMode::States;
+            }
+            if !self.map_layers.show_resources {
+                self.toggle_resources_overlay(alerts);
+            }
         } else if map_view_mode != self.map_layers.base_view {
+            // View-specific refreshes are lazy and therefore need to observe the view
+            // being activated before they decide whether work is necessary.
+            self.map_layers.base_view = map_view_mode;
             match map_view_mode {
                 MapViewMode::ProvinceColors => {
                     self.view_mode = ViewMode::Color;
@@ -6442,9 +6627,8 @@ impl Canvas {
                 }
                 MapViewMode::States => {}
                 MapViewMode::Political => self.refresh_political_texture(),
-                MapViewMode::Resources => self.refresh_resource_labels(),
+                MapViewMode::Resources => unreachable!("Resources is an overlay"),
             }
-            self.map_layers.base_view = map_view_mode;
             self.workspace_views
                 .remember(self.workspace_mode, map_view_mode);
             let label = if map_view_mode == MapViewMode::Resources {
@@ -6720,6 +6904,22 @@ impl Canvas {
             .map(|report| report.status)
     }
 
+    /// Save Project validates a combined map/state candidate directly, rather
+    /// than through the State patch-preview workflow. Its result must therefore
+    /// not be queried through `current_round_trip_status`, which deliberately
+    /// requires a patch preview.
+    fn project_save_round_trip_status(&self) -> Option<RoundTripStatus> {
+        self.project_save_validation
+            .as_ref()
+            .map(|validation| validation.round_trip.status)
+    }
+
+    fn active_round_trip_failure_snapshot(&self) -> Option<&RoundTripFailureSnapshot> {
+        self.round_trip_failure_snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot_belongs_to_generation(snapshot, self.project_generation))
+    }
+
     pub fn state_apply_dialog_is_open(&self) -> bool {
         self.state_apply_dialog.is_some()
     }
@@ -6899,12 +7099,24 @@ impl Canvas {
                 }
                 StateApplyDialog::ViewChanges => self.state_apply_dialog = None,
                 StateApplyDialog::ProjectSaveReview => {
-                    match project_save_review_primary_action(self.project_save_is_blocked()) {
+                    let validation_blocked = self
+                        .project_validation_report
+                        .as_ref()
+                        .is_some_and(|report| report.delta.blocks_save());
+                    let round_trip_failed = !matches!(
+                        self.project_save_round_trip_status(),
+                        Some(RoundTripStatus::Passed | RoundTripStatus::PassedWithReview)
+                    );
+                    match project_save_review_primary_action(validation_blocked, round_trip_failed)
+                    {
                         ProjectSaveReviewPrimaryAction::ConfirmSave => {
                             return StateApplyDialogAction::ConfirmProjectSave;
                         }
                         ProjectSaveReviewPrimaryAction::ViewBlockingProblems => {
                             self.open_validation_problems(true, ValidationSourceFilter::All);
+                        }
+                        ProjectSaveReviewPrimaryAction::ViewIntegrityProblem => {
+                            self.state_apply_dialog = Some(StateApplyDialog::IntegrityProblem);
                         }
                     }
                 }
@@ -6957,6 +7169,7 @@ impl Canvas {
                         self.validate_project_for_ui(alerts);
                     }
                 }
+                StateApplyDialog::IntegrityProblem => self.state_apply_dialog = None,
                 StateApplyDialog::ImageOverlay => self.toggle_image_overlay(alerts),
                 StateApplyDialog::ProvinceRemoval => {
                     return StateApplyDialogAction::ConfirmProvinceTransfer;
@@ -6974,6 +7187,11 @@ impl Canvas {
                 StateApplyDialog::ValidationResults => {
                     self.validation_problems_view.show_technical_details =
                         !self.validation_problems_view.show_technical_details
+                }
+                StateApplyDialog::IntegrityProblem => {
+                    if let Some(snapshot) = self.active_round_trip_failure_snapshot() {
+                        return StateApplyDialogAction::CopyDetails(snapshot.details.clone());
+                    }
                 }
                 StateApplyDialog::ImageOverlay => self.state_apply_dialog = None,
                 StateApplyDialog::ProvinceRemoval => {
@@ -7016,16 +7234,6 @@ impl Canvas {
 
     pub fn open_view_changes(&mut self) {
         self.state_apply_dialog = Some(StateApplyDialog::ViewChanges);
-    }
-
-    fn project_save_is_blocked(&self) -> bool {
-        self.project_validation_report
-            .as_ref()
-            .is_some_and(|report| report.delta.blocks_save())
-            || !matches!(
-                self.current_round_trip_status(),
-                Some(RoundTripStatus::Passed | RoundTripStatus::PassedWithReview)
-            )
     }
 
     fn open_validation_problems(&mut self, blocking_only: bool, source: ValidationSourceFilter) {
@@ -7182,6 +7390,15 @@ impl Canvas {
         ));
     }
 
+    /// The replacement Canvas will never receive this worker's result. Ask it
+    /// to stop as well so a discarded project cannot keep consuming I/O after
+    /// a successful project switch.
+    pub(crate) fn retire_project_context(&mut self) {
+        if let Some(task) = self.round_trip_task.as_ref() {
+            task.cancellation.cancel();
+        }
+    }
+
     pub fn view_round_trip_report(&mut self, alerts: &mut Alerts) {
         let Some(report) = self.round_trip_report.as_ref() else {
             alerts.push(Err("No round-trip validation report is available"));
@@ -7203,6 +7420,7 @@ impl Canvas {
             return;
         }
         self.round_trip_report = None;
+        self.round_trip_failure_snapshot = None;
         self.round_trip_status = None;
         self.review_required_apply_approved = false;
         self.refresh_state_information();
@@ -7356,6 +7574,14 @@ impl Canvas {
         {
             return Err("Apply or cancel the active draft/tool before Save Project.".to_owned());
         }
+        // A new Save Project preparation supersedes any previous blocker. The
+        // next failed candidate will install a fresh immutable snapshot.
+        self.round_trip_failure_snapshot = None;
+        // A map edit can introduce a stable Province ID before the State
+        // workspace is entered. Reconcile that identity immediately before
+        // deriving both the State patch plan and the map candidate so they
+        // describe the exact same candidate project.
+        self.synchronize_created_state_provinces();
         let project = self
             .project
             .as_ref()
@@ -7429,7 +7655,10 @@ impl Canvas {
             combined.round_trip.status,
             RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
         ) {
-            self.remember_combined_validation(&combined, StateApplyDialog::ValidationResults);
+            // Keep the Save Project review open with its immutable blocker
+            // snapshot. Sending this through ValidationResults made a
+            // round-trip failure look like an ordinary source diagnostic.
+            self.remember_combined_validation(&combined, StateApplyDialog::ProjectSaveReview);
             return Err(combined.round_trip.summary_text());
         }
         let mut plan = ProjectSavePlan::new(
@@ -7467,6 +7696,15 @@ impl Canvas {
         dialog: StateApplyDialog,
     ) {
         self.project_validation_report = combined.project_validation.clone();
+        self.round_trip_report = Some(combined.round_trip.clone());
+        self.round_trip_status = Some(combined.round_trip.summary_text());
+        self.round_trip_failure_snapshot = (!matches!(
+            combined.round_trip.status,
+            RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
+        ))
+        .then(|| {
+            RoundTripFailureSnapshot::from_report(self.project_generation, &combined.round_trip)
+        });
         let result = if !matches!(
             combined.round_trip.status,
             RoundTripStatus::Passed | RoundTripStatus::PassedWithReview
@@ -8135,6 +8373,7 @@ impl Canvas {
         self.patch_preview = None;
         self.patch_preview_file = 0;
         self.round_trip_report = None;
+        self.round_trip_failure_snapshot = None;
         self.round_trip_status = None;
         self.review_required_apply_approved = false;
         self.state_apply_dialog = None;
@@ -9292,66 +9531,74 @@ impl Canvas {
     }
 
     fn refresh_political_texture(&mut self) {
-        let Some(project) = self.project.as_ref() else {
+        if self.map_layers.base_view != MapViewMode::Political {
+            return;
+        }
+        self.ensure_political_country_catalog();
+        if self.project.is_none() {
             self.political_texture = None;
             self.political_labels.clear();
             return;
-        };
-        let Some(edit) = self.state_edit_session.as_ref() else {
-            self.political_texture = None;
-            self.political_labels.clear();
-            return;
-        };
-        let owners = edit
-            .valid_state_ids()
-            .iter()
-            .filter_map(|state_id| {
-                let state = edit.state_data(*state_id)?;
-                Some((*state_id, state.history.owner.clone()))
-            })
-            .collect::<BTreeMap<_, _>>();
-        let state_ownership = edit
-            .valid_state_ids()
-            .iter()
-            .filter_map(|state_id| {
-                let state = edit.state_data(*state_id)?;
-                Some(PoliticalStateOwnership {
-                    owner: state.history.owner.clone(),
-                    provinces: state.provinces.iter().copied().collect(),
+        }
+        let (owners, state_ownership, state_by_province, unassigned) = {
+            let Some(edit) = self.state_edit_session.as_ref() else {
+                self.political_texture = None;
+                self.political_labels.clear();
+                return;
+            };
+            let owners = edit
+                .valid_state_ids()
+                .iter()
+                .filter_map(|state_id| {
+                    let state = edit.state_data(*state_id)?;
+                    Some((*state_id, state.history.owner.clone()))
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<BTreeMap<_, _>>();
+            let state_ownership = edit
+                .valid_state_ids()
+                .iter()
+                .filter_map(|state_id| {
+                    let state = edit.state_data(*state_id)?;
+                    Some(PoliticalStateOwnership {
+                        owner: state.history.owner.clone(),
+                        provinces: state.provinces.iter().copied().collect(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            (
+                owners,
+                state_ownership,
+                edit.state_by_province().clone(),
+                edit.unassigned_land_provinces().clone(),
+            )
+        };
         let owner_tags = owners
             .values()
             .filter_map(|owner| owner.clone())
             .collect::<BTreeSet<_>>();
+        let ambiguous = self
+            .project
+            .as_ref()
+            .expect("project presence was checked")
+            .ambiguous_provinces
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
         if let Some(catalog) = self.political_country_catalog.as_mut() {
             catalog.resolve_tags(owner_tags);
         }
-        let provinces = self
-            .bundle
-            .map
-            .iter_province_data()
-            .filter_map(|(_, province)| {
-                Some(PoliticalProvince {
-                    id: province.preserved_id?,
-                    is_land: province.kind == ProvinceKind::Land,
-                    center: province.center_of_mass(),
-                    pixel_count: province.pixel_count,
-                })
-            })
-            .collect::<Vec<_>>();
-        self.political_labels =
-            self.political_country_catalog
-                .as_ref()
-                .map_or_else(Vec::new, |catalog| {
-                    prepare_country_labels(
-                        catalog,
-                        &state_ownership,
-                        &provinces,
-                        &self.political_adjacency_pairs,
-                    )
-                });
+        self.ensure_territory_anchor_index();
+        let anchors = self
+            .territory_anchor_index
+            .as_ref()
+            .expect("territory anchor index was initialized");
+        let political_labels = self
+            .political_country_catalog
+            .as_ref()
+            .map_or_else(Vec::new, |catalog| {
+                prepare_country_labels_with_index(catalog, &state_ownership, anchors)
+            });
+        self.political_labels = political_labels;
         if let Some(catalog) = self.political_country_catalog.as_ref() {
             let settings = TextureSettings::new().mag(Filter::Nearest);
             for label in &self.political_labels {
@@ -9367,13 +9614,6 @@ impl Canvas {
                 }
             }
         }
-        let ambiguous = project
-            .ambiguous_provinces
-            .keys()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let state_by_province = edit.state_by_province();
-        let unassigned = edit.unassigned_land_provinces();
         let image = self.bundle.map.gen_texture_buffer(|province_color| {
             let province = self.bundle.map.get_province(province_color);
             if province.kind == ProvinceKind::Unknown {
@@ -9402,15 +9642,35 @@ impl Canvas {
     }
 
     fn reload_political_country_catalog(&mut self) {
+        self.invalidate_political_cache();
+        self.political_language = crate::localization::language().to_owned();
+        self.refresh_political_texture();
+    }
+
+    fn invalidate_political_cache(&mut self) {
+        self.political_country_catalog = None;
+        self.political_flag_textures.clear();
+        self.political_labels.clear();
+        self.political_texture = None;
+        self.political_cache_generation = None;
+    }
+
+    fn ensure_political_country_catalog(&mut self) {
+        if self.political_cache_generation != Some(self.project_generation) {
+            self.invalidate_political_cache();
+        }
+        if self.political_country_catalog.is_some() {
+            return;
+        }
         self.political_country_catalog = self.project.as_ref().map(|project| {
             PoliticalCountryCatalog::load(
                 &project.paths.root,
                 self.definition_base_game_root.as_deref(),
             )
         });
-        self.political_flag_textures.clear();
-        self.political_language = crate::localization::language().to_owned();
-        self.refresh_political_texture();
+        if self.political_country_catalog.is_some() {
+            self.political_cache_generation = Some(self.project_generation);
+        }
     }
 
     fn draw_political_country_labels(
@@ -9477,6 +9737,10 @@ impl Canvas {
     }
 
     fn refresh_resource_labels(&mut self) {
+        self.ensure_resource_cache_generation();
+        if !self.map_layers.show_resources && self.map_layers.base_view != MapViewMode::Resources {
+            return;
+        }
         let Some(project) = self.project.as_ref() else {
             self.resource_labels.clear();
             return;
@@ -9501,34 +9765,75 @@ impl Canvas {
                 })
             })
             .collect::<Vec<_>>();
-        let provinces = self
-            .bundle
-            .map
-            .iter_province_data()
-            .filter_map(|(_, province)| {
-                Some(PoliticalProvince {
-                    id: province.preserved_id?,
-                    is_land: province.kind == ProvinceKind::Land,
-                    center: province.center_of_mass(),
-                    pixel_count: province.pixel_count,
+        self.ensure_territory_anchor_index();
+        let anchors = self
+            .territory_anchor_index
+            .as_ref()
+            .expect("territory anchor index was initialized");
+        let resource_labels = prepare_resource_labels_with_index(&states, anchors);
+        self.resource_labels = resource_labels;
+    }
+
+    fn ensure_territory_anchor_index(&mut self) -> &TerritoryAnchorIndex {
+        if self.territory_anchor_generation != Some(self.project_generation) {
+            self.territory_anchor_index = None;
+        }
+        if self.territory_anchor_index.is_none() {
+            let provinces = self
+                .bundle
+                .map
+                .iter_province_data()
+                .filter_map(|(_, province)| {
+                    Some(PoliticalProvince {
+                        id: province.preserved_id?,
+                        is_land: province.kind == ProvinceKind::Land,
+                        center: province.center_of_mass(),
+                        pixel_count: province.pixel_count,
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        self.resource_labels =
-            prepare_resource_labels(&states, &provinces, &self.political_adjacency_pairs);
+                .collect::<Vec<_>>();
+            self.territory_anchor_index = Some(TerritoryAnchorIndex::new(
+                &provinces,
+                &self.political_adjacency_pairs,
+            ));
+            self.territory_anchor_generation = Some(self.project_generation);
+        }
+        self.territory_anchor_index
+            .as_ref()
+            .expect("territory anchor index was initialized")
     }
 
     fn reload_resource_icons(&mut self) {
+        self.resource_icon_resolver = None;
+        self.resource_icon_textures.clear();
+        self.resource_labels.clear();
+        self.resource_cache_generation = None;
+    }
+
+    fn ensure_resource_cache_generation(&mut self) {
+        if self.resource_cache_generation != Some(self.project_generation) {
+            self.resource_icon_resolver = None;
+            self.resource_icon_textures.clear();
+            self.resource_labels.clear();
+            self.resource_cache_generation = Some(self.project_generation);
+        }
+    }
+
+    fn ensure_resource_icon_resolver(&mut self) {
+        self.ensure_resource_cache_generation();
+        if self.resource_icon_resolver.is_some() {
+            return;
+        }
         self.resource_icon_resolver = self.project.as_ref().map(|project| {
             ResourceIconResolver::load(
                 &project.paths.root,
                 self.definition_base_game_root.as_deref(),
             )
         });
-        self.resource_icon_textures.clear();
     }
 
     fn resource_icon_texture(&mut self, key: &str) -> Option<&Texture> {
+        self.ensure_resource_icon_resolver();
         if !self.resource_icon_textures.contains_key(key) {
             let texture = self
                 .resource_icon_resolver
@@ -10648,6 +10953,9 @@ impl Canvas {
                 "Image {}%",
                 (self.map_layers.image_overlay.opacity * 100.0).round() as u32
             ));
+        }
+        if self.map_layers.show_resources {
+            overlays.push("Resources".to_owned());
         }
         let mut map_info = format!(
             "Workspace: {} · Map View: {}",
@@ -12647,6 +12955,13 @@ where
     }
 }
 
+fn snapshot_belongs_to_generation(
+    snapshot: &RoundTripFailureSnapshot,
+    generation: ProjectGeneration,
+) -> bool {
+    snapshot.generation == generation
+}
+
 fn cycle_continents(continent: Option<u16>, backwards: bool) -> u16 {
     const MAX_CONTINENTS: u16 = 32;
     continent.map_or(0, |continent| {
@@ -12693,6 +13008,23 @@ mod tests {
     use image::{DynamicImage, ImageOutputFormat};
 
     use super::*;
+
+    #[test]
+    fn round_trip_failure_snapshot_cannot_cross_project_generations() {
+        let snapshot = RoundTripFailureSnapshot {
+            generation: ProjectGeneration(4),
+            summary: "Province 521 changed state membership".to_owned(),
+            details: "semantic mismatch".to_owned(),
+        };
+        assert!(snapshot_belongs_to_generation(
+            &snapshot,
+            ProjectGeneration(4)
+        ));
+        assert!(!snapshot_belongs_to_generation(
+            &snapshot,
+            ProjectGeneration(5)
+        ));
+    }
 
     #[test]
     fn only_newly_removed_provinces_with_state_references_are_blocked() {
@@ -12872,16 +13204,20 @@ mod tests {
     #[test]
     fn blocked_project_save_review_cannot_authorize_save() {
         assert_eq!(
-            project_save_review_primary_action(true),
+            project_save_review_primary_action(true, true),
             ProjectSaveReviewPrimaryAction::ViewBlockingProblems
         );
         assert_ne!(
-            project_save_review_primary_action(true),
+            project_save_review_primary_action(true, false),
             ProjectSaveReviewPrimaryAction::ConfirmSave
         );
         assert_eq!(
-            project_save_review_primary_action(false),
+            project_save_review_primary_action(false, false),
             ProjectSaveReviewPrimaryAction::ConfirmSave
+        );
+        assert_eq!(
+            project_save_review_primary_action(false, true),
+            ProjectSaveReviewPrimaryAction::ViewIntegrityProblem
         );
     }
 

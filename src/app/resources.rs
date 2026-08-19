@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use image::{GenericImageView, RgbaImage};
 
-use super::political::{PoliticalProvince, territory_anchor};
+use super::political::{PoliticalProvince, TerritoryAnchorIndex};
 use super::state::{PdxBlock, PdxEntry, PdxValue, parse_text};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +38,14 @@ pub fn prepare_resource_labels(
     provinces: &[PoliticalProvince],
     adjacency_pairs: &[(u32, u32)],
 ) -> Vec<ResourceMapLabel> {
+    let anchors = TerritoryAnchorIndex::new(provinces, adjacency_pairs);
+    prepare_resource_labels_with_index(states, &anchors)
+}
+
+pub(crate) fn prepare_resource_labels_with_index(
+    states: &[ResourceMapState],
+    anchors: &TerritoryAnchorIndex,
+) -> Vec<ResourceMapLabel> {
     states
         .iter()
         .filter_map(|state| {
@@ -50,12 +58,12 @@ pub fn prepare_resource_labels(
                     amount: *amount,
                 })
                 .collect::<Vec<_>>();
-            let (anchor, territory_pixels) = territory_anchor(
-                &state.provinces.iter().copied().collect(),
-                provinces,
-                adjacency_pairs,
-            )?;
-            (!rows.is_empty()).then_some(ResourceMapLabel {
+            if rows.is_empty() {
+                return None;
+            }
+            let owned = state.provinces.iter().copied().collect();
+            let (anchor, territory_pixels) = anchors.territory_anchor(&owned)?;
+            Some(ResourceMapLabel {
                 state_id: state.state_id,
                 anchor,
                 territory_pixels,
@@ -84,7 +92,10 @@ struct ResourceStrip {
 pub struct ResourceIconResolver {
     frames: BTreeMap<String, u32>,
     strip: Option<ResourceStrip>,
+    decoded_strip: Option<Option<RgbaImage>>,
     cached_icons: BTreeMap<String, Option<RgbaImage>>,
+    #[cfg(test)]
+    strip_decode_attempts: usize,
 }
 
 impl ResourceIconResolver {
@@ -155,22 +166,37 @@ impl ResourceIconResolver {
         }
     }
 
-    fn decode_icon(&self, key: &str) -> Option<RgbaImage> {
+    fn decode_icon(&mut self, key: &str) -> Option<RgbaImage> {
         let frame = self.frames.get(key)?.checked_sub(1)?;
-        let strip = self.strip.as_ref()?;
-        if frame >= strip.frames {
+        let frames = self.strip.as_ref()?.frames;
+        if frame >= frames {
             return None;
         }
-        let image = image::open(&strip.path)
-            .ok()
-            .or_else(|| decode_uncompressed_dds(&strip.path))?;
+        let image = self.decoded_strip()?;
         let (width, height) = image.dimensions();
-        let frame_width = width.checked_div(strip.frames)?;
+        let frame_width = width.checked_div(frames)?;
         (frame_width > 0 && height > 0).then(|| {
             image
                 .view(frame * frame_width, 0, frame_width, height)
                 .to_image()
         })
+    }
+
+    fn decoded_strip(&mut self) -> Option<&RgbaImage> {
+        if self.decoded_strip.is_none() {
+            #[cfg(test)]
+            {
+                self.strip_decode_attempts += 1;
+            }
+            let decoded = self.strip.as_ref().and_then(|strip| {
+                image::open(&strip.path)
+                    .ok()
+                    .or_else(|| decode_uncompressed_dds(&strip.path))
+                    .map(|image| image.to_rgba8())
+            });
+            self.decoded_strip = Some(decoded);
+        }
+        self.decoded_strip.as_ref().and_then(Option::as_ref)
     }
 }
 
@@ -372,6 +398,36 @@ mod tests {
             resolver.icon("steel").unwrap().get_pixel(0, 0).0,
             [40, 0, 0, 255]
         );
+    }
+
+    #[test]
+    fn resource_strip_is_decoded_once_for_multiple_icon_frames() {
+        let root = std::env::temp_dir().join(format!(
+            "hoi4-resource-strip-cache-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_resource_fixture(&root, 1, [[10, 0, 0, 255], [20, 0, 0, 255]]);
+        fs::write(
+            root.join("common/resources/resources.txt"),
+            "steel = { icon_frame = 1 } oil = { icon_frame = 2 }",
+        )
+        .unwrap();
+
+        let mut resolver = ResourceIconResolver::load(&root, None);
+        assert_eq!(
+            resolver.icon("steel").unwrap().get_pixel(0, 0).0,
+            [10, 0, 0, 255]
+        );
+        fs::remove_file(root.join("gfx/interface/resources_strip.png")).unwrap();
+        assert_eq!(
+            resolver.icon("oil").unwrap().get_pixel(0, 0).0,
+            [20, 0, 0, 255]
+        );
+        assert_eq!(resolver.strip_decode_attempts, 1);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     fn write_resource_fixture(root: &Path, frame: u32, pixels: [[u8; 4]; 2]) {

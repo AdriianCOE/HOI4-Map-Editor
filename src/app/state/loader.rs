@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::{SourceText, StateDocument, extract_state, parse};
 use crate::app::project::{DiagnosticSeverity, ProjectDiagnostic, ProjectDiagnosticKind};
@@ -10,10 +11,13 @@ pub struct StateLoadBatch {
     pub diagnostics: Vec<ProjectDiagnostic>,
     pub files_found: usize,
     pub files_read: usize,
+    pub discovery_in: Duration,
+    pub read_parse_in: Duration,
 }
 
 pub fn load_state_documents(directory: &Path) -> StateLoadBatch {
     let mut batch = StateLoadBatch::default();
+    let discovery_started = std::time::Instant::now();
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(err) => {
@@ -56,10 +60,13 @@ pub fn load_state_documents(directory: &Path) -> StateLoadBatch {
 
     paths.sort();
     batch.files_found = paths.len();
+    batch.discovery_in = discovery_started.elapsed();
+    let read_parse_started = std::time::Instant::now();
     for path in paths {
         let document = load_document(path, &mut batch);
         batch.documents.push(document);
     }
+    batch.read_parse_in = read_parse_started.elapsed();
 
     batch
 }

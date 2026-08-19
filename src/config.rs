@@ -105,6 +105,7 @@ pub struct OverlayPreferences {
     pub province_boundaries: bool,
     pub state_boundaries: bool,
     pub image: bool,
+    pub resources: bool,
 }
 
 #[derive(Debug, Clone)]

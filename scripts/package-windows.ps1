@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $metadata = cargo metadata --manifest-path (Join-Path $repoRoot "Cargo.toml") --no-deps --format-version 1 | ConvertFrom-Json
-$version = ($metadata.packages | Where-Object name -eq "hoi4_state_editor" | Select-Object -First 1).version
+$version = ($metadata.packages | Where-Object name -eq "hoi4_map_editor" | Select-Object -First 1).version
 if (-not $version) { throw "Unable to determine package version." }
 
 $packageName = "HOI4-Map-Editor-v$version-windows-x64"
@@ -72,7 +72,7 @@ if (-not $SkipBuild) {
     }
 }
 
-$binary = Join-Path $packageTarget "release\hoi4_state_editor.exe"
+$binary = Join-Path $packageTarget "release\hoi4_map_editor.exe"
 if (-not (Test-Path -LiteralPath $binary)) { throw "Release executable not found: $binary" }
 
 New-Item -ItemType Directory -Path $stage | Out-Null

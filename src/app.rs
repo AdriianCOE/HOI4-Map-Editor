@@ -19,7 +19,9 @@ use piston::input::{Key, MouseButton};
 use vecmath::Vector2;
 
 use self::alerts::Alerts;
-use self::canvas::{Canvas, InspectorExternalRequest, StateApplyDialogAction, ToolMode, ViewMode};
+use self::canvas::{
+    Canvas, InspectorExternalRequest, ProjectGeneration, StateApplyDialogAction, ToolMode, ViewMode,
+};
 use self::interface::{ButtonId, Interface, StateActionAvailability, get_interface};
 use self::map::ProvinceSaveMode;
 use self::map_layers::WorkspaceMode;
@@ -106,6 +108,7 @@ pub struct App {
     global_config_issue: Option<ConfigIssue>,
     preferences_dialog: Option<PreferencesDialog>,
     viewport: Option<Viewport>,
+    project_generation: ProjectGeneration,
 }
 
 impl EventHandler for App {
@@ -134,6 +137,7 @@ impl EventHandler for App {
             global_config_issue: loaded.and_then(|loaded| loaded.issue),
             preferences_dialog: None,
             viewport: None,
+            project_generation: ProjectGeneration::default(),
         }
     }
 
@@ -681,6 +685,14 @@ impl EventHandler for App {
         if self
             .canvas
             .as_ref()
+            .is_some_and(Canvas::has_unsaved_province_edits)
+            && !msg_dialog_discard_province_edits()
+        {
+            return;
+        }
+        if self
+            .canvas
+            .as_ref()
             .is_some_and(Canvas::has_unsaved_state_edits)
             && !msg_dialog_discard_state_edits()
         {
@@ -1192,8 +1204,8 @@ impl App {
                 view_mode: None,
                 selected_tool: None,
                 state_tool: None,
-                enabled_options: [false; 6],
-                available_options: [false; 6],
+                enabled_options: [false; 7],
+                available_options: [false; 7],
                 states_available: false,
                 state_actions: StateActionAvailability::default(),
                 blocks_tooltips: false,
@@ -1514,8 +1526,8 @@ impl App {
             (Some(_), ToolbarViewPoliticalMap) => {
                 self.action_change_map_view_mode(MapViewMode::Political)
             }
-            (Some(_), ToolbarViewResourcesMap) => {
-                self.action_change_map_view_mode(MapViewMode::Resources)
+            (Some(canvas), ToolbarViewResourcesMap | ToolbarViewToggleResourcesOverlay) => {
+                canvas.toggle_resources_overlay(&mut self.alerts)
             }
             (Some(canvas), ToolbarViewToggleAdjacencies | SidebarOptionAdjacencies) => {
                 canvas.toggle_adjacencies_overlay()
@@ -1633,6 +1645,7 @@ impl App {
             self.global_config.overlays.province_boundaries = enabled[3];
             self.global_config.overlays.state_boundaries = enabled[4];
             self.global_config.overlays.image = enabled[5];
+            self.global_config.overlays.resources = enabled[6];
         }
     }
 
@@ -1810,13 +1823,12 @@ impl App {
             return;
         }
         if let Some(canvas) = &mut self.canvas {
-            if canvas.has_unsaved_province_edits() {
-                if msg_dialog_unsaved_changes() {
-                    self.action_save_map();
-                };
-            } else if canvas.has_unsaved_state_edits() && !msg_dialog_discard_state_edits() {
+            if canvas.has_unsaved_province_edits() && !msg_dialog_discard_province_edits() {
                 return;
-            };
+            }
+            if canvas.has_unsaved_state_edits() && !msg_dialog_discard_state_edits() {
+                return;
+            }
         };
 
         if let Some(location) = file_dialog_open(archive) {
@@ -1953,7 +1965,7 @@ impl App {
               (Canvas::load(location)?, success_message)
             }
           };
-          self.canvas = Some(canvas);
+          self.replace_project_canvas(canvas);
           self.apply_remembered_ui_preferences();
           if let Some(project) = self.canvas.as_ref().and_then(Canvas::project) {
               self.global_config.last_project = Some(project.paths.root.clone());
@@ -1962,6 +1974,31 @@ impl App {
         };
 
         self.handle_result(result);
+    }
+
+    /// Install only a fully loaded replacement. `raw_open_map_at` constructs
+    /// the candidate Canvas first, so a failed load leaves the old context
+    /// untouched. A Canvas owns all map-sized textures, sessions, diagnostics,
+    /// lazy Political/Resources caches, and save state; replacing it drops all
+    /// of those objects together rather than allowing a hybrid project.
+    fn replace_project_canvas(&mut self, mut canvas: Canvas) {
+        self.project_generation = next_project_generation(self.project_generation);
+        canvas.bind_project_generation(self.project_generation);
+        if let Some(previous) = self.canvas.as_mut() {
+            previous.retire_project_context();
+        }
+        let previous = self.canvas.replace(canvas);
+        drop(previous);
+
+        // These are App-level interaction transients, not global preferences.
+        self.painting = false;
+        self.left_press_consumed = false;
+        if matches!(
+            self.preferences_dialog.as_ref(),
+            Some(PreferencesDialog::Project { .. })
+        ) {
+            self.preferences_dialog = None;
+        }
     }
 
     fn handle_result_none(&mut self, result: Result<(), Error>) {
@@ -2015,6 +2052,9 @@ impl App {
             if current[5] != desired.image {
                 canvas.toggle_image_overlay(&mut self.alerts);
             }
+            if current[6] != desired.resources {
+                canvas.toggle_resources_overlay(&mut self.alerts);
+            }
         }
     }
 
@@ -2024,6 +2064,10 @@ impl App {
             Err(err) => Err(format!("Error: {}", err)),
         });
     }
+}
+
+fn next_project_generation(current: ProjectGeneration) -> ProjectGeneration {
+    ProjectGeneration(current.0.wrapping_add(1))
 }
 
 pub fn open_source_with<F>(path: &Path, opener: F) -> Result<(), Error>
@@ -2314,8 +2358,8 @@ pub struct InterfaceDrawContext {
     pub view_mode: Option<ViewMode>,
     pub selected_tool: Option<usize>,
     pub state_tool: Option<usize>,
-    pub enabled_options: [bool; 6],
-    pub available_options: [bool; 6],
+    pub enabled_options: [bool; 7],
+    pub available_options: [bool; 7],
     pub states_available: bool,
     pub state_actions: StateActionAvailability,
     pub blocks_tooltips: bool,
@@ -2462,6 +2506,15 @@ mod workspace_shortcut_tests {
     use super::*;
 
     #[test]
+    fn project_replacement_always_uses_a_new_generation() {
+        let first = next_project_generation(ProjectGeneration::default());
+        let second = next_project_generation(first);
+        assert_ne!(first, second);
+        assert_eq!(first.0, 1);
+        assert_eq!(second.0, 2);
+    }
+
+    #[test]
     fn workspace_shortcuts_do_not_replace_plain_map_view_shortcuts() {
         let ctrl = KeyMods {
             ctrl: true,
@@ -2537,10 +2590,14 @@ fn province_save_confirmation_text() -> &'static str {
      • Province IDs"
 }
 
-fn msg_dialog_unsaved_changes() -> bool {
+fn msg_dialog_discard_province_edits() -> bool {
     let result = MessageDialog::new()
         .set_title(crate::APPNAME)
-        .set_description("You have unsaved changes, would you like to save them?")
+        .set_description(
+            "This map contains unsaved Province edits.\n\n\
+             Yes = Discard edits and open the other project\n\
+             No = Keep editing the current project",
+        )
         .set_level(MessageLevel::Warning)
         .set_buttons(MessageButtons::YesNo)
         .show();

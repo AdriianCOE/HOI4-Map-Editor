@@ -1,7 +1,7 @@
 # Arquitetura do HOI4 Map Editor
 
 HOI4 Map Editor e o nome publico do projeto. O crate/binario
-`hoi4_state_editor`, o diretorio de backup `.hoi4-state-editor`, `MapViewMode`
+`hoi4_map_editor`, o diretorio de backup `.hoi4-state-editor`, `MapViewMode`
 e `ViewMode` permanecem como nomes tecnicos de compatibilidade; nao representam
 uma segunda marca publica.
 

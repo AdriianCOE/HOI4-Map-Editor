@@ -1383,7 +1383,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hoi4_state_editor"
+name = "hoi4_map_editor"
 version = "0.1.0-preview.3"
 dependencies = [
  "ahash",

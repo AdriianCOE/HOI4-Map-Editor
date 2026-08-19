@@ -8,6 +8,11 @@ fn main() {
     }
 
     let mut resource = winres::WindowsResource::new();
+    resource
+        .set("FileDescription", "HOI4 Map Editor")
+        .set("ProductName", "HOI4 Map Editor")
+        .set("InternalName", "hoi4_map_editor")
+        .set("OriginalFilename", "hoi4_map_editor.exe");
     resource.set_icon(ICON_PATH);
     resource
         .compile()

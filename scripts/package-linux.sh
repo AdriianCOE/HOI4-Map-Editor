@@ -68,9 +68,9 @@ esac
 metadata="$(cargo metadata --manifest-path "$repo_root/Cargo.toml" --no-deps --format-version 1)"
 version="$(printf '%s' "$metadata" | python3 -c '
 import json, sys
-packages = [p for p in json.load(sys.stdin)["packages"] if p["name"] == "hoi4_state_editor"]
+packages = [p for p in json.load(sys.stdin)["packages"] if p["name"] == "hoi4_map_editor"]
 if len(packages) != 1:
-    raise SystemExit("expected exactly one hoi4_state_editor package")
+    raise SystemExit("expected exactly one hoi4_map_editor package")
 print(packages[0]["version"])
 ')" || die "unable to determine the package version from cargo metadata"
 [[ -n "$version" ]] || die "package version is empty"
@@ -80,7 +80,7 @@ stage="$output_directory/$package_name"
 archive="$output_directory/$package_name.tar.gz"
 checksum="$archive.sha256"
 package_target="$repo_root/target/package-linux"
-binary="$package_target/release/hoi4_state_editor"
+binary="$package_target/release/hoi4_map_editor"
 commit="$(git -C "$repo_root" rev-parse --verify HEAD 2>/dev/null || printf 'unavailable')"
 source_date_epoch="${SOURCE_DATE_EPOCH:-$(git -C "$repo_root" log -1 --format=%ct 2>/dev/null || printf 0)}"
 [[ "$source_date_epoch" =~ ^[0-9]+$ ]] || die "SOURCE_DATE_EPOCH must be an integer"

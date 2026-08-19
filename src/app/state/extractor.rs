@@ -413,7 +413,7 @@ impl<'a> Extractor<'a> {
             if let Some(province_id) = parse_u32(key) {
                 self.extract_province_buildings(item, province_id, state);
             } else {
-                let Some(level) = scalar_text(item).and_then(parse_i64) else {
+                let Some(level) = building_level(item) else {
                     self.push(
                         ProjectDiagnosticKind::InvalidBuilding,
                         DiagnosticSeverity::Error,
@@ -466,7 +466,7 @@ impl<'a> Extractor<'a> {
             let Some(building) = item.key_text() else {
                 continue;
             };
-            let Some(level) = scalar_text(item).and_then(parse_i64) else {
+            let Some(level) = building_level(item) else {
                 self.push(
                     ProjectDiagnosticKind::InvalidBuilding,
                     DiagnosticSeverity::Error,
@@ -611,6 +611,28 @@ fn field_span(block: &PdxBlock, field: &str) -> Option<super::TextSpan> {
         .map(|entry| entry.span)
 }
 
+/// Current HOI4 state files use both `building = 1` and the DLC-aware
+/// `building = { level = 1 allowed = { ... } }` form. The latter still has a
+/// normal editable level; metadata such as `allowed` remains in the source
+/// document and is preserved by patch generation.
+fn building_level(entry: &PdxEntry) -> Option<i64> {
+    if let Some(level) = scalar_text(entry).and_then(parse_i64) {
+        return Some(level);
+    }
+    let block = entry.value.as_block()?;
+    match block
+        .entries
+        .iter()
+        .find(|item| item.key_text() == Some("level"))
+    {
+        Some(level) => scalar_text(level).and_then(parse_i64),
+        // Some scripted landmark blocks intentionally rely on the default
+        // level. Treat the presence of the building as level one instead of
+        // rejecting the entire State document.
+        None => Some(1),
+    }
+}
+
 fn parse_u32(text: &str) -> Option<u32> {
     text.parse::<u32>().ok()
 }
@@ -651,7 +673,7 @@ fn is_date(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::extract_state;
-    use crate::app::project::ProjectDiagnosticKind;
+    use crate::app::project::{DiagnosticSeverity, ProjectDiagnosticKind};
     use crate::app::state::parse_text;
 
     #[test]
@@ -679,6 +701,7 @@ mod tests {
       industrial_complex=1
       5144={ naval_base=1 bunker=2 }
     }
+
   }
 }"#,
         ));
@@ -714,6 +737,42 @@ mod tests {
                 .and_then(|buildings| buildings.get("naval_base")),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn accepts_dlc_aware_buildings_with_a_nested_level() {
+        let result = extract_state(&parse_text(
+            "vanilla-landmark.txt",
+            r#"state={
+                id=70
+                provinces={ 3484 }
+                history={
+                    owner=CZE
+                    buildings={
+                        3484={
+                            landmark_bojnice_castle={
+                                level=1
+                                allowed={ has_dlc="Peace For Our Time" }
+                            }
+                            naval_headquarters={ level=2 allowed={ has_dlc="No Compromise, No Surrender" } }
+                        }
+                    }
+                }
+            }"#,
+        ));
+        let state = result.data.expect("nested building state must load");
+        assert_eq!(
+            state.history.province_buildings[&3484]["landmark_bojnice_castle"],
+            1
+        );
+        assert_eq!(
+            state.history.province_buildings[&3484]["naval_headquarters"],
+            2
+        );
+        assert!(!result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == ProjectDiagnosticKind::InvalidBuilding
+                && diagnostic.severity == DiagnosticSeverity::Error
+        }));
     }
 
     #[test]

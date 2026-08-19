@@ -6,11 +6,11 @@ Set-StrictMode -Version Latest
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $metadata = cargo metadata --manifest-path (Join-Path $repoRoot "Cargo.toml") --no-deps --format-version 1 | ConvertFrom-Json
-$version = ($metadata.packages | Where-Object name -eq "hoi4_state_editor" | Select-Object -First 1).version
+$version = ($metadata.packages | Where-Object name -eq "hoi4_map_editor" | Select-Object -First 1).version
 if (-not $version) { throw "Unable to determine package version." }
 
 $stage = Join-Path (Join-Path $repoRoot $OutputDirectory) "workshop-v$version"
-$binary = Join-Path $repoRoot "target\package-windows\release\hoi4_state_editor.exe"
+$binary = Join-Path $repoRoot "target\package-windows\release\hoi4_map_editor.exe"
 $resolvedRoot = [IO.Path]::GetFullPath($repoRoot).TrimEnd("\")
 $resolvedStage = [IO.Path]::GetFullPath($stage)
 if (-not $resolvedStage.StartsWith("$resolvedRoot\", [StringComparison]::OrdinalIgnoreCase)) {
