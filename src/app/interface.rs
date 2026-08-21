@@ -33,6 +33,16 @@ fn button_width(label: &str) -> u32 {
     (font::get_width_metric_str(label) + PADDING[0] * 2.0).round() as u32
 }
 
+fn project_action_positions(
+    window_width: u32,
+    save_width: u32,
+    review_width: Option<u32>,
+) -> (u32, Option<u32>) {
+    let save_x = window_width.saturating_sub(save_width);
+    let review_x = review_width.map(|width| save_x.saturating_sub(width));
+    (save_x, review_x)
+}
+
 const PALETTE_BUTTON: Palette = Palette {
     foreground: colors::WHITE,
     background: colors::BUTTON,
@@ -206,23 +216,25 @@ impl Interface {
             tr("workspace.save_project")
         };
         let save_width = button_width(save_label);
-        let mut action_x = window_width.saturating_sub(save_width);
-        workspace_buttons.push(ButtonElement {
-            base: ButtonBase::new_fit_width(save_label, [action_x, bar_y], &PALETTE_BUTTON_TOOLBAR),
-            id: ButtonId::WorkspaceApplyToMod,
-        });
-        if window_width >= 720 {
-            let validate_label = if window_width < 980 {
+        let review = (window_width >= 720).then(|| {
+            let label = if window_width < 980 {
                 tr("workspace.view_short")
             } else {
                 tr("workspace.view_changes")
             };
-            let validate_width = button_width(validate_label);
-            action_x = action_x.saturating_sub(validate_width);
+            (label, button_width(label))
+        });
+        let (save_x, review_x) =
+            project_action_positions(window_width, save_width, review.map(|(_, width)| width));
+        workspace_buttons.push(ButtonElement {
+            base: ButtonBase::new_fit_width(save_label, [save_x, bar_y], &PALETTE_BUTTON_TOOLBAR),
+            id: ButtonId::WorkspaceApplyToMod,
+        });
+        if let Some((review_label, _)) = review {
             workspace_buttons.push(ButtonElement {
                 base: ButtonBase::new_fit_width(
-                    validate_label,
-                    [action_x, bar_y],
+                    review_label,
+                    [review_x.expect("review position"), bar_y],
                     &PALETTE_BUTTON_TOOLBAR,
                 ),
                 id: ButtonId::WorkspaceReviewChanges,
@@ -244,7 +256,8 @@ impl Interface {
             };
             let base =
                 ButtonBase::new_fit_width(placeholder, [bar_x, bar_y], &PALETTE_BUTTON_TOOLBAR);
-            if *overlays_selector && bar_x.saturating_add(base.width()) > action_x {
+            if *overlays_selector && bar_x.saturating_add(base.width()) > review_x.unwrap_or(save_x)
+            {
                 continue;
             }
             let mut buttons = Vec::with_capacity(entries.len());
@@ -2678,5 +2691,17 @@ mod layout_regressions {
             "dropdown entries overflow TOOLBAR_DROPDOWN_WIDTH:\n{}",
             overflows.join("\n")
         );
+    }
+
+    #[test]
+    fn save_project_stays_pinned_and_never_overlaps_project_actions() {
+        for width in [384_u32, 700, 720, 980, 1600] {
+            let review_width = (width >= 720).then_some(104);
+            let (save_x, review_x) = project_action_positions(width, 96, review_width);
+            assert_eq!(save_x + 96, width);
+            if let Some(review_x) = review_x {
+                assert!(review_x + review_width.unwrap() <= save_x);
+            }
+        }
     }
 }
