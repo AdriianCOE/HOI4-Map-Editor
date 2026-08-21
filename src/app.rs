@@ -160,9 +160,6 @@ impl EventHandler for App {
                 ));
             }
         } else {
-            #[cfg(any(debug_assertions, feature = "debug-mode"))]
-            self.raw_open_map_at("./test_map.zip");
-            #[cfg(not(any(debug_assertions, feature = "debug-mode")))]
             self.alerts.push(Ok(
                 "HOI4 Map Editor is a standalone tool; no HOI4 playset is required. Open or drag a mod root. Use Help > User Guide for setup help and Help > Open Logs Folder for diagnostics.",
             ));
@@ -1331,10 +1328,13 @@ impl App {
             return;
         }
         if id == ToolbarViewChooseBaseGameDefinitions {
-            if let Some(root) = file_dialog_base_game_definitions()
-                && let Some(canvas) = self.canvas.as_mut()
-            {
-                canvas.set_base_game_definition_root(Some(root), &mut self.alerts);
+            if let Some(root) = file_dialog_base_game_definitions() {
+                let applied = self.canvas.as_mut().is_some_and(|canvas| {
+                    canvas.set_base_game_definition_root(Some(root.clone()), &mut self.alerts)
+                });
+                if applied {
+                    self.remember_base_game_root(Some(root));
+                }
             }
             return;
         }
@@ -1582,8 +1582,13 @@ impl App {
             (Some(canvas), ToolbarViewCycleDeveloperDiagnostics) => {
                 canvas.cycle_developer_diagnostics(&mut self.alerts);
             }
-            (Some(canvas), ToolbarViewClearBaseGameDefinitions) => {
-                canvas.set_base_game_definition_root(None, &mut self.alerts);
+            (Some(_), ToolbarViewClearBaseGameDefinitions) => {
+                let applied = self.canvas.as_mut().is_some_and(|canvas| {
+                    canvas.set_base_game_definition_root(None, &mut self.alerts)
+                });
+                if applied {
+                    self.remember_base_game_root(None);
+                }
             }
             (Some(_), ToolbarViewChooseBaseGameDefinitions) => unreachable!(),
             (Some(canvas), ToolbarViewResetZoom) => canvas.camera.reset(),
@@ -1911,6 +1916,7 @@ impl App {
     }
 
     fn raw_open_map_at(&mut self, location: impl IntoLocation) {
+        let remembered_base_game_root = self.global_config.base_game_root.clone();
         let result: Result<String, Error> = crate::try_block! {
           let location = location.into_location()?;
           let (canvas, success_message) = match location {
@@ -1921,7 +1927,7 @@ impl App {
                     .ok()
                     .and_then(|loaded| loaded.issue);
                 let project = Hoi4Project::new(paths);
-                let canvas = Canvas::load_project(project)
+                let canvas = Canvas::load_project(project, remembered_base_game_root.clone())
                   .map_err(|error| compatibility_open_error(&root, error))?;
                 let mut success_message = format!(
                   "Loaded HOI4 mod from {}\n{}",
@@ -1940,10 +1946,14 @@ impl App {
                 | ProjectPathError::MissingStatesDirectory(_))
                 if root.join("map/provinces.bmp").is_file()
                   && root.join("map/definition.csv").is_file() => {
-                  let location = Location::Directory(root.clone());
+                  // A province-only project still has the same project-root
+                  // layout.  Canvas::load expects a map directory, not its
+                  // parent root; loading the parent silently made this valid
+                  // degradation path fail before it could replace a project.
+                  let location = Location::Directory(root.join("map"));
                   let success_message = format!(
                     "Loaded Province-only project from {}. State editing is unavailable because history/states is missing.",
-                    location
+                    root.display()
                   );
                   (
                     Canvas::load(location)
@@ -2005,6 +2015,24 @@ impl App {
         if let Err(err) = result {
             self.alerts.push(Err(format!("Error: {}", err)));
         };
+    }
+
+    fn remember_base_game_root(&mut self, root: Option<PathBuf>) {
+        self.global_config.base_game_root = root;
+        match self
+            .global_config
+            .save(self.global_config_fingerprint.as_ref(), false, false)
+        {
+            Ok(fingerprint) => {
+                self.global_config_fingerprint = Some(fingerprint);
+                self.alerts.push(Ok(
+                    "Base Game Data path saved in global preferences; map data remains project-local.",
+                ));
+            }
+            Err(error) => self.alerts.push(Err(format!(
+                "Base Game Data was applied for this session but could not be saved: {error}"
+            ))),
+        }
     }
 
     fn apply_remembered_ui_preferences(&mut self) {
@@ -2551,6 +2579,13 @@ mod workspace_shortcut_tests {
         assert!(message.contains("map/provinces.bmp"));
         assert!(message.contains("map/definition.csv"));
         assert!(!message.contains("history/states"));
+    }
+
+    #[test]
+    fn fresh_session_has_no_development_map_fallback() {
+        let config = GlobalConfig::default();
+        assert!(!config.open_last_project);
+        assert!(config.last_project.is_none());
     }
 }
 

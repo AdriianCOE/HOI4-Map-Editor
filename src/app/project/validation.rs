@@ -3279,9 +3279,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires HOI4_STATE_EDITOR_AZARYA_ROOT; mutates only an in-memory candidate"]
-    fn local_azarya_created_unassigned_province_roundtrips_with_its_stable_id() {
-        let root = PathBuf::from(std::env::var("HOI4_STATE_EDITOR_AZARYA_ROOT").unwrap());
+    #[ignore = "requires HOI4_STATE_EDITOR_TEST_PROJECT_ROOT; mutates only an in-memory candidate"]
+    fn external_project_created_unassigned_province_roundtrips_with_its_stable_id() {
+        let root = PathBuf::from(std::env::var("HOI4_STATE_EDITOR_TEST_PROJECT_ROOT").unwrap());
         let paths = ProjectPaths::discover(&root).unwrap();
         let config = Config {
             preserve_ids: true,
@@ -3315,7 +3315,7 @@ mod tests {
                     ],
                 ))
             })
-            .expect("Azarya must contain an assigned land province");
+            .expect("external project must contain an assigned land province");
         assert_eq!(bundle.map.get_color_at(position), source_color);
         assert!(project.state_by_province.contains_key(&source_id));
         let created_color = bundle.random_color_pure(crate::app::map::ProvinceKind::Land);

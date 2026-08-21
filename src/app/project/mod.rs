@@ -671,12 +671,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires HOI4_STATE_EDITOR_AZARYA_ROOT"]
-    fn azarya_state_loader_smoke() {
-        let root = std::env::var_os("HOI4_STATE_EDITOR_AZARYA_ROOT")
+    #[ignore = "requires HOI4_STATE_EDITOR_TEST_PROJECT_ROOT"]
+    fn external_project_state_loader_smoke() {
+        let root = std::env::var_os("HOI4_STATE_EDITOR_TEST_PROJECT_ROOT")
             .map(PathBuf::from)
-            .expect("set HOI4_STATE_EDITOR_AZARYA_ROOT to the Azarya mod root");
-        let paths = ProjectPaths::discover(&root).expect("discover Azarya project paths");
+            .expect("set HOI4_STATE_EDITOR_TEST_PROJECT_ROOT to a HOI4 project root");
+        let paths = ProjectPaths::discover(&root).expect("discover external project paths");
         let bundle = Bundle::load(
             &Location::Directory(paths.map_directory.clone()),
             Config {
@@ -684,7 +684,7 @@ mod tests {
                 ..Config::default()
             },
         )
-        .expect("load Azarya province map");
+        .expect("load external project province map");
         let province_ids = bundle.map.province_ids().collect::<BTreeSet<_>>();
         let land_province_ids = bundle
             .map
@@ -696,7 +696,7 @@ mod tests {
         project.load_states(&province_ids, &land_province_ids);
 
         println!(
-            "Azarya States: files={}, loaded={}, failed={}, discovery={} ms, read + parse={} ms, indexes={} ms",
+            "External project States: files={}, loaded={}, failed={}, discovery={} ms, read + parse={} ms, indexes={} ms",
             project.load_summary.report.files_seen,
             project.load_summary.report.states_loaded,
             project.load_summary.report.files_failed.len(),
@@ -712,10 +712,14 @@ mod tests {
                 failure.reason
             );
         }
-        for state_id in [143, 200] {
+        assert!(
+            !project.states_by_id.is_empty(),
+            "external project has no States"
+        );
+        for state_id in project.states_by_id.keys().take(2).copied() {
             let state = project
                 .state_document(state_id)
-                .expect("Azarya State must load");
+                .expect("indexed external State must load");
             let data = state.data.as_ref().expect("loaded State data");
             assert!(data.provinces.iter().all(|province_id| {
                 project.state_by_province.get(province_id) == Some(&state_id)
@@ -724,22 +728,22 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires HOI4_STATE_EDITOR_AZARYA_ROOT; prints reusable real-project profile"]
-    fn azarya_project_open_component_profile() {
+    #[ignore = "requires HOI4_STATE_EDITOR_TEST_PROJECT_ROOT; prints reusable external-project profile"]
+    fn external_project_open_component_profile() {
         use std::time::Instant;
 
         use crate::app::political::PoliticalCountryCatalog;
         use crate::app::project::{GameDefinitionCatalog, generate_state_view};
         use crate::app::resources::ResourceIconResolver;
 
-        let root = std::env::var_os("HOI4_STATE_EDITOR_AZARYA_ROOT")
+        let root = std::env::var_os("HOI4_STATE_EDITOR_TEST_PROJECT_ROOT")
             .map(PathBuf::from)
-            .expect("set HOI4_STATE_EDITOR_AZARYA_ROOT to the Azarya mod root");
+            .expect("set HOI4_STATE_EDITOR_TEST_PROJECT_ROOT to a HOI4 project root");
         let base_game_root =
             std::env::var_os("HOI4_STATE_EDITOR_BASE_GAME_ROOT").map(PathBuf::from);
         let total_started = Instant::now();
         let paths_started = Instant::now();
-        let paths = ProjectPaths::discover(&root).expect("discover Azarya project paths");
+        let paths = ProjectPaths::discover(&root).expect("discover external project paths");
         let paths_in = paths_started.elapsed();
 
         let bundle_started = Instant::now();
@@ -750,7 +754,7 @@ mod tests {
                 ..Config::default()
             },
         )
-        .expect("load Azarya province map");
+        .expect("load external project province map");
         let bundle_in = bundle_started.elapsed();
         let province_ids = bundle.map.province_ids().collect::<BTreeSet<_>>();
         let land_province_ids = bundle
@@ -782,7 +786,7 @@ mod tests {
         let resources_in = resources_started.elapsed();
 
         println!(
-            "Azarya release-open component profile:\n\
+            "External project release-open component profile:\n\
              paths={} ms; map bundle={} ms; States={} ms; definitions={} ms; State view={} ms; \\
              Political eager work={} ms; Resources eager work={} ms; core total={} ms; with eager presentation={} ms",
             paths_in.as_millis(),
@@ -798,14 +802,14 @@ mod tests {
                 .saturating_sub(political_in.as_millis() + resources_in.as_millis()),
             total_started.elapsed().as_millis(),
         );
-        assert_eq!(project.load_summary.report.files_seen, 519);
-        assert_eq!(project.load_summary.report.states_loaded, 519);
+        assert!(project.load_summary.report.files_seen > 0);
+        assert!(project.load_summary.report.states_loaded > 0);
         assert!(project.load_summary.report.files_failed.is_empty());
     }
 
     #[test]
-    #[ignore = "requires local HOI4_STATE_EDITOR_AZARYA_ROOT; prints Resources activation profile"]
-    fn azarya_resources_activation_profile() {
+    #[ignore = "requires HOI4_STATE_EDITOR_TEST_PROJECT_ROOT; prints Resources activation profile"]
+    fn external_project_resources_activation_profile() {
         use std::time::Instant;
 
         use crate::app::political::{PoliticalProvince, TerritoryAnchorIndex};
@@ -814,12 +818,12 @@ mod tests {
             prepare_resource_labels_with_index,
         };
 
-        let root = std::env::var_os("HOI4_STATE_EDITOR_AZARYA_ROOT")
+        let root = std::env::var_os("HOI4_STATE_EDITOR_TEST_PROJECT_ROOT")
             .map(PathBuf::from)
-            .expect("set HOI4_STATE_EDITOR_AZARYA_ROOT to the Azarya mod root");
+            .expect("set HOI4_STATE_EDITOR_TEST_PROJECT_ROOT to a HOI4 project root");
         let base_game_root =
             std::env::var_os("HOI4_STATE_EDITOR_BASE_GAME_ROOT").map(PathBuf::from);
-        let paths = ProjectPaths::discover(&root).expect("discover Azarya project paths");
+        let paths = ProjectPaths::discover(&root).expect("discover external project paths");
         let bundle = Bundle::load(
             &Location::Directory(paths.map_directory.clone()),
             Config {
@@ -827,7 +831,7 @@ mod tests {
                 ..Config::default()
             },
         )
-        .expect("load Azarya province map");
+        .expect("load external project province map");
         let province_ids = bundle.map.province_ids().collect::<BTreeSet<_>>();
         let land_province_ids = bundle
             .map
@@ -913,7 +917,7 @@ mod tests {
         let icons_in = icon_started.elapsed();
         let resource_entries = labels.iter().map(|label| label.rows.len()).sum::<usize>();
         println!(
-            "Azarya Resources activation profile: states={}, states with resources={}, entries={}, unique keys={}; legacy anchors={}; shared anchor index={} ms; labels={} ms; resolver={} ms; unique icon decode={} ms",
+            "External project Resources activation profile: states={}, states with resources={}, entries={}, unique keys={}; legacy anchors={}; shared anchor index={} ms; labels={} ms; resolver={} ms; unique icon decode={} ms",
             states.len(),
             labels.len(),
             resource_entries,
@@ -927,7 +931,7 @@ mod tests {
             resolver_in.as_millis(),
             icons_in.as_millis(),
         );
-        assert_eq!(project.load_summary.report.states_loaded, 519);
+        assert!(project.load_summary.report.states_loaded > 0);
         assert!(project.load_summary.report.files_failed.is_empty());
     }
 }

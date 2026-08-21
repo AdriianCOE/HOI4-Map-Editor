@@ -28,6 +28,9 @@ pub struct GlobalConfig {
     pub remember_map_views: bool,
     pub remember_overlays: bool,
     pub last_project: Option<PathBuf>,
+    /// A user-selected vanilla installation. This stores only a path; map
+    /// data and derived caches remain owned by the active project.
+    pub base_game_root: Option<PathBuf>,
     pub max_undo_states: usize,
     pub change_view_mode_on_undo: bool,
     pub tooltip_delay_ms: u32,
@@ -41,11 +44,15 @@ impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
             language: "en-US".to_owned(),
-            open_last_project: true,
+            // Remembering the last path is convenient, but a first-run editor
+            // must start without implicitly loading development or stale map
+            // data. Existing users can opt in through Preferences.
+            open_last_project: false,
             remember_workspace: true,
             remember_map_views: true,
             remember_overlays: true,
             last_project: None,
+            base_game_root: None,
             max_undo_states: 24,
             change_view_mode_on_undo: true,
             tooltip_delay_ms: 400,
@@ -517,6 +524,7 @@ fn parse_global(document: &DocumentMut) -> Result<GlobalConfig, String> {
     config.remember_map_views = bool_or(general, "remember-map-views", config.remember_map_views)?;
     config.remember_overlays = bool_or(general, "remember-overlays", config.remember_overlays)?;
     config.last_project = optional_string(general, "last-project")?.map(PathBuf::from);
+    config.base_game_root = optional_string(general, "base-game-root")?.map(PathBuf::from);
 
     let editing = table(document, "editing")?;
     config.max_undo_states = usize_or(editing, "max-undo-states", config.max_undo_states)?;
@@ -834,6 +842,16 @@ fn update_global(document: &mut DocumentMut, config: &GlobalConfig) {
         set_string(document, "general", "last-project", &path.to_string_lossy());
     } else if let Some(table) = document["general"].as_table_mut() {
         table.remove("last-project");
+    }
+    if let Some(path) = &config.base_game_root {
+        set_string(
+            document,
+            "general",
+            "base-game-root",
+            &path.to_string_lossy(),
+        );
+    } else if let Some(table) = document["general"].as_table_mut() {
+        table.remove("base-game-root");
     }
     set_integer(
         document,
@@ -1361,6 +1379,31 @@ type = "land"
         assert!(text.contains("future-key = \"kept\""));
         assert!(text.contains("language = \"pt-BR\""));
         assert!(text.contains("x = -120"));
+    }
+
+    #[test]
+    fn global_document_roundtrips_the_base_game_path_without_project_data() {
+        let root = root("base-game-root");
+        let path = root.join("config.toml");
+        let config = GlobalConfig {
+            base_game_root: Some(PathBuf::from("D:/Games/Hearts of Iron IV")),
+            ..GlobalConfig::default()
+        };
+        save_document(
+            &path,
+            None,
+            false,
+            false,
+            |document| update_global(document, &config),
+            parse_global,
+        )
+        .unwrap();
+
+        let loaded = load_document(&path, GlobalConfig::default(), parse_global).unwrap();
+        assert_eq!(loaded.value.base_game_root, config.base_game_root);
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains("base-game-root"));
+        assert!(!text.contains("provinces.bmp"));
     }
 
     #[test]

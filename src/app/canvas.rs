@@ -620,10 +620,14 @@ impl Canvas {
             MapAccessMode::EditableProvinceMap,
             Config::load()?,
             None,
+            None,
         )
     }
 
-    pub fn load_project(project: Hoi4Project) -> Result<Canvas, Error> {
+    pub fn load_project(
+        project: Hoi4Project,
+        remembered_base_game_root: Option<PathBuf>,
+    ) -> Result<Canvas, Error> {
         let location = Location::Directory(project.paths.map_directory.clone());
         let overlay_settings = ProjectConfig::load(&project.paths.root)?
             .value
@@ -635,6 +639,7 @@ impl Canvas {
             MapAccessMode::EditableProvinceMap,
             config,
             Some(overlay_settings),
+            remembered_base_game_root,
         )
     }
 
@@ -644,6 +649,7 @@ impl Canvas {
         map_access_mode: MapAccessMode,
         config: Config,
         overlay_settings: Option<ImageOverlayProjectSettings>,
+        remembered_base_game_root: Option<PathBuf>,
     ) -> Result<Canvas, Error> {
         let profile_open = std::env::var_os("HOI4_MAP_EDITOR_PROFILE_OPEN").is_some();
         let open_started = Instant::now();
@@ -671,7 +677,9 @@ impl Canvas {
             .as_ref()
             .map_or(0, |project| project.load_summary.state_indexing_ms);
         let definitions_started = Instant::now();
-        let base_game_root = discover_base_game_root();
+        let base_game_root = remembered_base_game_root
+            .filter(|root| is_base_game_root(root))
+            .or_else(discover_base_game_root);
         let definition_catalog = project
             .as_ref()
             .map(|project| GameDefinitionCatalog::build(project, base_game_root.as_deref()));
@@ -6223,11 +6231,24 @@ impl Canvas {
         )));
     }
 
-    pub fn set_base_game_definition_root(&mut self, root: Option<PathBuf>, alerts: &mut Alerts) {
+    pub fn set_base_game_definition_root(
+        &mut self,
+        root: Option<PathBuf>,
+        alerts: &mut Alerts,
+    ) -> bool {
         let Some(project) = self.project.as_ref() else {
             alerts.push(Err("Load a state project before configuring definitions"));
-            return;
+            return false;
         };
+        if let Some(root) = root.as_deref()
+            && !is_base_game_root(root)
+        {
+            alerts.push(Err(format!(
+                "Base Game Data must be a Hearts of Iron IV installation, not a mod folder: {}",
+                root.display()
+            )));
+            return false;
+        }
         self.definition_catalog = Some(GameDefinitionCatalog::build(project, root.as_deref()));
         self.definition_base_game_root = root;
         self.reload_political_country_catalog();
@@ -6240,6 +6261,7 @@ impl Canvas {
             catalog.buildings.len(),
             catalog.country_tags.len(),
         )));
+        true
     }
 
     pub fn inspector_scroll(
@@ -12903,7 +12925,7 @@ fn export_image_buffer<P: AsRef<Path>>(path: P, image: RgbImage) -> Result<(), E
 fn discover_base_game_root() -> Option<PathBuf> {
     std::env::var_os("HOI4_BASE_GAME_PATH")
         .map(PathBuf::from)
-        .filter(|path| path.is_dir())
+        .filter(|path| is_base_game_root(path))
         .or_else(|| {
             [
                 r"C:\Program Files (x86)\Steam\steamapps\common\Hearts of Iron IV",
@@ -12911,8 +12933,21 @@ fn discover_base_game_root() -> Option<PathBuf> {
             ]
             .into_iter()
             .map(PathBuf::from)
-            .find(|path| path.is_dir())
+            .find(|path| is_base_game_root(path))
         })
+}
+
+/// A base-game layer may supplement a selected mod, so accepting an arbitrary
+/// directory here would let an unrelated mod contaminate Political, Resources,
+/// and definition views. A genuine installation has both the core map files
+/// and a game executable; a selected mod remains the only project-data root.
+fn is_base_game_root(path: &Path) -> bool {
+    path.is_dir()
+        && path.join("map/provinces.bmp").is_file()
+        && path.join("map/definition.csv").is_file()
+        && ["hoi4.exe", "hoi4"]
+            .into_iter()
+            .any(|executable| path.join(executable).is_file())
 }
 
 #[inline]
@@ -13003,11 +13038,28 @@ fn cycle_connection(connection_kind: Option<ConnectionKind>, backwards: bool) ->
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, HashMap};
+    use std::fs;
     use std::io::Cursor;
 
     use image::{DynamicImage, ImageOutputFormat};
 
     use super::*;
+
+    #[test]
+    fn base_game_root_rejects_mod_like_directories() {
+        let root =
+            std::env::temp_dir().join(format!("hoi4-map-editor-base-root-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("map")).unwrap();
+        fs::write(root.join("map/provinces.bmp"), []).unwrap();
+        fs::write(root.join("map/definition.csv"), []).unwrap();
+
+        assert!(!is_base_game_root(&root));
+        fs::write(root.join("hoi4.exe"), []).unwrap();
+        assert!(is_base_game_root(&root));
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn round_trip_failure_snapshot_cannot_cross_project_generations() {

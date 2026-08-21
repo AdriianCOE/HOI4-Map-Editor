@@ -451,28 +451,4 @@ mod tests {
             .save(root.join("gfx/interface/resources_strip.png"))
             .unwrap();
     }
-
-    #[test]
-    #[ignore = "requires local HOI4 and Azarya installations"]
-    fn local_azarya_state_200_keeps_integral_decimal_resources_and_uses_base_icons() {
-        let root = PathBuf::from(std::env::var("HOI4_STATE_EDITOR_AZARYA_ROOT").unwrap());
-        let base = PathBuf::from(std::env::var("HOI4_STATE_EDITOR_BASE_ROOT").unwrap());
-        let batch = crate::app::state::load_state_documents(&root.join("history/states"));
-        let state_200 = batch
-            .documents
-            .iter()
-            .filter_map(|document| document.data.as_ref())
-            .find(|state| state.id == Some(200))
-            .unwrap();
-        assert_eq!(state_200.resources.get("steel"), Some(&20));
-        let mut resolver = ResourceIconResolver::load(&root, Some(&base));
-        assert_eq!(resolver.frames.get("steel"), Some(&5));
-        assert!(
-            resolver
-                .strip
-                .as_ref()
-                .is_some_and(|strip| strip.path.exists())
-        );
-        assert!(resolver.icon("steel").is_some());
-    }
 }
