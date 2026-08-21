@@ -225,8 +225,11 @@ privacy_scan
 # archive contents stable when the same payload is rebuilt. Build bytes may vary.
 tar --format=posix --sort=name --mtime="@$source_date_epoch" --owner=0 --group=0 \
     --numeric-owner -C "$output_directory" -cf - "$package_name" | gzip -n > "$archive"
-sha256sum -- "$archive" > "$checksum"
-(cd "$output_directory" && sha256sum -c -- "$(basename "$checksum")")
+(
+    cd "$output_directory"
+    sha256sum -- "$(basename "$archive")" > "$(basename "$checksum")"
+    sha256sum -c -- "$(basename "$checksum")"
+)
 
 extraction_root="$(mktemp -d)"
 trap 'rm -rf -- "$extraction_root"' EXIT
