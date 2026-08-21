@@ -49,6 +49,19 @@ jobs:
       - name: Build release executable
         run: cargo build --release --locked
 
+      - name: Build and validate portable Windows package
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-windows.ps1
+
+      - name: Upload Windows release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: HOI4-Map-Editor-windows-x86_64
+          path: |
+            dist/HOI4-Map-Editor-*-windows-x64.zip
+            dist/HOI4-Map-Editor-*-windows-x64.zip.sha256
+            dist/RELEASE_MANIFEST.txt
+          if-no-files-found: error
+
       - name: Check repository diff whitespace
         run: git diff --check
 
@@ -97,6 +110,15 @@ jobs:
 
       - name: Build and validate portable Linux package
         run: bash scripts/package-linux.sh --output-directory dist
+
+      - name: Upload Linux release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: HOI4-Map-Editor-linux-x86_64
+          path: |
+            dist/HOI4-Map-Editor-*-linux-x86_64.tar.gz
+            dist/HOI4-Map-Editor-*-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
 
       - name: Check repository diff whitespace
         run: git diff --check
