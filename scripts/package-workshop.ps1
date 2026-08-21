@@ -4,6 +4,10 @@ param([string]$OutputDirectory = "dist")
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+function Set-Utf8NoBom([string]$Path, [string]$Content) {
+    [IO.File]::WriteAllText($Path, $Content, [Text.UTF8Encoding]::new($false))
+}
+
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $metadata = cargo metadata --manifest-path (Join-Path $repoRoot "Cargo.toml") --no-deps --format-version 1 | ConvertFrom-Json
 $version = ($metadata.packages | Where-Object name -eq "hoi4_map_editor" | Select-Object -First 1).version
@@ -26,19 +30,22 @@ Copy-Item -LiteralPath $binary -Destination (Join-Path $stage "HOI4 Map Editor.e
 foreach ($file in @("LICENSE", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md")) {
     Copy-Item -LiteralPath (Join-Path $repoRoot $file) -Destination $stage
 }
-@"
+$readme = @"
 HOI4 Map Editor is a standalone utility. It does not need a playset entry and this folder is not gameplay content.
 
 Run HOI4 Map Editor.exe directly, then choose Open HOI4 Mod.
-"@ | Set-Content -LiteralPath (Join-Path $stage "README.txt") -Encoding utf8NoBOM
-@"
+"@
+Set-Utf8NoBom (Join-Path $stage "README.txt") $readme
+
+$descriptor = @"
 version="$version"
 tags={
 	"Utilities"
 }
 name="HOI4 Map Editor (Standalone Tool - Preview $version)"
 supported_version="*"
-"@ | Set-Content -LiteralPath (Join-Path $stage "descriptor.mod") -Encoding utf8NoBOM
+"@
+Set-Utf8NoBom (Join-Path $stage "descriptor.mod") $descriptor
 
 Write-Output "Workshop package staged at: $stage"
 Write-Output "Prepared locally only; nothing was uploaded or published."
