@@ -6,16 +6,20 @@ Use **File → Open HOI4 Mod...** and select the mod root, not its `map` or
 `history` subfolder. A detected province map enables the Provinces workspace;
 `history/states/*.txt` also enables the States workspace.
 
-## Workspaces and Map Views
+## Workspaces, Map Views, and Overlays
 
 A Workspace chooses what you edit. A Map View changes only the rendered base
 map. Borders, labels, rivers, adjacencies, and Image Overlay are independent
 visual layers and never mark a project as modified.
 
-**Resources** is a read-only Map View. It visualizes the current working State
-resource quantities, so inspector edits appear before Save Project. Resource
-icons are loaded from the local mod/base-game installation; unresolved or
-custom icons use a textual fallback.
+**Political** is a read-only Map View. It uses country colors, localized names,
+and flags resolved from the local mod/base-game installation when available.
+
+**Resources** is a read-only overlay for fully loaded State projects. It
+visualizes the current working State resource quantities over the selected base
+map, so inspector edits appear before Save Project. Resource icons are loaded
+from the local mod/base-game installation; unresolved or custom icons use a
+textual fallback.
 
 ## Province workspace
 
@@ -35,11 +39,13 @@ owner/controller, cores, claims, resources, buildings, and victory points.
 Brush, Lasso, and Fill preview province-level changes in memory. `Esc` cancels;
 `Enter` confirms an applicable preview.
 
-Save Project regenerates stale previews, validates a temporary copy, creates
-backups and a durable journal, commits the affected files, reloads, and
-verifies. `ReviewRequired` needs explicit review; `Blocked` changes cannot be
-applied. Individual replacements are staged safely, but this preview does not
-claim project-wide filesystem atomicity across all files and platforms.
+View Changes summarizes pending working edits without saving. Save Project
+regenerates stale previews, validates and round-trips a temporary copy, creates
+backups and a durable journal, waits for explicit final confirmation, commits
+the affected files, reloads, and verifies. `ReviewRequired` needs explicit
+review; `Blocked` changes cannot be applied. Individual replacements are
+staged safely, but this preview does not claim project-wide filesystem
+atomicity across all files and platforms.
 
 ## Settings and project configuration
 

@@ -26,11 +26,11 @@ Rust path remapping for the repository and active home directory. It derives the
 version from `cargo metadata`; do not edit a package filename manually. The
 default output directory is ignored by Git (`dist/`).
 
-For a release version `0.1.0-preview.3`, the outputs are:
+For release version `0.1.0-preview.4`, the outputs are:
 
 ```text
-dist/HOI4-Map-Editor-v0.1.0-preview.3-linux-x86_64.tar.gz
-dist/HOI4-Map-Editor-v0.1.0-preview.3-linux-x86_64.tar.gz.sha256
+dist/HOI4-Map-Editor-v0.1.0-preview.4-linux-x86_64.tar.gz
+dist/HOI4-Map-Editor-v0.1.0-preview.4-linux-x86_64.tar.gz.sha256
 ```
 
 The archive contains one top-level directory with this allowlist only:

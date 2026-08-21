@@ -53,11 +53,11 @@ Province Map, sem domínio de States.
 `set_map_view_mode`; a troca nao habilita edicao geografica, nao altera
 workspace, working state, dirty, historico ou ferramentas estaduais ativas.
 
-`MapLayerState` mantem overlays independentes: imagem e opacidade, rivers,
-adjacencies, IDs, fronteiras de provincia e state, labels e diagnostico de
-desenvolvedor. `ViewMode` continua sendo o renderer/ferramenta tecnico legado
-do mapa de provincias; `Adjacencies` nesse enum seleciona a ferramenta de
-edicao, enquanto sua exibicao e controlada pelo overlay canonico.
+`MapLayerState` mantem overlays independentes: Resources, imagem e opacidade,
+rivers, adjacencies, IDs, fronteiras de provincia e state, labels e diagnostico
+de desenvolvedor. `ViewMode` continua sendo o renderer/ferramenta tecnico
+legado do mapa de provincias; `Adjacencies` nesse enum seleciona a ferramenta
+de edicao, enquanto sua exibicao e controlada pelo overlay canonico.
 
 ## Leitura de estados
 

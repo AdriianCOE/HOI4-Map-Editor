@@ -65,7 +65,6 @@ Switch between:
 - Coastal Provinces
 - States
 - Political
-- Resources
 
 Political View resolves country colors, localized country names, and available
 normal flags from the user's mod/base-game installation. It remains read-only:
@@ -77,19 +76,21 @@ its per-country definitions, then the equivalent base-game sources. The
 `localisation/<language>/**/*.yml` file; it prefers `TAG`, then the country's
 initial ruling-ideology key, and uses the raw tag only as a final fallback.
 
-Resources View is read-only and shows the current working State resource
-quantities, including unsaved edits. Icons are resolved at runtime from the
-mod/base-game resource strip; missing or custom icons fall back to text. No
-Paradox assets are distributed with the editor.
-
 Optional overlays include:
 
+- Resources
 - Rivers
 - Adjacencies
 - Province IDs
 - Province Borders
 - State Borders
 - Custom Image Overlay
+
+Resources is a read-only overlay for fully loaded State projects. It shows the
+current working State resource quantities, including unsaved edits. Icons are
+resolved at runtime from the mod/base-game `common/resources` definitions and
+`GFX_resources_strip`; missing or custom icons fall back to text. No Paradox
+assets are distributed with the editor.
 
 ### Search and navigation
 
@@ -215,9 +216,11 @@ The States workspace additionally uses `history/states/*.txt`.
 ```text
 Open Mod
 → Edit Provinces and/or States
-→ Review Project Changes
-→ Validate Combined Temporary Copy
+→ View Changes if desired
 → Save Project
+→ Validate and round-trip the candidate
+→ Ready to Save
+→ Explicit Save Project
 → Reload and Verify
 ```
 
@@ -235,7 +238,7 @@ state.
 | `Ctrl+2` | States workspace |
 | `Ctrl+Tab` | Switch workspace |
 | `Ctrl+F` | Search |
-| `1`–`7` | Change Map View (Resources is available from Map View) |
+| `1`–`7` | Change Map View; Resources is toggled as an overlay |
 | `B` | Brush |
 | `F` | Fill |
 | `L` | Lasso |
@@ -252,9 +255,9 @@ Map shortcuts are suspended while typing in a field, picker, or search box.
   supported.
 - The Validation Results window currently offers basic all-domain results;
   advanced report export and persistent ignore policies are planned.
-- State localizations, game icons, and broader game-data localization are not
-  loaded yet. Political View loads only the country presentation metadata it
-  needs at runtime.
+- State localizations and broader game-data localization are not loaded yet.
+  Political View and the Resources overlay load only the presentation metadata
+  they need at runtime.
 - Adjacencies can be inspected and preserved, but the full editing workspace is
   still planned; invalid references require external repair.
 - Strategic Regions and Continents do not yet have complete dedicated editing workspaces.
@@ -272,11 +275,12 @@ The project does not distribute proprietary Hearts of Iron IV assets.
 - Use mod files as overrides over vanilla data.
 - Search using localized names and technical identifiers.
 
-### Flags and interface assets
+### Broader interface assets
 
-- Resolve `.gfx` definitions and `.dds` textures.
-- Display game icons without distributing Paradox assets.
-- Add a local asset cache for faster project loading.
+- Extend runtime `.gfx`/`.dds` support beyond the currently used country flags
+  and resource strip.
+- Display additional game icons without distributing Paradox assets.
+- Add broader local asset caching where it improves first-use latency.
 
 ### Adjacencies
 

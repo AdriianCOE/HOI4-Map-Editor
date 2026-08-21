@@ -28,6 +28,10 @@ not modify the game itself.
   Fill.
 - State Inspector for owner, controller, colors, cores, claims, resources,
   buildings, and victory points.
+- Political View with country colors, localized names, and flags resolved from
+  the user's local mod/base-game files.
+- Read-only Resources overlay with State resource quantities and runtime icon
+  fallback.
 - Review Project Changes -> validate in a temporary workspace -> Save Project
   with backup, rollback, and interrupted-save recovery.
 - Contextual search with focused map navigation.
@@ -45,9 +49,9 @@ game and needs no playset entry.
 - The Workshop staging flow currently packages the Windows executable only.
   Linux x86_64 previews are distributed as portable tarballs through GitHub
   Releases, not through Workshop content.
-- Political View loads country colors, localized names, and normal flags from
-  the user's local mod/base-game files when available. Other game metadata and
-  icons (`.gfx`/`.dds`) are not yet loaded.
+- Political View and the Resources overlay load only the runtime presentation
+  metadata they need from the user's local mod/base-game files. Broader game
+  metadata and general-purpose `.gfx`/`.dds` rendering are still limited.
 - Adjacencies, Strategic Regions, and Continents do not yet have complete
   dedicated editing workspaces.
 
@@ -75,8 +79,10 @@ Copy the matching release section from `CHANGELOG.md` at publish time.
 
 - [ ] Provinces workspace, Province Colors view, a province selected with
       the Inspector visible.
-- [ ] States workspace, Political view, a state with owner/controller/cores
+- [ ] States workspace, Political View, a state with owner/controller/cores
       set, State Inspector open.
+- [ ] Resources overlay enabled over a base map, with a test state showing
+      resource quantities.
 - [ ] Review Project Changes / Save Project dialog mid-flow.
 - [ ] Settings dialog with the Language row showing a non-English language
       selected (demonstrates the 6-language UI).
