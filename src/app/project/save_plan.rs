@@ -125,6 +125,12 @@ fn append_province_candidate(
     candidate: &ProvinceMapCandidate,
     plan: &mut ProjectPatchPlan,
 ) -> Result<usize, String> {
+    if !project.paths.uses_conventional_editable_map_layout() {
+        return Err(
+            "Save Project does not yet write Province-map changes declared through map/default.map. The current map source remains read-only for this operation; state-only saves remain supported."
+                .to_owned(),
+        );
+    }
     let root = &project.paths.root;
     let mut count = 0;
     for (map_relative, after) in &candidate.files {
@@ -234,8 +240,10 @@ mod tests {
                 definition_csv: root.join("map").join("definition.csv"),
                 adjacencies_csv: None,
                 rivers_bmp: None,
+                continent_txt: None,
                 history_directory: root.join("history"),
                 states_directory: root.join("history").join("states"),
+                sources: crate::app::project::ProjectSources::for_test_placeholder(),
             },
             states: Vec::new(),
             states_by_id: BTreeMap::new(),

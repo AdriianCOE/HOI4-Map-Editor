@@ -616,8 +616,10 @@ mod tests {
                 definition_csv: self.0.join("map/definition.csv"),
                 adjacencies_csv: None,
                 rivers_bmp: None,
+                continent_txt: None,
                 history_directory: self.0.join("history"),
                 states_directory: self.0.join("history/states"),
+                sources: crate::app::project::ProjectSources::for_test_placeholder(),
             }
         }
     }

@@ -7,6 +7,7 @@ use image::codecs::bmp::BmpDecoder;
 use image::{ImageDecoder, ImageFormat};
 
 use crate::app::format::{Definition, ParseCsv};
+use crate::app::project::{ProjectSources, SourceGeneration};
 use crate::app::state::load_state_documents;
 
 const SAMPLE_LIMIT: usize = 16;
@@ -206,8 +207,19 @@ pub fn scan_project(root: impl Into<PathBuf>) -> CompatibilityReport {
         return report;
     }
 
-    let bitmap_colors = inspect_province_bitmap(&mut report, &map_directory.join("provinces.bmp"));
-    let definitions = inspect_definitions(&mut report, &map_directory.join("definition.csv"));
+    let sources = ProjectSources::discover(&root, None, SourceGeneration::default());
+    let (province_path, definition_path) = match sources {
+        Ok(sources) => (
+            sources.source_files().provinces_bmp.physical_path.clone(),
+            sources.source_files().definition_csv.physical_path.clone(),
+        ),
+        Err(_) => (
+            map_directory.join("provinces.bmp"),
+            map_directory.join("definition.csv"),
+        ),
+    };
+    let bitmap_colors = inspect_province_bitmap(&mut report, &province_path);
+    let definitions = inspect_definitions(&mut report, &definition_path);
     if let (Some(bitmap_colors), Some(definitions)) = (&bitmap_colors, &definitions) {
         inspect_color_cross_check(&mut report, bitmap_colors, definitions);
     }

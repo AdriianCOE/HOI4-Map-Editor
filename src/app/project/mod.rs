@@ -10,6 +10,7 @@ mod paths;
 mod properties;
 mod save;
 mod save_plan;
+mod sources;
 mod state_fill;
 mod validation;
 mod validation_core;
@@ -56,6 +57,11 @@ pub use save::{
     state_save_eligibility,
 };
 pub use save_plan::{ProjectDirtyState, ProjectSavePlan, SaveDomain};
+pub use sources::{
+    MapFileLayout, ProjectMapSourceFiles, ProjectSourceManifest, ProjectSources, ReplacePathSet,
+    ResolvedSource, SourceGeneration, SourceKind, SourcePathError, SourcePathErrorKind,
+    SourceResolutionError, SourceResolver,
+};
 pub use state_fill::{
     ProvinceAdjacency, StateFillBlockedProvince, StateFillBlockedReason, StateFillMode,
     StateFillPreview, StateFillProvince, StateFillProvinceKind, plan_state_fill,

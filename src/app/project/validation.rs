@@ -11,7 +11,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::app::map::{Bundle, ProvinceKind};
 use crate::app::state::{StateData, VictoryPoint};
 use crate::config::Config;
-use crate::util::files::Location;
 
 use super::patch::apply_operations;
 use super::{
@@ -1019,8 +1018,8 @@ impl RoundTripValidator {
         report.diagnostics_comparison =
             compare_diagnostics(project, edit, plan, &candidate_project, &land_province_ids);
         let source_bundle = gate!(
-            Bundle::load(
-                &Location::Directory(project.paths.map_directory.clone()),
+            Bundle::load_project(
+                &project.paths,
                 Config {
                     preserve_ids: true,
                     ..Config::default()
@@ -1562,30 +1561,58 @@ fn enumerate_source_files(
     project: &Hoi4Project,
 ) -> Result<BTreeMap<PathBuf, FileFingerprint>, Failure> {
     let mut files = BTreeMap::new();
-    for relative in [
-        PathBuf::from("map/provinces.bmp"),
-        PathBuf::from("map/definition.csv"),
-    ] {
+    let manifest = project.paths.sources.manifest();
+    let mut source_paths = vec![
+        &manifest.map_files.provinces_bmp.physical_path,
+        &manifest.map_files.definition_csv.physical_path,
+    ];
+    if let Some(source) = &manifest.default_map {
+        source_paths.push(&source.physical_path);
+    }
+    if let Some(source) = &manifest.descriptor {
+        source_paths.push(&source.physical_path);
+    }
+    for source in [
+        manifest.map_files.adjacencies_csv.as_ref(),
+        manifest.map_files.continent_txt.as_ref(),
+        manifest.map_files.rivers_bmp.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        source_paths.push(&source.physical_path);
+    }
+    for source in source_paths {
+        let relative = source
+            .strip_prefix(&project.paths.root)
+            .map_err(|_| {
+                Failure::new(
+                    RoundTripStage::SourceVerification,
+                    Some(source.to_owned()),
+                    None,
+                    "A project source was not owned by the active project root.",
+                    "Reopen the project before saving.",
+                )
+            })?
+            .to_owned();
         let bytes = read(
-            &project.paths.root.join(&relative),
+            source,
             RoundTripStage::SourceVerification,
-            "read map source",
+            "read resolved map source",
         )?;
         files.insert(relative, FileFingerprint::from_bytes(&bytes));
     }
-    for relative in [
-        PathBuf::from("map/adjacencies.csv"),
-        PathBuf::from("map/id_changes.txt"),
-    ] {
-        let source = project.paths.root.join(&relative);
-        if source.exists() {
-            let bytes = read(
-                &source,
-                RoundTripStage::SourceVerification,
-                "read optional map source",
-            )?;
-            files.insert(relative, FileFingerprint::from_bytes(&bytes));
-        }
+    let id_changes = project.paths.root.join("map/id_changes.txt");
+    if id_changes.exists() {
+        let bytes = read(
+            &id_changes,
+            RoundTripStage::SourceVerification,
+            "read optional map source",
+        )?;
+        files.insert(
+            PathBuf::from("map/id_changes.txt"),
+            FileFingerprint::from_bytes(&bytes),
+        );
     }
     let entries = fs::read_dir(&project.paths.states_directory).map_err(|err| {
         Failure::io(
@@ -1991,24 +2018,6 @@ fn reload_project_with_bundle(
         preserve_ids: true,
         ..Config::default()
     };
-    let map_directory = candidate_root.join("map");
-    let bundle =
-        Bundle::load(&Location::Directory(map_directory.clone()), config).map_err(|err| {
-            Failure::new(
-                RoundTripStage::Reloading,
-                Some(map_directory),
-                None,
-                format!("The real map loader rejected the candidate: {err}"),
-                "Inspect copied map files and candidate filesystem diagnostics.",
-            )
-        })?;
-    let province_ids = bundle.map.province_ids().collect::<BTreeSet<_>>();
-    let land_province_ids = bundle
-        .map
-        .iter_province_data()
-        .filter(|(_, province)| province.kind == ProvinceKind::Land)
-        .filter_map(|(_, province)| province.preserved_id)
-        .collect::<BTreeSet<_>>();
     let paths = ProjectPaths::discover(candidate_root).map_err(|err| {
         Failure::new(
             RoundTripStage::Reloading,
@@ -2018,6 +2027,22 @@ fn reload_project_with_bundle(
             "Inspect the temporary workspace structure.",
         )
     })?;
+    let bundle = Bundle::load_project(&paths, config).map_err(|err| {
+        Failure::new(
+            RoundTripStage::Reloading,
+            Some(paths.map_directory.clone()),
+            None,
+            format!("The real map loader rejected the candidate: {err}"),
+            "Inspect copied map files and candidate filesystem diagnostics.",
+        )
+    })?;
+    let province_ids = bundle.map.province_ids().collect::<BTreeSet<_>>();
+    let land_province_ids = bundle
+        .map
+        .iter_province_data()
+        .filter(|(_, province)| province.kind == ProvinceKind::Land)
+        .filter_map(|(_, province)| province.preserved_id)
+        .collect::<BTreeSet<_>>();
     let mut project = Hoi4Project::new(paths);
     project.load_states(&province_ids, &land_province_ids);
     Ok((bundle, project, land_province_ids))
@@ -2648,10 +2673,12 @@ fn write_existing(
 fn resolve_map_or_state_path(candidate_root: &Path, relative: &Path) -> Result<PathBuf, Failure> {
     if is_state_path(relative) {
         candidate_state_path(candidate_root, relative)
-    } else if matches!(
-        path_key(relative).as_str(),
-        "map/provinces.bmp" | "map/definition.csv" | "map/adjacencies.csv" | "map/id_changes.txt"
-    ) {
+    } else if relative
+        .components()
+        .next()
+        .is_some_and(|component| matches!(component, Component::Normal(name) if name.eq_ignore_ascii_case("map")))
+        && relative.components().all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+    {
         let root = candidate_root.canonicalize().map_err(|err| {
             Failure::io(
                 RoundTripStage::Copying,
@@ -2661,6 +2688,14 @@ fn resolve_map_or_state_path(candidate_root: &Path, relative: &Path) -> Result<P
             )
         })?;
         let target = root.join(relative);
+        fs::create_dir_all(target.parent().unwrap_or(&root)).map_err(|err| {
+            Failure::io(
+                RoundTripStage::Copying,
+                "create candidate map parent",
+                &target,
+                err,
+            )
+        })?;
         let parent = target
             .parent()
             .unwrap_or(&root)
@@ -2774,6 +2809,7 @@ mod tests {
         EditableStateProperties, PatchPlanSummary, PatchPlanTimings, PlannedFileCreation,
         PlannedFileModification, plan_state_patches,
     };
+    use crate::util::files::Location;
 
     fn empty_plan() -> ProjectPatchPlan {
         ProjectPatchPlan {
@@ -2899,6 +2935,30 @@ mod tests {
                 .full_text()
                 .contains("Source changed after patch planning")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_map_change_is_detected_before_save_uses_stale_source_layout() {
+        let (root, _, _) = test_project("default-map-source-change");
+        fs::write(
+            root.join("map/default.map"),
+            "definitions = \"definition.csv\"\nprovinces = \"provinces.bmp\"\n",
+        )
+        .unwrap();
+        let project = Hoi4Project::new(ProjectPaths::discover(&root).unwrap());
+        let snapshot = SourceSnapshot {
+            files: enumerate_source_files(&project).unwrap(),
+        };
+        fs::write(
+            root.join("map/default.map"),
+            "definitions = \"definition.csv\"\nprovinces = \"externally-changed.bmp\"\n",
+        )
+        .unwrap();
+
+        let failure = verify_source_unchanged(&project, &snapshot)
+            .expect_err("default.map is authoritative and must be revalidated before save");
+        assert!(failure.diagnostic.message.contains("source file changed"));
         fs::remove_dir_all(root).unwrap();
     }
 

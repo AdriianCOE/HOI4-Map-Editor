@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use super::{ProjectSources, SourceGeneration, SourceResolutionError};
+
 #[derive(Debug, Clone)]
 pub struct ProjectPaths {
     pub root: PathBuf,
@@ -11,8 +13,10 @@ pub struct ProjectPaths {
     pub definition_csv: PathBuf,
     pub adjacencies_csv: Option<PathBuf>,
     pub rivers_bmp: Option<PathBuf>,
+    pub continent_txt: Option<PathBuf>,
     pub history_directory: PathBuf,
     pub states_directory: PathBuf,
+    pub sources: ProjectSources,
 }
 
 impl ProjectPaths {
@@ -24,18 +28,48 @@ impl ProjectPaths {
             ProjectPathError::RootIsNotDirectory,
         )?;
 
-        let map_directory = root.join("map");
-        require_directory(
-            &map_directory,
-            ProjectPathError::MissingMapDirectory,
-            ProjectPathError::MissingMapDirectory,
+        let sources = ProjectSources::discover(&root, None, SourceGeneration::default()).map_err(
+            |error| match &error {
+                SourceResolutionError::MissingCurrentProjectDirectory {
+                    logical_path,
+                    physical_path,
+                } if logical_path == Path::new("map") => {
+                    ProjectPathError::MissingMapDirectory(physical_path.clone())
+                }
+                SourceResolutionError::MissingCurrentProjectFile {
+                    logical_path,
+                    physical_path,
+                } if logical_path == Path::new("map/provinces.bmp") => {
+                    ProjectPathError::MissingProvincesBitmap(physical_path.clone())
+                }
+                SourceResolutionError::MissingCurrentProjectFile {
+                    logical_path,
+                    physical_path,
+                } if logical_path == Path::new("map/definition.csv") => {
+                    ProjectPathError::MissingDefinitionTable(physical_path.clone())
+                }
+                _ => ProjectPathError::SourceResolution(error),
+            },
         )?;
-
-        let provinces_bmp = map_directory.join("provinces.bmp");
-        require_file(&provinces_bmp, ProjectPathError::MissingProvincesBitmap)?;
-
-        let definition_csv = map_directory.join("definition.csv");
-        require_file(&definition_csv, ProjectPathError::MissingDefinitionTable)?;
+        let manifest = sources.manifest();
+        let map_directory = manifest.map_directory.clone();
+        let provinces_bmp = manifest.map_files.provinces_bmp.physical_path.clone();
+        let definition_csv = manifest.map_files.definition_csv.physical_path.clone();
+        let adjacencies_csv = manifest
+            .map_files
+            .adjacencies_csv
+            .as_ref()
+            .map(|source| source.physical_path.clone());
+        let rivers_bmp = manifest
+            .map_files
+            .rivers_bmp
+            .as_ref()
+            .map(|source| source.physical_path.clone());
+        let continent_txt = manifest
+            .map_files
+            .continent_txt
+            .as_ref()
+            .map(|source| source.physical_path.clone());
 
         let history_directory = root.join("history");
         require_directory(
@@ -51,37 +85,36 @@ impl ProjectPaths {
             ProjectPathError::MissingStatesDirectory,
         )?;
 
-        let optional_file = |path: PathBuf| path.is_file().then_some(path);
-
         Ok(Self {
-            adjacencies_csv: optional_file(map_directory.join("adjacencies.csv")),
-            rivers_bmp: optional_file(map_directory.join("rivers.bmp")),
+            adjacencies_csv,
+            rivers_bmp,
+            continent_txt,
             root,
             map_directory,
             provinces_bmp,
             definition_csv,
             history_directory,
             states_directory,
+            sources,
         })
+    }
+
+    pub fn uses_conventional_editable_map_layout(&self) -> bool {
+        self.provinces_bmp == self.map_directory.join("provinces.bmp")
+            && self.definition_csv == self.map_directory.join("definition.csv")
+            && self
+                .adjacencies_csv
+                .as_ref()
+                .is_none_or(|path| path == &self.map_directory.join("adjacencies.csv"))
+    }
+
+    pub fn bind_project_generation(&mut self, generation: u64) {
+        self.sources
+            .rebind_generation(SourceGeneration::new(generation));
     }
 
     pub fn is_project_root_candidate(root: &Path) -> bool {
         root.join("map").exists() || root.join("history").exists()
-    }
-}
-
-fn require_file(
-    path: &Path,
-    missing: fn(PathBuf) -> ProjectPathError,
-) -> Result<(), ProjectPathError> {
-    match path.metadata() {
-        Ok(metadata) if metadata.is_file() => Ok(()),
-        Ok(_) => Err(missing(path.to_owned())),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Err(missing(path.to_owned())),
-        Err(source) => Err(ProjectPathError::Io {
-            path: path.to_owned(),
-            source,
-        }),
     }
 }
 
@@ -113,6 +146,8 @@ pub enum ProjectPathError {
     MissingProvincesBitmap(PathBuf),
     #[error("definition table is missing: {}", .0.display())]
     MissingDefinitionTable(PathBuf),
+    #[error("project source resolution failed: {0}")]
+    SourceResolution(SourceResolutionError),
     #[error("history directory is missing: {}", .0.display())]
     MissingHistoryDirectory(PathBuf),
     #[error("states directory is missing: {}", .0.display())]
@@ -220,5 +255,27 @@ mod tests {
     fn supports_spaces_and_unicode() {
         let project = TempProject::valid("mod com espaços-Ázarya");
         assert!(ProjectPaths::discover(project.path()).is_ok());
+    }
+
+    #[test]
+    fn failed_default_map_candidate_does_not_mutate_active_project_paths() {
+        let active = TempProject::valid("active-default-map-isolation");
+        let active_paths = ProjectPaths::discover(active.path()).unwrap();
+        let invalid = TempProject::valid("invalid-default-map-isolation");
+        fs::write(
+            invalid.path().join("map/default.map"),
+            "definitions = \"definition.csv\"\nprovinces = \"missing-custom.bmp\"\n",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            ProjectPaths::discover(invalid.path()),
+            Err(ProjectPathError::SourceResolution(_))
+        ));
+        assert_eq!(active_paths.root, active.path());
+        assert_eq!(
+            active_paths.provinces_bmp,
+            active.path().join("map/provinces.bmp")
+        );
     }
 }

@@ -16,6 +16,7 @@ use vecmath::Vector2;
 
 use crate::app::colors;
 use crate::app::format::*;
+use crate::app::project::ProjectPaths;
 use crate::config::Config;
 use crate::error::Error;
 use crate::util::XYIter;
@@ -53,6 +54,12 @@ pub struct Bundle {
 impl Bundle {
     pub fn load(location: &Location, config: Config) -> Result<Self, Error> {
         self::bridge::load_bundle(location, config)
+    }
+
+    /// Loads a project map from the generation-owned source manifest. Legacy
+    /// directory/archive loading remains available for province-only maps.
+    pub fn load_project(paths: &ProjectPaths, config: Config) -> Result<Self, Error> {
+        self::bridge::load_project_bundle(paths, config)
     }
 
     pub fn save(&self, location: &Location) -> Result<SaveOperation, Error> {

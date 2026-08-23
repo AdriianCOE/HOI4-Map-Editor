@@ -609,6 +609,9 @@ impl Canvas {
         debug_assert!(self.political_cache_generation.is_none());
         debug_assert!(self.resource_cache_generation.is_none());
         self.project_generation = generation;
+        if let Some(project) = self.project.as_mut() {
+            project.paths.bind_project_generation(generation.0);
+        }
         self.territory_anchor_generation = None;
         self.round_trip_failure_snapshot = None;
     }
@@ -653,7 +656,10 @@ impl Canvas {
     ) -> Result<Canvas, Error> {
         let profile_open = std::env::var_os("HOI4_MAP_EDITOR_PROFILE_OPEN").is_some();
         let open_started = Instant::now();
-        let bundle = Bundle::load(&location, config)?;
+        let bundle = match project.as_ref() {
+            Some(project) => Bundle::load_project(&project.paths, config)?,
+            None => Bundle::load(&location, config)?,
+        };
         let bundle_loaded_in = open_started.elapsed();
         let state_loading_started = Instant::now();
         if let Some(project) = project.as_mut() {

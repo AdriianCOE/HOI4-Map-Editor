@@ -9,11 +9,13 @@ use super::{
     Bundle, Color, ConnectionData, Map, MapBase, ProvinceData, ProvinceIdIndex, random_color_pure,
 };
 use crate::app::format::{Adjacency, Definition, ParseCsv};
+use crate::app::project::ProjectPaths;
 use crate::config::Config;
 use crate::error::Error;
 use crate::util::files::Location;
 
 use std::collections::hash_map::Entry;
+use std::fs::File;
 use std::io::{self, Cursor, Read, Write};
 use std::sync::Arc;
 
@@ -39,6 +41,35 @@ pub(super) fn load_bundle(location: &Location, config: Config) -> Result<Bundle,
         rivers,
         config,
     )
+}
+
+pub(super) fn load_project_bundle(paths: &ProjectPaths, config: Config) -> Result<Bundle, Error> {
+    let province_image = read_rgb_bmp_image(open_source(&paths.provinces_bmp, "province bitmap")?)?;
+    let definition_table =
+        read_definition_table(open_source(&paths.definition_csv, "definition table")?)?;
+    let adjacencies_table = paths
+        .adjacencies_csv
+        .as_ref()
+        .map(|path| read_adjacencies_table(open_source(path, "adjacency table")?))
+        .transpose()?
+        .unwrap_or_default();
+    let rivers = paths
+        .rivers_bmp
+        .as_ref()
+        .map(|path| read_rgb_bmp_image(open_source(path, "river bitmap")?))
+        .transpose()?;
+    construct_map_data(
+        province_image,
+        definition_table,
+        adjacencies_table,
+        rivers,
+        config,
+    )
+}
+
+fn open_source(path: &std::path::Path, label: &str) -> Result<File, Error> {
+    File::open(path)
+        .map_err(|error| Error::Custom(format!("Cannot open {label} {}: {error}", path.display())))
 }
 
 pub(super) fn construct_map_data(
@@ -464,14 +495,75 @@ fn read_all<R: Read>(mut reader: R) -> io::Result<Cursor<Vec<u8>>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{construct_map_data, construct_map_data_for_sparse_tests};
+    use super::{construct_map_data, construct_map_data_for_sparse_tests, write_rgb_bmp_image};
     use crate::app::format::{Adjacency, AdjacencyKind, Definition, DefinitionKind, ParseCsv};
     use crate::app::map::{Bundle, History, Problem};
+    use crate::app::project::{ProjectPaths, SourceKind};
     use crate::config::Config;
     use crate::util::files::Location;
     use image::{Rgb, RgbImage};
     use std::fs;
+    use std::fs::File;
     use std::sync::Arc;
+
+    #[test]
+    fn project_loader_honors_custom_default_map_file_names() {
+        let root =
+            std::env::temp_dir().join(format!("hoi4-custom-default-map-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("map")).unwrap();
+        fs::create_dir_all(root.join("history/states")).unwrap();
+        fs::write(
+            root.join("map/default.map"),
+            "definitions = \"my_definition.csv\"\nprovinces = \"my_provinces.bmp\"\nadjacencies = \"my_adjacencies.csv\"\ncontinents = \"my_continent.txt\"\nrivers = \"my_rivers.bmp\"\n",
+        )
+        .unwrap();
+        let image = RgbImage::from_pixel(3, 2, Rgb([10, 20, 30]));
+        write_rgb_bmp_image(
+            File::create(root.join("map/my_provinces.bmp")).unwrap(),
+            &image,
+        )
+        .unwrap();
+        write_rgb_bmp_image(
+            File::create(root.join("map/my_rivers.bmp")).unwrap(),
+            &image,
+        )
+        .unwrap();
+        fs::write(
+            root.join("map/my_definition.csv"),
+            "0;0;0;0;land;false;unknown;0\n1;10;20;30;land;false;plains;1\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("map/my_adjacencies.csv"),
+            "From;To;Type;Through;start_x;start_y;stop_x;stop_y;adjacency_rule_name;Comment\n",
+        )
+        .unwrap();
+        fs::write(root.join("map/my_continent.txt"), "1\n").unwrap();
+
+        let paths = ProjectPaths::discover(&root).unwrap();
+        assert_eq!(paths.provinces_bmp, root.join("map/my_provinces.bmp"));
+        assert_eq!(
+            paths.adjacencies_csv,
+            Some(root.join("map/my_adjacencies.csv"))
+        );
+        assert_eq!(paths.rivers_bmp, Some(root.join("map/my_rivers.bmp")));
+        assert_eq!(
+            paths.sources.manifest().map_files.provinces_bmp.source_kind,
+            SourceKind::CurrentProject
+        );
+        let bundle = Bundle::load_project(
+            &paths,
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(bundle.map.dimensions(), [3, 2]);
+        assert_eq!(bundle.map.province_ids().collect::<Vec<_>>(), vec![1]);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn empty_definition_table_returns_error_instead_of_panicking() {
