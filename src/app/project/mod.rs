@@ -10,6 +10,7 @@ mod patch;
 mod paths;
 mod properties;
 mod province_geometry;
+mod reference_index;
 mod river_topology;
 mod save;
 mod save_plan;
@@ -53,6 +54,11 @@ pub use properties::{
     EditableProvinceData, EditableStateProperties, NamedIntegerValue, PropertyValidationError,
     ProvinceDataDraft, ProvinceDataValidationError, StatePropertyDraft, format_integer_pt_br,
     parse_grouped_nonnegative_integer,
+};
+pub use reference_index::{
+    AdjacencyReferenceRole, ProvinceReference, ProvinceReferenceDomain, ProvinceReferenceIndex,
+    ProvinceReferenceIndexBuild, ProvinceReferenceSource, ProvinceReferenceSummary,
+    ReferenceCoverage, ReferenceCoverageStatus, ReferenceDomain, build_province_reference_index,
 };
 pub use save::{
     BackupManifest, BackupManifestEntry, FileOperationProgress, PersistedFingerprint, RecoveryInfo,
@@ -109,6 +115,7 @@ pub struct Hoi4Project {
     pub unassigned_land_provinces: BTreeSet<u32>,
     pub diagnostics: Vec<ProjectDiagnostic>,
     pub load_summary: StateLoadSummary,
+    pub logistics: LogisticsLoadResult,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -176,7 +183,7 @@ impl StateLoadFailureStage {
 
 impl Hoi4Project {
     pub fn new(paths: ProjectPaths) -> Self {
-        Self {
+        let mut project = Self {
             paths,
             states: Vec::new(),
             states_by_id: BTreeMap::new(),
@@ -185,7 +192,10 @@ impl Hoi4Project {
             unassigned_land_provinces: BTreeSet::new(),
             diagnostics: Vec::new(),
             load_summary: StateLoadSummary::default(),
-        }
+            logistics: LogisticsLoadResult::default(),
+        };
+        project.load_logistics();
+        project
     }
 
     pub fn load_states(
@@ -216,6 +226,22 @@ impl Hoi4Project {
         self.unassigned_land_provinces = indexes.unassigned_land_provinces;
         self.load_summary = load_summary;
         self.diagnostics = diagnostics;
+    }
+
+    /// Refreshes read-only map-domain models after the active source graph is
+    /// established. The data remains derived and has no save ownership.
+    pub fn load_logistics(&mut self) {
+        self.logistics = load_logistics(&self.paths.sources);
+    }
+
+    pub fn bind_project_generation(&mut self, generation: u64) {
+        self.paths.bind_project_generation(generation);
+        self.load_logistics();
+    }
+
+    pub fn set_validated_base_game_root(&mut self, root: Option<std::path::PathBuf>) {
+        self.paths.set_validated_base_game_root(root);
+        self.load_logistics();
     }
 
     pub fn load_summary_message(&self) -> String {

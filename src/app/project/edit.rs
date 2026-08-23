@@ -2156,6 +2156,7 @@ mod tests {
             unassigned_land_provinces: BTreeSet::new(),
             diagnostics: Vec::new(),
             load_summary: StateLoadSummary::default(),
+            logistics: crate::app::project::LogisticsLoadResult::default(),
         };
         project.states[0]
             .data

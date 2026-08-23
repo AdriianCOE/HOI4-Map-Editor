@@ -252,6 +252,7 @@ mod tests {
             unassigned_land_provinces: Default::default(),
             diagnostics: Vec::new(),
             load_summary: Default::default(),
+            logistics: crate::app::project::LogisticsLoadResult::default(),
         }
     }
 

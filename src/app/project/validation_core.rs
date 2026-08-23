@@ -10,7 +10,6 @@ use super::province_geometry::ProvinceGeometryAnalysis;
 use super::river_topology::{IndexedRiverBitmap, RiverTopologyAnalysis};
 use super::{
     DiagnosticSeverity, Hoi4Project, ProjectDiagnostic, ProjectDiagnosticKind, ResolvedSource,
-    load_logistics,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1243,7 +1242,7 @@ fn validate_logistics(
     project: &Hoi4Project,
     diagnostics: &mut Vec<ProjectValidationDiagnostic>,
 ) {
-    let logistics = load_logistics(&project.paths.sources);
+    let logistics = &project.logistics;
     for issue in logistics
         .railways
         .issues
@@ -1634,6 +1633,7 @@ mod tests {
 
     use crate::app::format::{Adjacency, AdjacencyKind, Definition, DefinitionKind};
     use crate::app::map::{Bundle, construct_map_data_for_sparse_tests, write_rgb_bmp_image};
+    use crate::app::project::load_logistics;
     use crate::app::project::{ProjectPaths, SourceLookup};
     use crate::app::state::{StateData, StateDocument, StateHistory, VictoryPoint, parse_text};
     use crate::config::Config;
