@@ -8,6 +8,7 @@ pub mod map;
 pub mod map_layers;
 pub mod political;
 pub(crate) mod presentation;
+pub(crate) mod problems_ui;
 pub mod project;
 pub mod resources;
 pub mod state;
