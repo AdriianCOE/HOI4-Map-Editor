@@ -104,6 +104,12 @@ pub enum ProjectDiagnosticKind {
     RiverNoFlowEndpoint,
     RiverInvalidFlowMarker,
     RiverPossibleLoop,
+    RailwayParseError,
+    RailwayProvinceCountMismatch,
+    RailwayProvinceMissing,
+    RailwaySegmentNotAdjacent,
+    SupplyNodeParseError,
+    SupplyNodeProvinceMissing,
     CandidateMismatch,
     ExternalChange,
     TransactionFailure,
@@ -170,6 +176,12 @@ impl ProjectDiagnosticKind {
             Self::RiverNoFlowEndpoint => "RIVER_NO_FLOW_ENDPOINT",
             Self::RiverInvalidFlowMarker => "RIVER_INVALID_FLOW_MARKER",
             Self::RiverPossibleLoop => "RIVER_POSSIBLE_LOOP",
+            Self::RailwayParseError => "RAILWAY_PARSE_ERROR",
+            Self::RailwayProvinceCountMismatch => "RAILWAY_PROVINCE_COUNT_MISMATCH",
+            Self::RailwayProvinceMissing => "RAILWAY_PROVINCE_MISSING",
+            Self::RailwaySegmentNotAdjacent => "RAILWAY_SEGMENT_NOT_ADJACENT",
+            Self::SupplyNodeParseError => "SUPPLY_NODE_PARSE_ERROR",
+            Self::SupplyNodeProvinceMissing => "SUPPLY_NODE_PROVINCE_MISSING",
             Self::CandidateMismatch => "project.candidate.mismatch",
             Self::ExternalChange => "transaction.external_change",
             Self::TransactionFailure => "transaction.failure",
@@ -199,6 +211,12 @@ impl ProjectDiagnosticKind {
             | Self::RiverNoFlowEndpoint
             | Self::RiverInvalidFlowMarker
             | Self::RiverPossibleLoop => DiagnosticDomain::ProvinceMap,
+            Self::RailwayParseError
+            | Self::RailwayProvinceCountMismatch
+            | Self::RailwayProvinceMissing
+            | Self::RailwaySegmentNotAdjacent
+            | Self::SupplyNodeParseError
+            | Self::SupplyNodeProvinceMissing => DiagnosticDomain::ProvinceMap,
             Self::TerrainCatalogUnavailable | Self::ContinentCatalogUnavailable => {
                 DiagnosticDomain::Project
             }

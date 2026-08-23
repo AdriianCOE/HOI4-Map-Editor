@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::app::format::{Definition, ParseCsv};
+use crate::app::format::{AdjacencyKind, Definition, ParseCsv};
 use crate::app::map::{Bundle, Color, ProvinceKind};
 use crate::app::state::{PdxEntry, PdxValue, TextSpan, parse_text};
 
@@ -10,6 +10,7 @@ use super::province_geometry::ProvinceGeometryAnalysis;
 use super::river_topology::{IndexedRiverBitmap, RiverTopologyAnalysis};
 use super::{
     DiagnosticSeverity, Hoi4Project, ProjectDiagnostic, ProjectDiagnosticKind, ResolvedSource,
+    load_logistics,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +97,7 @@ pub fn validate_project(
     validate_states(bundle, project, &mut diagnostics);
     validate_adjacencies(bundle, project, &mut diagnostics);
     validate_river_topology(bundle, project, &mut diagnostics);
+    validate_logistics(bundle, project, &mut diagnostics);
     sort_and_dedup(&mut diagnostics);
 
     let summary = summarize(&diagnostics);
@@ -368,6 +370,11 @@ impl ProjectValidationDiagnostic {
 
     fn with_map_location(mut self, location: [u32; 2]) -> Self {
         self.map_location = Some(location);
+        self
+    }
+
+    fn with_span(mut self, span: TextSpan) -> Self {
+        self.span = Some(span);
         self
     }
 
@@ -1231,6 +1238,147 @@ fn validate_river_topology(
     }
 }
 
+fn validate_logistics(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+    diagnostics: &mut Vec<ProjectValidationDiagnostic>,
+) {
+    let logistics = load_logistics(&project.paths.sources);
+    for issue in logistics
+        .railways
+        .issues
+        .iter()
+        .chain(&logistics.supply_nodes.issues)
+    {
+        let kind = match issue.input {
+            super::logistics::LogisticsInput::Railway => ProjectDiagnosticKind::RailwayParseError,
+            super::logistics::LogisticsInput::SupplyNode => {
+                ProjectDiagnosticKind::SupplyNodeParseError
+            }
+        };
+        let mut diagnostic = ProjectValidationDiagnostic::custom(
+            kind,
+            DiagnosticSeverity::Error,
+            None,
+            issue.message.clone(),
+        )
+        .with_domain(ProjectValidationDomain::Province)
+        .with_blocks_save(false);
+        if let Some(source) = issue.source.clone() {
+            diagnostic = diagnostic.with_source(source);
+        }
+        if let Some(span) = issue.span {
+            diagnostic = diagnostic.with_span(span);
+        }
+        diagnostics.push(diagnostic);
+    }
+
+    let geographic_pairs = bundle.map.geographic_province_adjacency_pairs();
+    let mut special_pairs = BTreeMap::new();
+    for adjacency in bundle.map.adjacencies() {
+        if bundle.map.contains_province_id(adjacency.from_id)
+            && bundle.map.contains_province_id(adjacency.to_id)
+        {
+            special_pairs.insert(
+                (
+                    adjacency.from_id.min(adjacency.to_id),
+                    adjacency.from_id.max(adjacency.to_id),
+                ),
+                adjacency.kind,
+            );
+        }
+    }
+
+    for railway in &logistics.railways.railways {
+        let actual_count = railway.provinces.len();
+        if usize::try_from(railway.declared_province_count).ok() != Some(actual_count) {
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::RailwayProvinceCountMismatch,
+                    DiagnosticSeverity::Error,
+                    None,
+                    format!(
+                        "railway line {} declares {} provinces but contains {actual_count}",
+                        railway.line_number, railway.declared_province_count
+                    ),
+                )
+                .with_domain(ProjectValidationDomain::Province)
+                .with_source(railway.source.clone())
+                .with_blocks_save(false),
+            );
+        }
+        for province_id in &railway.provinces {
+            if !bundle.map.contains_province_id(*province_id) {
+                diagnostics.push(
+                    ProjectValidationDiagnostic::custom(
+                        ProjectDiagnosticKind::RailwayProvinceMissing,
+                        DiagnosticSeverity::Error,
+                        None,
+                        format!(
+                            "railway line {} references missing province {province_id}",
+                            railway.line_number
+                        ),
+                    )
+                    .with_domain(ProjectValidationDomain::Province)
+                    .with_province_id(*province_id)
+                    .with_source(railway.source.clone())
+                    .with_blocks_save(false),
+                );
+            }
+        }
+        for pair in railway.provinces.windows(2) {
+            let [from, to] = [pair[0], pair[1]];
+            if !bundle.map.contains_province_id(from) || !bundle.map.contains_province_id(to) {
+                continue;
+            }
+            let key = (from.min(to), from.max(to));
+            let connected = match special_pairs.get(&key) {
+                Some(AdjacencyKind::Impassable) => false,
+                Some(_) => true,
+                None => geographic_pairs.contains(&key),
+            };
+            if !connected {
+                diagnostics.push(
+                    ProjectValidationDiagnostic::custom(
+                        ProjectDiagnosticKind::RailwaySegmentNotAdjacent,
+                        DiagnosticSeverity::Error,
+                        None,
+                        format!(
+                            "railway line {} has no passable adjacency between provinces {from} and {to}",
+                            railway.line_number
+                        ),
+                    )
+                    .with_domain(ProjectValidationDomain::Province)
+                    .with_related_province_ids(vec![from, to])
+                    .with_source(railway.source.clone())
+                    .with_blocks_save(false),
+                );
+            }
+        }
+    }
+
+    for node in &logistics.supply_nodes.supply_nodes {
+        if bundle.map.contains_province_id(node.province_id) {
+            continue;
+        }
+        diagnostics.push(
+            ProjectValidationDiagnostic::custom(
+                ProjectDiagnosticKind::SupplyNodeProvinceMissing,
+                DiagnosticSeverity::Error,
+                None,
+                format!(
+                    "supply node line {} references missing province {}",
+                    node.line_number, node.province_id
+                ),
+            )
+            .with_domain(ProjectValidationDomain::Province)
+            .with_province_id(node.province_id)
+            .with_source(node.source.clone())
+            .with_blocks_save(false),
+        );
+    }
+}
+
 fn river_diagnostic(
     kind: ProjectDiagnosticKind,
     severity: DiagnosticSeverity,
@@ -1480,6 +1628,7 @@ fn color_text([r, g, b]: Color) -> String {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -2576,6 +2725,203 @@ mod tests {
         assert_eq!(delta.resolved.len(), 1);
         assert_eq!(delta.new_errors(), 1);
         assert!(delta.blocks_save());
+    }
+
+    #[test]
+    fn railway_and_supply_validation_is_sparse_safe_and_nonblocking() {
+        let temp = valid_fixture("logistics-validation");
+        fs::write(
+            temp.0.join("map/railways.txt"),
+            "# sparse trunk\n1 4 1 7 42 500\n1 4 1 7 999\n1 nope 1 7\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.0.join("map/supply_nodes.txt"),
+            "1 500\n1 999\n1 500\nbad\n",
+        )
+        .unwrap();
+        let report = validate_project(
+            &sparse_bundle(Vec::new()),
+            &project(&temp, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        let codes = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(codes.contains("RAILWAY_PROVINCE_COUNT_MISMATCH"));
+        assert!(codes.contains("RAILWAY_PROVINCE_MISSING"));
+        assert!(codes.contains("RAILWAY_PARSE_ERROR"));
+        assert!(codes.contains("SUPPLY_NODE_PROVINCE_MISSING"));
+        assert!(codes.contains("SUPPLY_NODE_PARSE_ERROR"));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.code.starts_with("RAILWAY_")
+                        || diagnostic.code.starts_with("SUPPLY_")
+                })
+                .all(|diagnostic| !diagnostic.blocks_save)
+        );
+        let source = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "RAILWAY_PROVINCE_MISSING")
+            .unwrap()
+            .source
+            .as_ref()
+            .unwrap();
+        assert_eq!(source.logical_path, PathBuf::from("map/railways.txt"));
+    }
+
+    #[test]
+    fn railway_uses_special_edges_but_rejects_impassable_ones() {
+        let temp = valid_fixture("railway-special-adjacency");
+        fs::write(temp.0.join("map/railways.txt"), "1 2 1 500\n").unwrap();
+        let mut passable = adjacency(1, 500, None);
+        passable.kind = AdjacencyKind::Sea;
+        let report = validate_project(
+            &sparse_bundle(vec![passable]),
+            &project(&temp, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "RAILWAY_SEGMENT_NOT_ADJACENT")
+        );
+
+        let mut impassable = adjacency(1, 500, None);
+        impassable.kind = AdjacencyKind::Impassable;
+        let report = validate_project(
+            &sparse_bundle(vec![impassable]),
+            &project(&temp, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "RAILWAY_SEGMENT_NOT_ADJACENT")
+            .unwrap();
+        assert_eq!(diagnostic.related_province_ids, vec![1, 500]);
+    }
+
+    #[test]
+    fn logistics_sources_honor_base_fallback_and_replace_path() {
+        let temp = valid_fixture("logistics-source-resolution");
+        let base = temp.0.join("base");
+        fs::create_dir_all(base.join("map")).unwrap();
+        fs::write(base.join("map/railways.txt"), "1 1 1\n").unwrap();
+        fs::write(base.join("map/supply_nodes.txt"), "1 1\n").unwrap();
+        let mut loaded_project = project(&temp, Vec::new());
+        loaded_project
+            .paths
+            .set_validated_base_game_root(Some(base.clone()));
+        let loaded = load_logistics(&loaded_project.paths.sources);
+        assert_eq!(
+            loaded.railways.source.unwrap().source_kind,
+            super::super::SourceKind::BaseGame
+        );
+        assert_eq!(
+            loaded.supply_nodes.source.unwrap().source_kind,
+            super::super::SourceKind::BaseGame
+        );
+
+        fs::create_dir_all(base.join("dlc/dlc010/map")).unwrap();
+        fs::write(base.join("dlc/dlc010/map/railways.txt"), "1 1 1\n").unwrap();
+        fs::create_dir_all(base.join("integrated_dlc/dlc020")).unwrap();
+        let archive = fs::File::create(base.join("integrated_dlc/dlc020/content.zip")).unwrap();
+        let mut zip = zip::ZipWriter::new(archive);
+        zip.start_file("map/supply_nodes.txt", zip::write::FileOptions::default())
+            .unwrap();
+        zip.write_all(b"1 1\n").unwrap();
+        zip.finish().unwrap();
+        let mut lower_project = project(&temp, Vec::new());
+        lower_project
+            .paths
+            .set_validated_base_game_root(Some(base.clone()));
+        let loaded = load_logistics(&lower_project.paths.sources);
+        assert_eq!(
+            loaded.railways.source.unwrap().source_kind,
+            super::super::SourceKind::Dlc
+        );
+        assert_eq!(
+            loaded.supply_nodes.source.unwrap().source_kind,
+            super::super::SourceKind::IntegratedDlc
+        );
+
+        fs::write(temp.0.join("descriptor.mod"), "replace_path = \"map\"\n").unwrap();
+        let mut replaced = project(&temp, Vec::new());
+        replaced.paths.set_validated_base_game_root(Some(base));
+        let loaded = load_logistics(&replaced.paths.sources);
+        assert!(loaded.railways.source.is_none());
+        assert!(loaded.supply_nodes.source.is_none());
+        assert!(matches!(
+            replaced.paths.sources.resolve("map/railways.txt").unwrap(),
+            SourceLookup::BlockedByReplacePath { .. }
+        ));
+    }
+
+    #[test]
+    fn logistics_models_and_diagnostics_do_not_cross_project_generations() {
+        let first = valid_fixture("logistics-project-a");
+        fs::write(first.0.join("map/railways.txt"), "1 1 999\n").unwrap();
+        fs::write(first.0.join("map/supply_nodes.txt"), "1 999\n").unwrap();
+        let mut first_project = project(&first, Vec::new());
+        first_project.paths.bind_project_generation(41);
+        let first_loaded = load_logistics(&first_project.paths.sources);
+        let first_report = validate_project(
+            &first.bundle(),
+            &first_project,
+            ProjectValidationTarget::CurrentProject,
+        );
+
+        let second = valid_fixture("logistics-project-b");
+        fs::write(second.0.join("map/railways.txt"), "1 1 1\n").unwrap();
+        fs::write(second.0.join("map/supply_nodes.txt"), "1 1\n").unwrap();
+        let mut second_project = project(&second, Vec::new());
+        second_project.paths.bind_project_generation(42);
+        let second_loaded = load_logistics(&second_project.paths.sources);
+        let second_report = validate_project(
+            &second.bundle(),
+            &second_project,
+            ProjectValidationTarget::CurrentProject,
+        );
+
+        assert_eq!(
+            first_loaded
+                .railways
+                .source
+                .unwrap()
+                .project_generation
+                .value(),
+            41
+        );
+        assert_eq!(
+            second_loaded
+                .railways
+                .source
+                .unwrap()
+                .project_generation
+                .value(),
+            42
+        );
+        assert!(
+            first_report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "RAILWAY_PROVINCE_MISSING")
+        );
+        assert!(
+            !second_report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "RAILWAY_PROVINCE_MISSING"
+                    || diagnostic.code == "SUPPLY_NODE_PROVINCE_MISSING")
+        );
     }
 
     fn validation_diagnostic(

@@ -5,6 +5,7 @@ mod diagnostics;
 mod edit;
 mod indexes;
 mod lasso;
+mod logistics;
 mod patch;
 mod paths;
 mod properties;
@@ -37,6 +38,10 @@ pub use indexes::{StateIndexes, index_state_documents};
 pub use lasso::{
     LassoCandidateSet, LassoSelectionMode, ProvinceInclusionMode, StateLassoError, StateLassoPhase,
     classify_state_lasso,
+};
+pub use logistics::{
+    LogisticsInput, LogisticsLoadIssue, LogisticsLoadResult, Railway, RailwayLoadResult,
+    SupplyNode, SupplyNodeLoadResult, load_logistics,
 };
 pub use patch::{
     PatchDiagnostic, PatchDiagnosticKind, PatchPlanSummary, PatchPlanTimings, PatchSafety,

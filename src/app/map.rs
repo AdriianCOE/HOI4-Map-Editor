@@ -11,6 +11,7 @@ use image::{Rgb, RgbImage, Rgba, RgbaImage};
 use rand::Rng;
 use rayon::iter::ParallelIterator;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use uord::UOrd2 as UOrd;
 use vecmath::Vector2;
 
@@ -879,6 +880,18 @@ impl Map {
     /// model, so this does not broaden the save surface.
     pub(crate) fn adjacencies(&self) -> &[Adjacency] {
         &self.all_adjacencies
+    }
+
+    /// Distinct province pairs which share a pixel border. This is a
+    /// read-only, sparse-ID-safe geometry query for map-domain validation.
+    pub(crate) fn geographic_province_adjacency_pairs(&self) -> BTreeSet<(u32, u32)> {
+        self.iter_pixel_pairs()
+            .filter_map(|(left, right)| {
+                let left = self.province_id_for_color(self.get_color_at(left))?;
+                let right = self.province_id_for_color(self.get_color_at(right))?;
+                (left != right).then_some((left.min(right), left.max(right)))
+            })
+            .collect()
     }
 
     pub fn adjacency_references_province_id(&self, id: u32) -> bool {
