@@ -14,6 +14,7 @@ pub mod project;
 pub(crate) mod project_lifecycle;
 pub mod resources;
 pub(crate) mod save_ui;
+pub(crate) mod selection_navigation;
 pub mod state;
 
 use glutin::window::CursorIcon;
@@ -29,7 +30,7 @@ use self::input::{
     ApplicationCommand, CursorCommand, CursorContext, EditingLockedKeyCommand, FileDropCommand,
     InputCommand, InputContext, InspectorPickerKeyCommand, InspectorSearchKeyCommand,
     MapGestureCommand, MapKeyboardCommand, PointerCommand, PointerContext, PrimaryClickOutcome,
-    PropertyEditorKeyCommand, RawKeyEvent, RawPointerEvent, RawWheelEvent, RelativeMotionCommand,
+    PropertyEditorKeyCommand, RawKeyEvent, RawPointerEvent, RawWheelEvent,
     StateApplyDialogKeyCommand, ToolShortcut, ViewportCommand, WheelCommand, WheelContext,
 };
 use self::interface::{ButtonId, Interface, StateActionAvailability, get_interface};
@@ -42,6 +43,7 @@ use self::project::{
 use self::project_lifecycle::{
     ProjectLifecycleController, ProjectLifecycleEffect, ProjectOpenCandidate, ProjectStartupEffect,
 };
+use self::selection_navigation::SelectionNavigationRequest;
 use crate::config::{ConfigIssue, FileFingerprint, GlobalConfig, ProjectConfig, SaveConfigError};
 use crate::error::Error;
 use crate::events::{EventHandler, KeyMods};
@@ -306,11 +308,10 @@ impl EventHandler for App {
     }
 
     fn on_mouse_relative(&mut self, rel: Vector2<f64>) {
-        if let InputCommand::RelativeMotion(RelativeMotionCommand::PanBy { delta }) =
-            input::classify_relative_motion(rel)
-            && let Some(canvas) = &mut self.canvas
+        if let Some(request) =
+            selection_navigation::request_from_input(input::classify_relative_motion(rel))
         {
-            canvas.camera.on_mouse_relative(delta);
+            self.apply_selection_navigation(request);
         }
     }
 
@@ -338,13 +339,12 @@ impl EventHandler for App {
                 map_contains_cursor: interface.map_contains(cursor_pos),
             },
         );
-        if let InputCommand::Wheel(command) = command {
+        if let Some(request) = selection_navigation::request_from_input(command) {
+            canvas.apply_selection_navigation(interface, request, &mut self.alerts);
+        } else if let InputCommand::Wheel(command) = command {
             match command {
                 WheelCommand::ChangeBrushRadius { delta_y } => canvas.change_tool_radius(delta_y),
-                WheelCommand::Zoom { delta_y, position } => {
-                    canvas.camera.on_mouse_zoom(interface, delta_y, position)
-                }
-                WheelCommand::CapturedByUi | WheelCommand::Ignore => {}
+                WheelCommand::Zoom { .. } | WheelCommand::CapturedByUi | WheelCommand::Ignore => {}
             }
         }
     }
@@ -686,9 +686,19 @@ impl App {
                     && !canvas.cancel_state_brush()
                     && !canvas.cancel_state_lasso()
                     && !canvas.cancel_state_fill()
-                    && !canvas.clear_state_selection()
                 {
-                    canvas.cancel_tool();
+                    let selection_cleared = self.interface.as_ref().is_some_and(|interface| {
+                        canvas
+                            .apply_selection_navigation(
+                                interface,
+                                selection_navigation::clear_state_selection(),
+                                &mut self.alerts,
+                            )
+                            .handled
+                    });
+                    if !selection_cleared {
+                        canvas.cancel_tool();
+                    }
                 }
             }
             MapKeyboardCommand::ConfirmTool => {
@@ -746,6 +756,12 @@ impl App {
         {
             interface.clear_tooltip();
         }
+        if let Some(request) =
+            selection_navigation::request_from_input(InputCommand::Pointer(classification))
+        {
+            self.apply_selection_navigation(request);
+            return;
+        }
         match classification.command {
             PointerCommand::PreferencesPrimaryClick { position } => {
                 self.handle_preferences_click(position)
@@ -767,16 +783,7 @@ impl App {
                 self.action_activate_tool(position, mods)
             }
             PointerCommand::EndPrimaryGesture => self.action_deactivate_tool(),
-            PointerCommand::BeginPan => {
-                if let Some(canvas) = self.canvas.as_mut() {
-                    canvas.camera.set_panning(true);
-                }
-            }
-            PointerCommand::EndPan => {
-                if let Some(canvas) = self.canvas.as_mut() {
-                    canvas.camera.set_panning(false);
-                }
-            }
+            PointerCommand::BeginPan | PointerCommand::EndPan => unreachable!("routed above"),
             PointerCommand::PickBrush { position } => {
                 if let (Some(interface), Some(canvas)) =
                     (self.interface.as_ref(), self.canvas.as_mut())
@@ -786,6 +793,19 @@ impl App {
             }
             PointerCommand::Ignore => {}
         }
+    }
+
+    fn apply_selection_navigation(&mut self, request: SelectionNavigationRequest) -> bool {
+        let execution = match (self.interface.as_ref(), self.canvas.as_mut()) {
+            (Some(interface), Some(canvas)) => {
+                canvas.apply_selection_navigation(interface, request, &mut self.alerts)
+            }
+            _ => return false,
+        };
+        if let Some(request) = execution.inspector_request {
+            self.handle_inspector_external_request(request);
+        }
+        execution.handled
     }
 
     fn route_primary_click(&mut self, position: Vector2<f64>, mods: KeyMods) {
@@ -1440,12 +1460,10 @@ impl App {
             return;
         }
         if id == ToolbarEditClearStateSelection {
-            if self.resolve_property_draft()
-                && let Some(canvas) = self.canvas.as_mut()
-            {
-                if canvas.is_state_workspace() {
-                    canvas.clear_state_selection();
-                } else {
+            if self.resolve_property_draft() {
+                if self.canvas.as_ref().is_some_and(Canvas::is_state_workspace) {
+                    self.apply_selection_navigation(selection_navigation::clear_state_selection());
+                } else if let Some(canvas) = self.canvas.as_mut() {
                     canvas.cancel_tool();
                 }
             }
@@ -1868,7 +1886,11 @@ impl App {
             return;
         };
         if canvas.state_pan_is_active() && canvas.is_state_workspace() {
-            canvas.camera.set_panning(true);
+            canvas.apply_selection_navigation(
+                interface,
+                SelectionNavigationRequest::PanBegin,
+                &mut self.alerts,
+            );
             self.painting = true;
             return;
         }
@@ -1886,8 +1908,14 @@ impl App {
                     &mut self.alerts,
                 );
             } else {
-                inspector_request =
-                    canvas.select_state_at(interface, pos, mods.ctrl, &mut self.alerts);
+                let request = selection_navigation::request_from_state_selection_gesture(
+                    PointerCommand::BeginPrimaryGesture { position: pos },
+                    mods.ctrl,
+                )
+                .expect("state selection is reached from a primary gesture");
+                inspector_request = canvas
+                    .apply_selection_navigation(interface, request, &mut self.alerts)
+                    .inspector_request;
             }
         } else if canvas.view_mode() == ViewMode::Adjacencies
             && canvas.tool.adjacency_brush.is_none()
@@ -1918,11 +1946,17 @@ impl App {
 
     fn action_deactivate_tool(&mut self) {
         self.painting = false;
+        if self
+            .canvas
+            .as_ref()
+            .is_some_and(Canvas::state_pan_is_active)
+        {
+            self.apply_selection_navigation(SelectionNavigationRequest::PanEnd);
+            return;
+        }
         if let Some(canvas) = &mut self.canvas {
             if canvas.state_brush_is_stroking() {
                 canvas.finish_state_brush(&mut self.alerts);
-            } else if canvas.state_pan_is_active() {
-                canvas.camera.set_panning(false);
             } else {
                 canvas.deactivate_tool();
             }

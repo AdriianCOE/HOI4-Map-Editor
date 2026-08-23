@@ -23,14 +23,26 @@ pixels, provincias, states ou sessoes de edicao. `App` coleta o contexto, roteia
 o comando e chama as APIs ja existentes; `Canvas` continua sendo o executor e
 proprietario de ferramentas, selecao, camera e historico.
 
+`app::selection_navigation` acrescenta uma fronteira pura e sincrona, pequena,
+para intencoes de selecao e navegacao do mapa. Depois que `app::input` ja
+classificou pan ou zoom, ou que a rota existente de gesto primario confirmou a
+selecao de State, ela produz `SelectionNavigationRequest`. O request conserva
+coordenadas de tela e a intencao Ctrl; ele nunca contem ID de provincia ou
+State resolvido. `Canvas::apply_selection_navigation` continua resolvendo o
+pixel, mutando `StateEditSession`/selecao e movendo a camera. Nao ha fila,
+controller, ownership de gesto ou historico novo nesta fronteira. Os requests
+de Problems (Go-to e marcador diagnostico temporario), picker, pintura, brush,
+fill e lasso continuam em suas rotas atuais.
+
 | Evento bruto | Classificacao | Comando | Executor | Dono da mutacao/historico |
 | --- | --- | --- | --- | --- |
 | Tecla global | `app::input` | `ApplicationCommand::{Save,OpenProject,...}` | `App` / controladores existentes | Save UI/engine ou lifecycle existente |
 | Tecla de mapa | `app::input` | `MapKeyboardCommand` | `App` para a API Canvas existente | `Canvas`, `StateEditSession`, `History` |
-| Clique/arrasto primario | `app::input` + resultado da UI | `PointerCommand::{BeginPrimaryGesture,EndPrimaryGesture}` | `App::action_*` existente | Canvas/ferramenta existente |
-| Botao direito/meio | `app::input` | `BeginPan`, `EndPan`, `PickBrush` | Canvas/camera existente | `Canvas` |
-| Movimento/relativo | `app::input` | `MapGestureCommand` / `RelativeMotionCommand` | Canvas/camera existente | Canvas/ferramenta existente |
-| Roda | `app::input` apos scroll de UI | `WheelCommand::{ChangeBrushRadius,Zoom}` | Canvas existente | Canvas/camera existente |
+| Clique/arrasto primario | `app::input` + resultado da UI | `PointerCommand::{BeginPrimaryGesture,EndPrimaryGesture}`; State sem ferramenta ativa vira `SelectStateAt` | `App::action_*` / `Canvas::apply_selection_navigation` | Canvas/ferramenta existente |
+| Botao direito/meio | `app::input` | `BeginPan`, `EndPan`, `PickBrush`; apenas pan vira request | `Canvas::apply_selection_navigation` / ferramenta existente | `Canvas` |
+| Movimento/relativo | `app::input` | `RelativeMotionCommand::PanBy` vira `PanBy` | `Canvas::apply_selection_navigation` | Canvas/camera existente |
+| Roda | `app::input` apos scroll de UI | somente `WheelCommand::Zoom` vira `Zoom`; raio e captura permanecem locais | `Canvas::apply_selection_navigation` / Canvas existente | Canvas/camera existente |
+| Esc de mapa | `app::input` | `MapKeyboardCommand::CancelTool`; fallback final vira `ClearStateSelection` | `Canvas::apply_selection_navigation` | Canvas/selecao existente |
 | File drop | `app::input` | `FileDropCommand::OpenProject` | `ProjectLifecycleController` via App | carregador/lifecycle existente |
 | Resize | `app::input` | `ViewportCommand::RebuildInterface` | `App` / `Interface` | recursos de janela/UI existentes |
 

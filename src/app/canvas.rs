@@ -64,6 +64,7 @@ use super::save_ui::{
     ProjectSavePresentationSummary, SaveReviewModel, SaveUiController, SaveUiRequest,
     integrity_problem_presentation, progress_presentation, result_presentation,
 };
+use super::selection_navigation::SelectionNavigationRequest;
 use super::{FontGlyphCache, colors};
 use crate::config::{Config, ImageOverlayProjectSettings, ProjectConfig};
 use crate::error::Error;
@@ -212,6 +213,15 @@ pub struct Canvas {
 pub enum InspectorExternalRequest {
     OpenSource(PathBuf),
     CopyPath(String),
+}
+
+/// Synchronous execution outcome for a selection/navigation request.
+///
+/// `handled` preserves the existing Escape fallback chain: a blocked clear
+/// must still permit cancellation of the active legacy tool.
+pub(crate) struct SelectionNavigationExecution {
+    pub(crate) handled: bool,
+    pub(crate) inspector_request: Option<InspectorExternalRequest>,
 }
 
 #[derive(Debug, Clone)]
@@ -9295,6 +9305,62 @@ impl Canvas {
         }
         self.refresh_state_information();
         had_selection
+    }
+
+    /// Executes a typed selection/navigation intent while retaining ownership
+    /// of hit testing, State session mutation, and camera state in Canvas.
+    pub(crate) fn apply_selection_navigation(
+        &mut self,
+        interface: &Interface,
+        request: SelectionNavigationRequest,
+        alerts: &mut Alerts,
+    ) -> SelectionNavigationExecution {
+        match request {
+            SelectionNavigationRequest::SelectStateAt {
+                screen_position,
+                toggle_province,
+            } => SelectionNavigationExecution {
+                handled: true,
+                inspector_request: self.select_state_at(
+                    interface,
+                    screen_position,
+                    toggle_province,
+                    alerts,
+                ),
+            },
+            SelectionNavigationRequest::ClearStateSelection => SelectionNavigationExecution {
+                handled: self.clear_state_selection(),
+                inspector_request: None,
+            },
+            SelectionNavigationRequest::PanBegin => {
+                self.camera.set_panning(true);
+                SelectionNavigationExecution {
+                    handled: true,
+                    inspector_request: None,
+                }
+            }
+            SelectionNavigationRequest::PanBy { delta } => {
+                self.camera.on_mouse_relative(delta);
+                SelectionNavigationExecution {
+                    handled: true,
+                    inspector_request: None,
+                }
+            }
+            SelectionNavigationRequest::PanEnd => {
+                self.camera.set_panning(false);
+                SelectionNavigationExecution {
+                    handled: true,
+                    inspector_request: None,
+                }
+            }
+            SelectionNavigationRequest::Zoom { amount, anchor } => {
+                self.camera.on_mouse_zoom(interface, amount, anchor);
+                SelectionNavigationExecution {
+                    handled: true,
+                    inspector_request: None,
+                }
+            }
+        }
     }
 
     pub fn move_selected_provinces_to_target(&mut self, alerts: &mut Alerts) {
