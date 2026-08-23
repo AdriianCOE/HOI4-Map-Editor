@@ -13,6 +13,36 @@ em acoes; `Canvas` reune sessao visual, camera, ferramentas e texturas;
 `Bundle`, `Map` e `History` mantem os dados geograficos e undo/redo; e
 `map/bridge.rs` usa `util/files.rs` para ler pastas ou ZIPs.
 
+## Fronteira de classificacao de entrada
+
+`app::input` e uma camada pura entre os eventos Piston e as acoes existentes.
+Ela recebe um evento bruto pequeno mais `InputContext` (somente captura de UI,
+workspace, bloqueio de edicao e presenca de Canvas) e retorna enums de comando.
+Nao importa `App` ou `Canvas`, nao abre projetos, nao inicia Save e nao conhece
+pixels, provincias, states ou sessoes de edicao. `App` coleta o contexto, roteia
+o comando e chama as APIs ja existentes; `Canvas` continua sendo o executor e
+proprietario de ferramentas, selecao, camera e historico.
+
+| Evento bruto | Classificacao | Comando | Executor | Dono da mutacao/historico |
+| --- | --- | --- | --- | --- |
+| Tecla global | `app::input` | `ApplicationCommand::{Save,OpenProject,...}` | `App` / controladores existentes | Save UI/engine ou lifecycle existente |
+| Tecla de mapa | `app::input` | `MapKeyboardCommand` | `App` para a API Canvas existente | `Canvas`, `StateEditSession`, `History` |
+| Clique/arrasto primario | `app::input` + resultado da UI | `PointerCommand::{BeginPrimaryGesture,EndPrimaryGesture}` | `App::action_*` existente | Canvas/ferramenta existente |
+| Botao direito/meio | `app::input` | `BeginPan`, `EndPan`, `PickBrush` | Canvas/camera existente | `Canvas` |
+| Movimento/relativo | `app::input` | `MapGestureCommand` / `RelativeMotionCommand` | Canvas/camera existente | Canvas/ferramenta existente |
+| Roda | `app::input` apos scroll de UI | `WheelCommand::{ChangeBrushRadius,Zoom}` | Canvas existente | Canvas/camera existente |
+| File drop | `app::input` | `FileDropCommand::OpenProject` | `ProjectLifecycleController` via App | carregador/lifecycle existente |
+| Resize | `app::input` | `ViewportCommand::RebuildInterface` | `App` / `Interface` | recursos de janela/UI existentes |
+
+Captura de Preferences, Save review, inspector picker/search e editor de
+propriedades e classificada antes de atalhos ou gestos de mapa. O resultado de
+`Interface::on_mouse_click` e convertido em `PrimaryClickOutcome`; somente o
+resultado que a UI explicitamente adia gera um comando de gesto para o mapa.
+Assim, uma pressao capturada ainda consome sua release correspondente e nao cria
+click-through. O classificador e deliberadamente sem alocacao nas rotas de
+cursor, movimento relativo e roda; o caminho recebido pelo file drop permanece
+com o App e nao e clonado para um comando.
+
 ## Componentes reutilizados
 
 - carregamento BMP e parser de `definition.csv`;
