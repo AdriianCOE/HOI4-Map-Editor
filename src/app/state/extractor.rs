@@ -143,6 +143,9 @@ impl<'a> Extractor<'a> {
                 Some("impassable") => {
                     state.impassable = self.read_bool(entry);
                 }
+                Some("demilitarized_zone") => {
+                    state.demilitarized_zone = self.read_bool(entry);
+                }
                 Some("resources") => self.extract_resources(entry, &mut state),
                 Some("history") => {
                     has_history = true;
@@ -796,6 +799,17 @@ mod tests {
                 .and_then(|buildings| buildings.get("bunker")),
             Some(&3)
         );
+    }
+
+    #[test]
+    fn parses_initial_demilitarized_zone_without_evaluating_dated_history() {
+        let result = extract_state(&parse_text(
+            "dmz.txt",
+            "state={ id=3 name=dmz state_category=city demilitarized_zone=yes provinces={ 3 } history={ owner=TAG 1940.1.1={ owner=ABC } } }",
+        ));
+        let state = result.data.unwrap();
+        assert_eq!(state.demilitarized_zone, Some(true));
+        assert_eq!(state.history.dated_blocks.len(), 1);
     }
 
     #[test]

@@ -45,6 +45,7 @@ struct StateWorkingSet {
     properties_by_state: BTreeMap<u32, EditableStateProperties>,
     victory_points_by_state: BTreeMap<u32, Vec<VictoryPoint>>,
     province_buildings_by_state: BTreeMap<u32, BTreeMap<u32, BTreeMap<String, i64>>>,
+    demilitarized_zone_by_state: BTreeMap<u32, Option<bool>>,
     detached_victory_points: BTreeMap<u32, Vec<VictoryPoint>>,
     detached_province_buildings: BTreeMap<u32, BTreeMap<String, i64>>,
     unassigned_land_provinces: BTreeSet<u32>,
@@ -1753,6 +1754,7 @@ impl StateWorkingSet {
         let mut victory_points_by_state = BTreeMap::new();
         let mut properties_by_state = BTreeMap::new();
         let mut province_buildings_by_state = BTreeMap::new();
+        let mut demilitarized_zone_by_state = BTreeMap::new();
         let mut dated_history_states = BTreeSet::new();
         for (&state_id, &document_index) in &project.states_by_id {
             let Some(data) = project
@@ -1765,6 +1767,7 @@ impl StateWorkingSet {
             properties_by_state.insert(state_id, EditableStateProperties::from_state(data));
             victory_points_by_state.insert(state_id, data.history.victory_points.clone());
             province_buildings_by_state.insert(state_id, data.history.province_buildings.clone());
+            demilitarized_zone_by_state.insert(state_id, data.demilitarized_zone);
             if !data.history.dated_blocks.is_empty() {
                 dated_history_states.insert(state_id);
             }
@@ -1777,6 +1780,7 @@ impl StateWorkingSet {
             properties_by_state,
             victory_points_by_state,
             province_buildings_by_state,
+            demilitarized_zone_by_state,
             detached_victory_points: BTreeMap::new(),
             detached_province_buildings: BTreeMap::new(),
             unassigned_land_provinces: BTreeSet::new(),
@@ -1809,6 +1813,11 @@ impl StateWorkingSet {
             .get(&state_id)
             .cloned()
             .unwrap_or_default();
+        data.demilitarized_zone = self
+            .demilitarized_zone_by_state
+            .get(&state_id)
+            .copied()
+            .flatten();
         data
     }
 

@@ -36,6 +36,8 @@ pub struct StateData {
     pub state_category: Option<String>,
     pub local_supplies: Option<f64>,
     pub impassable: Option<bool>,
+    /// Initial-state-only presentation flag. Dated/conditional script is intentionally not evaluated.
+    pub demilitarized_zone: Option<bool>,
     pub resources: BTreeMap<String, i64>,
     pub history: StateHistory,
 }

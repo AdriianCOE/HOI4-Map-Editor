@@ -1208,8 +1208,8 @@ impl App {
                 view_mode: None,
                 selected_tool: None,
                 state_tool: None,
-                enabled_options: [false; 7],
-                available_options: [false; 7],
+                enabled_options: [false; 9],
+                available_options: [false; 9],
                 states_available: false,
                 state_actions: StateActionAvailability::default(),
                 blocks_tooltips: false,
@@ -1366,6 +1366,9 @@ impl App {
             (Some(_), ToolbarFileReveal) => self.action_reveal_map(),
             (Some(_), ToolbarFileExportLandMap) => self.action_export_land_map(),
             (Some(_), ToolbarFileExportTerrainMap) => self.action_export_terrain_map(),
+            (Some(_), ToolbarFileExportMapImage) => self.action_export_map_image(),
+            (Some(_), ToolbarFileExportMapImage2x) => self.action_export_map_image_with_scale(2),
+            (Some(_), ToolbarFileExportMapImage4x) => self.action_export_map_image_with_scale(4),
             (Some(canvas), ToolbarEditUndo) => canvas.undo(&mut self.alerts),
             (Some(canvas), ToolbarEditRedo) => canvas.redo(&mut self.alerts),
             (Some(canvas), ToolbarEditFindMap) => canvas.focus_map_search(),
@@ -1533,8 +1536,20 @@ impl App {
             (Some(_), ToolbarViewPoliticalMap) => {
                 self.action_change_map_view_mode(MapViewMode::Political)
             }
+            (Some(_), ToolbarViewStateCategoryMap) => {
+                self.action_change_map_view_mode(MapViewMode::StateCategory)
+            }
+            (Some(_), ToolbarViewManpowerMap) => {
+                self.action_change_map_view_mode(MapViewMode::Manpower)
+            }
             (Some(canvas), ToolbarViewResourcesMap | ToolbarViewToggleResourcesOverlay) => {
                 canvas.toggle_resources_overlay(&mut self.alerts)
+            }
+            (Some(canvas), ToolbarViewToggleVictoryPointsOverlay) => {
+                canvas.toggle_victory_points_overlay(&mut self.alerts)
+            }
+            (Some(canvas), ToolbarViewToggleDmzOverlay) => {
+                canvas.toggle_dmz_overlay(&mut self.alerts)
             }
             (Some(canvas), ToolbarViewToggleAdjacencies | SidebarOptionAdjacencies) => {
                 canvas.toggle_adjacencies_overlay()
@@ -1922,6 +1937,18 @@ impl App {
         };
     }
 
+    fn action_export_map_image(&mut self) {
+        self.action_export_map_image_with_scale(1);
+    }
+
+    fn action_export_map_image_with_scale(&mut self, scale: u32) {
+        if let Some(canvas) = self.canvas.as_mut()
+            && let Some(path) = file_dialog_save_png(&format!("map-{scale}x"))
+        {
+            canvas.export_map_image(path, scale, &mut self.alerts);
+        }
+    }
+
     fn raw_open_map_at(&mut self, location: impl IntoLocation) {
         let remembered_base_game_root = self.global_config.base_game_root.clone();
         let result: Result<String, Error> = crate::try_block! {
@@ -2206,6 +2233,8 @@ fn map_view_preference(mode: MapViewMode) -> &'static str {
         MapViewMode::Coastal => "coastal",
         MapViewMode::States => "states",
         MapViewMode::Political => "political",
+        MapViewMode::StateCategory => "state-category",
+        MapViewMode::Manpower => "manpower",
         MapViewMode::Resources => "resources",
     }
 }
@@ -2219,6 +2248,8 @@ fn map_view_from_preference(value: &str) -> Option<MapViewMode> {
         "coastal" => Some(MapViewMode::Coastal),
         "states" => Some(MapViewMode::States),
         "political" => Some(MapViewMode::Political),
+        "state-category" => Some(MapViewMode::StateCategory),
+        "manpower" => Some(MapViewMode::Manpower),
         "resources" => Some(MapViewMode::Resources),
         _ => None,
     }
@@ -2393,8 +2424,8 @@ pub struct InterfaceDrawContext {
     pub view_mode: Option<ViewMode>,
     pub selected_tool: Option<usize>,
     pub state_tool: Option<usize>,
-    pub enabled_options: [bool; 7],
-    pub available_options: [bool; 7],
+    pub enabled_options: [bool; 9],
+    pub available_options: [bool; 9],
     pub states_available: bool,
     pub state_actions: StateActionAvailability,
     pub blocks_tooltips: bool,
@@ -2447,6 +2478,16 @@ fn file_dialog_save_bmp(filename: &str) -> Option<PathBuf> {
         .set_directory(&root)
         .set_file_name(format!("{}.bmp", filename))
         .add_filter("24-bit Bitmap", &["bmp"])
+        .save_file()
+}
+
+fn file_dialog_save_png(filename: &str) -> Option<PathBuf> {
+    let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("./"));
+    FileDialog::new()
+        .set_title("Export Map Image")
+        .set_directory(&root)
+        .set_file_name(format!("{filename}.png"))
+        .add_filter("PNG image", &["png"])
         .save_file()
 }
 

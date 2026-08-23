@@ -1564,6 +1564,9 @@ pub enum ButtonId {
     ToolbarFileReveal,
     ToolbarFileExportLandMap,
     ToolbarFileExportTerrainMap,
+    ToolbarFileExportMapImage,
+    ToolbarFileExportMapImage2x,
+    ToolbarFileExportMapImage4x,
     ToolbarFileProjectSettings,
     WorkspaceProvinces,
     WorkspaceStates,
@@ -1630,8 +1633,12 @@ pub enum ButtonId {
     ToolbarViewProvinceMap,
     ToolbarViewStateMap,
     ToolbarViewPoliticalMap,
+    ToolbarViewStateCategoryMap,
+    ToolbarViewManpowerMap,
     ToolbarViewResourcesMap,
     ToolbarViewToggleResourcesOverlay,
+    ToolbarViewToggleVictoryPointsOverlay,
+    ToolbarViewToggleDmzOverlay,
     ToolbarViewToggleAdjacencies,
     ToolbarViewToggleImageOverlay,
     ToolbarViewImageOverlayPanel,
@@ -1690,10 +1697,18 @@ fn map_view_button_active(id: ButtonId, view: Option<MapViewMode>) -> bool {
                 ButtonId::ToolbarViewPoliticalMap,
                 Some(MapViewMode::Political)
             )
+            | (
+                ButtonId::ToolbarViewStateCategoryMap,
+                Some(MapViewMode::StateCategory)
+            )
+            | (
+                ButtonId::ToolbarViewManpowerMap,
+                Some(MapViewMode::Manpower)
+            )
     )
 }
 
-fn overlay_button_active(id: ButtonId, enabled: [bool; 7]) -> bool {
+fn overlay_button_active(id: ButtonId, enabled: [bool; 9]) -> bool {
     let index = match id {
         ButtonId::ToolbarViewToggleRiverOverlay => 0,
         ButtonId::ToolbarViewToggleAdjacencies => 1,
@@ -1702,12 +1717,14 @@ fn overlay_button_active(id: ButtonId, enabled: [bool; 7]) -> bool {
         ButtonId::ToolbarViewToggleStateBoundaries => 4,
         ButtonId::ToolbarViewToggleImageOverlay | ButtonId::ToolbarImageToggleVisible => 5,
         ButtonId::ToolbarViewToggleResourcesOverlay => 6,
+        ButtonId::ToolbarViewToggleVictoryPointsOverlay => 7,
+        ButtonId::ToolbarViewToggleDmzOverlay => 8,
         _ => return false,
     };
     enabled[index]
 }
 
-fn overlay_summary(enabled: [bool; 7]) -> String {
+fn overlay_summary(enabled: [bool; 9]) -> String {
     let labels = [
         "Rivers",
         "Adjacencies",
@@ -1716,6 +1733,8 @@ fn overlay_summary(enabled: [bool; 7]) -> String {
         "State Borders",
         "Image",
         "Resources",
+        "Victory Points",
+        "Demilitarized Zones",
     ];
     let active = labels
         .into_iter()
@@ -1804,7 +1823,11 @@ fn button_visible(id: ButtonId, ictx: InterfaceDrawContext) -> bool {
     }
     if matches!(
         id,
-        ToolbarViewStateMap | ToolbarViewPoliticalMap | ToolbarViewResourcesMap
+        ToolbarViewStateMap
+            | ToolbarViewPoliticalMap
+            | ToolbarViewStateCategoryMap
+            | ToolbarViewManpowerMap
+            | ToolbarViewResourcesMap
     ) && !ictx.states_available
     {
         return false;
@@ -1956,6 +1979,8 @@ const WORKSPACE_DROPDOWNS: &[(&str, &[(&str, &str, ButtonId)], bool, bool)] = &[
             ("Coastal Provinces", "5", ButtonId::ToolbarViewMode5),
             ("States", "6", ButtonId::ToolbarViewStateMap),
             ("Political", "7", ButtonId::ToolbarViewPoliticalMap),
+            ("State Category", "", ButtonId::ToolbarViewStateCategoryMap),
+            ("Manpower", "", ButtonId::ToolbarViewManpowerMap),
         ],
         true,
         false,
@@ -1977,6 +2002,16 @@ const WORKSPACE_DROPDOWNS: &[(&str, &[(&str, &str, ButtonId)], bool, bool)] = &[
                 ButtonId::ToolbarViewToggleStateBoundaries,
             ),
             ("Resources", "", ButtonId::ToolbarViewToggleResourcesOverlay),
+            (
+                "Victory Points",
+                "",
+                ButtonId::ToolbarViewToggleVictoryPointsOverlay,
+            ),
+            (
+                "Demilitarized Zones",
+                "",
+                ButtonId::ToolbarViewToggleDmzOverlay,
+            ),
         ],
         false,
         true,
@@ -2022,6 +2057,21 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 "Export Terrain Map...",
                 "",
                 ButtonId::ToolbarFileExportTerrainMap,
+            ),
+            (
+                "Export Map Image...",
+                "",
+                ButtonId::ToolbarFileExportMapImage,
+            ),
+            (
+                "Export Map Image 2x...",
+                "",
+                ButtonId::ToolbarFileExportMapImage2x,
+            ),
+            (
+                "Export Map Image 4x...",
+                "",
+                ButtonId::ToolbarFileExportMapImage4x,
             ),
         ],
     ),
@@ -2119,7 +2169,19 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
             ("Coastal Provinces", "5", ButtonId::ToolbarViewMode5),
             ("States", "6", ButtonId::ToolbarViewStateMap),
             ("Political", "7", ButtonId::ToolbarViewPoliticalMap),
+            ("State Category", "", ButtonId::ToolbarViewStateCategoryMap),
+            ("Manpower", "", ButtonId::ToolbarViewManpowerMap),
             ("Resources", "", ButtonId::ToolbarViewToggleResourcesOverlay),
+            (
+                "Victory Points",
+                "",
+                ButtonId::ToolbarViewToggleVictoryPointsOverlay,
+            ),
+            (
+                "Demilitarized Zones",
+                "",
+                ButtonId::ToolbarViewToggleDmzOverlay,
+            ),
             ("Rivers", "", ButtonId::ToolbarViewToggleRiverOverlay),
             ("Adjacencies", "", ButtonId::ToolbarViewToggleAdjacencies),
             ("Province IDs", "9", ButtonId::ToolbarViewToggleProvinceIds),
@@ -2315,8 +2377,8 @@ mod tests {
             view_mode: Some(ViewMode::Color),
             selected_tool: Some(0),
             state_tool: None,
-            enabled_options: [false; 7],
-            available_options: [true; 7],
+            enabled_options: [false; 9],
+            available_options: [true; 9],
             states_available: true,
             state_actions: StateActionAvailability {
                 state_view,
@@ -2353,14 +2415,14 @@ mod tests {
     }
 
     #[test]
-    fn map_view_menu_contains_the_seven_base_views() {
+    fn map_view_menu_contains_the_extended_base_views_without_new_shortcuts() {
         let (_, entries, _, _) = WORKSPACE_DROPDOWNS
             .iter()
             .find(|(label, _, _, _)| *label == "Map View")
             .unwrap();
         let ids = entries.iter().map(|entry| entry.2).collect::<Vec<_>>();
 
-        assert_eq!(ids.len(), 7);
+        assert_eq!(ids.len(), 9);
         assert!(!ids.contains(&ButtonId::ToolbarViewProvinceMap));
         assert!(!ids.contains(&ButtonId::ToolbarViewMode6));
         assert_eq!(
@@ -2373,6 +2435,8 @@ mod tests {
                 ButtonId::ToolbarViewMode5,
                 ButtonId::ToolbarViewStateMap,
                 ButtonId::ToolbarViewPoliticalMap,
+                ButtonId::ToolbarViewStateCategoryMap,
+                ButtonId::ToolbarViewManpowerMap,
             ]
         );
     }
@@ -2502,7 +2566,7 @@ mod tests {
 
     #[test]
     fn view_menu_reflects_independent_overlay_states() {
-        let enabled = [true, false, true, false, true, true, false];
+        let enabled = [true, false, true, false, true, true, false, false, false];
 
         assert!(overlay_button_active(
             ButtonId::ToolbarViewToggleRiverOverlay,
@@ -2542,10 +2606,10 @@ mod tests {
     #[test]
     fn compact_overlay_summary_lists_only_enabled_layers() {
         assert_eq!(
-            overlay_summary([true, false, false, false, true, false, false]),
+            overlay_summary([true, false, false, false, true, false, false, false, false]),
             "Rivers, State Borders"
         );
-        assert_eq!(overlay_summary([false; 7]), "None");
+        assert_eq!(overlay_summary([false; 9]), "None");
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub enum MapBaseView {
     Coastal,
     States,
     Political,
+    StateCategory,
+    Manpower,
     Resources,
 }
 
@@ -43,12 +45,17 @@ impl MapBaseView {
             Self::Coastal => "Coastal Provinces",
             Self::States => "States",
             Self::Political => "Political",
+            Self::StateCategory => "State Category",
+            Self::Manpower => "Manpower",
             Self::Resources => "Resources",
         }
     }
 
     pub const fn requires_state_history(self) -> bool {
-        matches!(self, Self::States | Self::Political | Self::Resources)
+        matches!(
+            self,
+            Self::States | Self::Political | Self::StateCategory | Self::Manpower | Self::Resources
+        )
     }
 
     pub const fn is_province_view(self) -> bool {
@@ -156,6 +163,10 @@ pub struct MapLayerState {
     pub show_resources: bool,
     /// Read-only markers derived from the latest validation report.
     pub show_problems: bool,
+    /// Read-only Province-scoped labels from the current State session.
+    pub show_victory_points: bool,
+    /// Initial-state demilitarized-zone hatching.
+    pub show_dmz: bool,
     pub developer_overlay: Option<DeveloperMapOverlay>,
 }
 
@@ -172,6 +183,8 @@ impl Default for MapLayerState {
             show_state_boundaries: true,
             show_resources: false,
             show_problems: false,
+            show_victory_points: false,
+            show_dmz: false,
             developer_overlay: None,
         }
     }

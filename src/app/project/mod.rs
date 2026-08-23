@@ -7,6 +7,7 @@ mod edit;
 mod indexes;
 mod lasso;
 mod logistics;
+mod map_presentation;
 mod patch;
 mod paths;
 mod problems_presentation;
@@ -52,6 +53,10 @@ pub use lasso::{
 pub use logistics::{
     LogisticsInput, LogisticsLoadIssue, LogisticsLoadResult, Railway, RailwayLoadResult,
     SupplyNode, SupplyNodeLoadResult, load_logistics,
+};
+pub use map_presentation::{
+    MapPresentationModel, StatePresentation, VictoryPointMarker, build_map_presentation,
+    category_color, checked_export_dimensions, manpower_color, paint_victory_points, save_png,
 };
 pub use patch::{
     PatchDiagnostic, PatchDiagnosticKind, PatchPlanSummary, PatchPlanTimings, PatchSafety,

@@ -3,9 +3,7 @@ use graphics::Transformed;
 use graphics::context::Context;
 use graphics::ellipse::Ellipse;
 use graphics::types::Color as DrawColor;
-#[cfg(test)]
-use image::Rgba;
-use image::{RgbImage, RgbaImage};
+use image::{RgbImage, Rgba, RgbaImage};
 use itertools::Itertools;
 use opengl_graphics::{Filter, GlGraphics, Texture, TextureSettings};
 use uord::UOrd2 as UOrd;
@@ -37,22 +35,23 @@ use super::political::{
 use super::project::{
     BrushProvinceClassification, BuildingScope, CombinedRoundTripValidationReport,
     DiagnosticAction, DiagnosticSeverity, EditableProvinceData, EditableStateProperties,
-    GameDefinitionCatalog, Hoi4Project, LassoSelectionMode, MapViewMode, ProblemsOverlayModel,
-    ProjectPatchPlan, ProjectSavePlan, ProjectValidationChange, ProjectValidationDiagnostic,
-    ProjectValidationDomain, ProjectValidationReport, ProjectValidationTarget, ProvinceAdjacency,
-    ProvinceDataDraft, ProvinceDataValidationError, ProvinceInclusionMode, ProvinceRemovalPolicy,
-    RecoveryInfo, RoundTripCancellation, RoundTripStage, RoundTripStatus,
-    RoundTripValidationPolicy, RoundTripValidationReport, RoundTripValidator, SaveTransactionState,
-    SourceGeneration, StateBrushMode, StateEditSession, StateFillMode, StateFillPreview,
-    StateFillProvince, StateFillProvinceKind, StateLassoPhase, StatePropertyDraft,
-    StateRemovalPolicy, StateSaveCancellation, StateSaveConditions, StateSaveFault,
-    StateSaveOutcome, StateSaveReport, StateSelection, WorkingStateOrigin, boundaries_for_state,
-    build_overlay, classify_state_lasso, detect_state_save_recovery, diagnostic_actions,
-    execute_project_save, execute_state_save, format_integer_pt_br, generate_state_view,
-    generate_state_view_for, generate_state_view_region_for, parse_grouped_nonnegative_integer,
+    GameDefinitionCatalog, Hoi4Project, LassoSelectionMode, MapPresentationModel, MapViewMode,
+    ProblemsOverlayModel, ProjectPatchPlan, ProjectSavePlan, ProjectValidationChange,
+    ProjectValidationDiagnostic, ProjectValidationDomain, ProjectValidationReport,
+    ProjectValidationTarget, ProvinceAdjacency, ProvinceDataDraft, ProvinceDataValidationError,
+    ProvinceInclusionMode, ProvinceRemovalPolicy, RecoveryInfo, RoundTripCancellation,
+    RoundTripStage, RoundTripStatus, RoundTripValidationPolicy, RoundTripValidationReport,
+    RoundTripValidator, SaveTransactionState, SourceGeneration, StateBrushMode, StateEditSession,
+    StateFillMode, StateFillPreview, StateFillProvince, StateFillProvinceKind, StateLassoPhase,
+    StatePropertyDraft, StateRemovalPolicy, StateSaveCancellation, StateSaveConditions,
+    StateSaveFault, StateSaveOutcome, StateSaveReport, StateSelection, WorkingStateOrigin,
+    boundaries_for_state, build_map_presentation, build_overlay, classify_state_lasso,
+    detect_state_save_recovery, diagnostic_actions, execute_project_save, execute_state_save,
+    format_integer_pt_br, generate_state_view, generate_state_view_for,
+    generate_state_view_region_for, paint_victory_points, parse_grouped_nonnegative_integer,
     plan_state_fill, plan_state_patches, recover_interrupted_state_save, sample_segment,
-    save_confirmation_text, select_state_at_for as resolve_state_at_for, selection_overlay_for,
-    state_save_eligibility, validate_project,
+    save_confirmation_text, save_png, select_state_at_for as resolve_state_at_for,
+    selection_overlay_for, state_save_eligibility, validate_project,
 };
 use super::resources::{
     ResourceIconResolver, ResourceMapLabel, ResourceMapState, prepare_resource_labels_with_index,
@@ -112,6 +111,10 @@ pub struct Canvas {
     texture: Texture,
     state_texture: Option<Texture>,
     political_texture: Option<Texture>,
+    state_category_texture: Option<Texture>,
+    manpower_texture: Option<Texture>,
+    dmz_texture: Option<Texture>,
+    map_presentation: Option<MapPresentationModel>,
     political_country_catalog: Option<PoliticalCountryCatalog>,
     political_cache_generation: Option<ProjectGeneration>,
     political_labels: Vec<PoliticalLabel>,
@@ -820,6 +823,10 @@ impl Canvas {
             texture,
             state_texture,
             political_texture: None,
+            state_category_texture: None,
+            manpower_texture: None,
+            dmz_texture: None,
+            map_presentation: None,
             // Political country files/localization and Resources presentation are view-only.
             // Loading them here used to make ordinary State/Province project open pay for both.
             political_country_catalog: None,
@@ -3293,6 +3300,15 @@ impl Canvas {
             self.resource_cache_generation
                 .is_none_or(|generation| generation == self.project_generation)
         );
+        if self.map_layers.show_victory_points
+            || self.map_layers.show_dmz
+            || matches!(
+                self.map_layers.base_view,
+                MapBaseView::StateCategory | MapBaseView::Manpower
+            )
+        {
+            self.ensure_map_presentation();
+        }
         debug_assert!(
             self.territory_anchor_generation
                 .is_none_or(|generation| generation == self.project_generation)
@@ -3311,6 +3327,11 @@ impl Canvas {
                 self.state_texture.as_ref().unwrap_or(&self.texture)
             }
             MapBaseView::Political => self.political_texture.as_ref().unwrap_or(&self.texture),
+            MapBaseView::StateCategory => self
+                .state_category_texture
+                .as_ref()
+                .unwrap_or(&self.texture),
+            MapBaseView::Manpower => self.manpower_texture.as_ref().unwrap_or(&self.texture),
         };
         graphics::image(texture, transform, gl);
         if self.map_layers.image_overlay.enabled
@@ -3342,9 +3363,11 @@ impl Canvas {
         if political_labels_visible_in_view(self.map_layers.base_view) {
             self.draw_political_country_labels(ctx, interface, glyph_cache, gl);
         }
+        self.draw_dmz_overlay(ctx, interface, gl);
         if self.map_layers.show_resources || self.map_layers.base_view == MapBaseView::Resources {
             self.draw_resource_labels(ctx, interface, glyph_cache, gl);
         }
+        self.draw_victory_points_overlay(ctx, interface, glyph_cache, gl);
         if self.map_layers.show_adjacencies {
             self.draw_adjacencies(ctx, interface, cursor_pos, gl);
         }
@@ -4080,9 +4103,11 @@ impl Canvas {
                 .preserved_id
                 .map_or_else(|| "X".to_owned(), |id| id.to_string());
             let color = match self.map_layers.base_view {
-                MapBaseView::States | MapBaseView::Political | MapBaseView::Resources => {
-                    colors::BLACK
-                }
+                MapBaseView::States
+                | MapBaseView::Political
+                | MapBaseView::StateCategory
+                | MapBaseView::Manpower
+                | MapBaseView::Resources => colors::BLACK,
                 MapBaseView::ProvinceColors => match province_data.kind {
                     ProvinceKind::Land | ProvinceKind::Lake => colors::BLACK,
                     ProvinceKind::Sea | ProvinceKind::Unknown => colors::WHITE,
@@ -4211,6 +4236,8 @@ impl Canvas {
                     | MapBaseView::Terrain
                     | MapBaseView::States
                     | MapBaseView::Political
+                    | MapBaseView::StateCategory
+                    | MapBaseView::Manpower
                     | MapBaseView::Resources => colors::BLACK,
                     MapBaseView::Continents => colors::WHITE,
                     MapBaseView::Coastal => colors::NEUTRAL,
@@ -6159,6 +6186,142 @@ impl Canvas {
         }
     }
 
+    fn ensure_map_presentation(&mut self) {
+        let Some(edit) = self.state_edit_session.as_ref() else {
+            return;
+        };
+        let revision = edit.revision();
+        let generation = SourceGeneration::new(self.project_generation.0);
+        if self
+            .map_presentation
+            .as_ref()
+            .is_some_and(|model| model.generation == generation && model.state_revision == revision)
+        {
+            return;
+        }
+        let anchors = self
+            .bundle
+            .map
+            .iter_province_data()
+            .filter_map(|(_, province)| {
+                let id = province.preserved_id?;
+                let center = province.center_of_mass();
+                Some((id, [center[0].floor() as u32, center[1].floor() as u32]))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let states = edit
+            .valid_state_ids()
+            .iter()
+            .filter_map(|state_id| edit.state_data(*state_id))
+            .collect::<Vec<_>>();
+        self.map_presentation = Some(build_map_presentation(generation, revision, states, |id| {
+            anchors.get(&id).copied()
+        }));
+        self.refresh_state_presentation_textures();
+    }
+
+    fn refresh_state_presentation_textures(&mut self) {
+        let Some(edit) = self.state_edit_session.as_ref() else {
+            return;
+        };
+        let Some(presentation) = self.map_presentation.as_ref() else {
+            return;
+        };
+        let state_by_province = edit.state_by_province().clone();
+        let styles = presentation.states.clone();
+        let settings = TextureSettings::new().mag(Filter::Nearest);
+        let category = self.bundle.map.gen_texture_buffer(|province_color| {
+            let province = self.bundle.map.get_province(province_color);
+            province
+                .preserved_id
+                .and_then(|province_id| state_by_province.get(&province_id))
+                .and_then(|state_id| styles.get(state_id))
+                .map_or_else(|| province.kind.color(), |state| state.category_color)
+        });
+        let manpower = self.bundle.map.gen_texture_buffer(|province_color| {
+            let province = self.bundle.map.get_province(province_color);
+            province
+                .preserved_id
+                .and_then(|province_id| state_by_province.get(&province_id))
+                .and_then(|state_id| styles.get(state_id))
+                .map_or_else(|| province.kind.color(), |state| state.manpower_color)
+        });
+        let dmz = RgbaImage::from_fn(self.bundle.map.width(), self.bundle.map.height(), |x, y| {
+            let province = self.bundle.map.get_province_at([x, y]);
+            let has_dmz = province
+                .preserved_id
+                .and_then(|province_id| state_by_province.get(&province_id))
+                .and_then(|state_id| styles.get(state_id))
+                .is_some_and(|state| state.demilitarized_zone);
+            if has_dmz && (x.wrapping_add(y) % 8 < 2) {
+                Rgba([0xf5, 0xd5, 0x3a, 0xb0])
+            } else {
+                Rgba([0, 0, 0, 0])
+            }
+        });
+        self.state_category_texture = Some(Texture::from_image(&category, &settings));
+        self.manpower_texture = Some(Texture::from_image(&manpower, &settings));
+        self.dmz_texture = Some(Texture::from_image(&dmz, &settings));
+    }
+
+    fn draw_dmz_overlay(&self, ctx: Context, interface: &Interface, gl: &mut GlGraphics) {
+        if !self.map_layers.show_dmz {
+            return;
+        }
+        if let Some(texture) = &self.dmz_texture {
+            graphics::image(
+                texture,
+                ctx.transform
+                    .append_transform(self.camera.display_matrix(interface)),
+                gl,
+            );
+        }
+    }
+
+    fn draw_victory_points_overlay(
+        &self,
+        ctx: Context,
+        interface: &Interface,
+        glyph_cache: &mut FontGlyphCache,
+        gl: &mut GlGraphics,
+    ) {
+        if !self.map_layers.show_victory_points {
+            return;
+        }
+        let Some(presentation) = self.map_presentation.as_ref() else {
+            return;
+        };
+        for marker in &presentation.victory_points {
+            let position = self.camera.compute_position(
+                interface,
+                [
+                    f64::from(marker.location[0]) + 0.5,
+                    f64::from(marker.location[1]) + 0.5,
+                ],
+            );
+            if !self.camera.within_viewport(interface, position) {
+                continue;
+            }
+            Ellipse::new([0.08, 0.08, 0.08, 0.92])
+                .resolution(12)
+                .draw_from_to(
+                    [5.0, 5.0],
+                    [-5.0, -5.0],
+                    &Default::default(),
+                    ctx.transform.trans_pos(position),
+                    gl,
+                );
+            draw_canvas_text(
+                ctx,
+                glyph_cache,
+                gl,
+                colors::WHITE,
+                [position[0] + 7.0, position[1] + 4.0],
+                &marker.value.to_string(),
+            );
+        }
+    }
+
     fn draw_problems_overlay(&self, ctx: Context, interface: &Interface, gl: &mut GlGraphics) {
         if !self.map_layers.show_problems {
             return;
@@ -6424,6 +6587,48 @@ impl Canvas {
         )));
     }
 
+    pub fn toggle_victory_points_overlay(&mut self, alerts: &mut Alerts) {
+        if self.state_edit_session.is_none() {
+            alerts.push(Err(
+                "Victory Points overlay is available only for loaded HOI4 state projects",
+            ));
+            return;
+        }
+        self.map_layers.show_victory_points = !self.map_layers.show_victory_points;
+        if self.map_layers.show_victory_points {
+            self.ensure_map_presentation();
+        }
+        alerts.push(Ok(format!(
+            "Victory Points overlay: {}",
+            if self.map_layers.show_victory_points {
+                "shown"
+            } else {
+                "hidden"
+            }
+        )));
+    }
+
+    pub fn toggle_dmz_overlay(&mut self, alerts: &mut Alerts) {
+        if self.state_edit_session.is_none() {
+            alerts.push(Err(
+                "Demilitarized Zones overlay is available only for loaded HOI4 state projects",
+            ));
+            return;
+        }
+        self.map_layers.show_dmz = !self.map_layers.show_dmz;
+        if self.map_layers.show_dmz {
+            self.ensure_map_presentation();
+        }
+        alerts.push(Ok(format!(
+            "Demilitarized Zones overlay: {}",
+            if self.map_layers.show_dmz {
+                "shown"
+            } else {
+                "hidden"
+            }
+        )));
+    }
+
     pub fn toggle_problems_overlay(&mut self, alerts: &mut Alerts) {
         self.map_layers.show_problems = !self.map_layers.show_problems;
         if self.map_layers.show_problems {
@@ -6488,7 +6693,7 @@ impl Canvas {
         self.diagnostic_navigation_marker = Some(location);
     }
 
-    pub fn enabled_options(&self) -> [bool; 7] {
+    pub fn enabled_options(&self) -> [bool; 9] {
         [
             self.map_layers.show_rivers,
             self.map_layers.show_adjacencies,
@@ -6497,10 +6702,12 @@ impl Canvas {
             self.map_layers.show_state_boundaries,
             self.map_layers.image_overlay.enabled,
             self.map_layers.show_resources,
+            self.map_layers.show_victory_points,
+            self.map_layers.show_dmz,
         ]
     }
 
-    pub fn available_options(&self) -> [bool; 7] {
+    pub fn available_options(&self) -> [bool; 9] {
         [
             self.bundle.map.get_rivers_overlay().is_some(),
             self.bundle.map.connections_count() > 0,
@@ -6512,6 +6719,8 @@ impl Canvas {
                 .as_ref()
                 .is_some_and(Hoi4Project::state_load_is_complete)
                 && self.state_edit_session.is_some(),
+            self.state_edit_session.is_some(),
+            self.state_edit_session.is_some(),
         ]
     }
 
@@ -6567,6 +6776,148 @@ impl Canvas {
                 Err(err) => alerts.push(Err(format!("Error: {}", err))),
             };
         };
+    }
+
+    pub fn export_map_image<P: AsRef<Path>>(&mut self, path: P, scale: u32, alerts: &mut Alerts) {
+        let path = path.as_ref();
+        match self.current_map_export_image() {
+            Ok(image) => match save_png(path, &image, scale) {
+                Ok(()) => alerts.push(Ok(format!("Exported map image to {}", path.display()))),
+                Err(error) => alerts.push(Err(format!("Error: {error}"))),
+            },
+            Err(error) => alerts.push(Err(format!("Error: {error}"))),
+        }
+    }
+
+    fn current_map_export_image(&mut self) -> Result<RgbaImage, String> {
+        if matches!(
+            self.map_layers.base_view,
+            MapBaseView::StateCategory | MapBaseView::Manpower
+        ) || self.map_layers.show_victory_points
+            || self.map_layers.show_dmz
+        {
+            self.ensure_map_presentation();
+        }
+        let state_by_province = self
+            .state_edit_session
+            .as_ref()
+            .map(|edit| edit.state_by_province().clone())
+            .unwrap_or_default();
+        let presentation = self.map_presentation.clone();
+        let mut image = match self.map_layers.base_view {
+            MapBaseView::ProvinceColors => self.bundle.texture_buffer_color(),
+            MapBaseView::ProvinceTypes => self.bundle.texture_buffer_kind(),
+            MapBaseView::Terrain => self.bundle.texture_buffer_terrain(),
+            MapBaseView::Continents => self.bundle.texture_buffer_continent(),
+            MapBaseView::Coastal => self.bundle.texture_buffer_coastal(),
+            MapBaseView::States | MapBaseView::Resources => {
+                let project = self
+                    .project
+                    .as_ref()
+                    .ok_or_else(|| "State view is unavailable".to_owned())?;
+                generate_state_view_for(
+                    &self.bundle.map,
+                    &state_by_province,
+                    &project.ambiguous_provinces.keys().copied().collect(),
+                    self.state_edit_session
+                        .as_ref()
+                        .map(StateEditSession::unassigned_land_provinces)
+                        .unwrap_or(&project.unassigned_land_provinces),
+                )
+                .image
+            }
+            MapBaseView::Political => {
+                let owners = self
+                    .state_edit_session
+                    .as_ref()
+                    .map(|edit| {
+                        edit.valid_state_ids()
+                            .iter()
+                            .filter_map(|state_id| {
+                                edit.state_data(*state_id)
+                                    .map(|state| (*state_id, state.history.owner))
+                            })
+                            .collect::<BTreeMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                self.bundle.map.gen_texture_buffer(|province_color| {
+                    let province = self.bundle.map.get_province(province_color);
+                    province
+                        .preserved_id
+                        .and_then(|province_id| state_by_province.get(&province_id))
+                        .and_then(|state_id| owners.get(state_id))
+                        .and_then(Option::as_deref)
+                        .map_or_else(|| province.kind.color(), political_fallback_color)
+                })
+            }
+            MapBaseView::StateCategory | MapBaseView::Manpower => {
+                let model = presentation
+                    .as_ref()
+                    .ok_or_else(|| "State presentation is unavailable".to_owned())?;
+                let styles = model.states.clone();
+                let category = self.map_layers.base_view == MapBaseView::StateCategory;
+                self.bundle.map.gen_texture_buffer(|province_color| {
+                    let province = self.bundle.map.get_province(province_color);
+                    province
+                        .preserved_id
+                        .and_then(|province_id| state_by_province.get(&province_id))
+                        .and_then(|state_id| styles.get(state_id))
+                        .map_or_else(
+                            || province.kind.color(),
+                            |state| {
+                                if category {
+                                    state.category_color
+                                } else {
+                                    state.manpower_color
+                                }
+                            },
+                        )
+                })
+            }
+        };
+        if self.map_layers.show_dmz
+            && let Some(model) = &presentation
+        {
+            for (x, y, pixel) in image.enumerate_pixels_mut() {
+                let has_dmz = self
+                    .bundle
+                    .map
+                    .get_province_at([x, y])
+                    .preserved_id
+                    .and_then(|province_id| state_by_province.get(&province_id))
+                    .and_then(|state_id| model.states.get(state_id))
+                    .is_some_and(|state| state.demilitarized_zone);
+                if has_dmz && (x.wrapping_add(y) % 8 < 2) {
+                    *pixel = Rgba([0xf5, 0xd5, 0x3a, 0xff]);
+                }
+            }
+        }
+        if self.map_layers.show_resources {
+            for label in &self.resource_labels {
+                let x = label.anchor[0].round().max(0.0) as u32;
+                let y = label.anchor[1].round().max(0.0) as u32;
+                if x < image.width() && y < image.height() {
+                    image.put_pixel(x, y, Rgba([0x62, 0xe8, 0x91, 0xff]));
+                }
+            }
+        }
+        if self.map_layers.show_victory_points
+            && let Some(model) = &presentation
+        {
+            paint_victory_points(&mut image, &model.victory_points);
+        }
+        if self.map_layers.show_problems {
+            for marker in &self.problems_overlay.markers {
+                if marker.location[0] < image.width() && marker.location[1] < image.height() {
+                    image.put_pixel(
+                        marker.location[0],
+                        marker.location[1],
+                        Rgba([0xee, 0x42, 0x31, 0xff]),
+                    );
+                }
+            }
+        }
+        Ok(image)
     }
 
     pub fn undo(&mut self, alerts: &mut Alerts) {
@@ -6801,6 +7152,9 @@ impl Canvas {
                 }
                 MapViewMode::States => {}
                 MapViewMode::Political => self.refresh_political_texture(),
+                MapViewMode::StateCategory | MapViewMode::Manpower => {
+                    self.ensure_map_presentation();
+                }
                 MapViewMode::Resources => unreachable!("Resources is an overlay"),
             }
             self.workspace_views
@@ -9595,6 +9949,10 @@ impl Canvas {
     }
 
     fn refresh_state_visuals(&mut self) {
+        self.map_presentation = None;
+        self.state_category_texture = None;
+        self.manpower_texture = None;
+        self.dmz_texture = None;
         let changed = self
             .state_edit_session
             .as_mut()
