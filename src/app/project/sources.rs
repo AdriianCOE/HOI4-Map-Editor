@@ -6,12 +6,12 @@
 //! policy for future non-map domains and honors `replace_path`. DLC and
 //! integrated DLC discovery is lazy and ZIP entries remain read-only sources.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+use std::sync::RwLock;
 
 use zip::ZipArchive;
 
@@ -35,6 +35,21 @@ pub enum SourceKind {
     Dlc,
     IntegratedDlc,
     BaseGame,
+}
+
+impl SourceKind {
+    /// Coarse source policy rank for merge-style consumers whose entries come
+    /// from distinct logical files. Exact file collisions remain resolved by
+    /// `SourceResolver`; this rank only preserves project/DLC/base intent when
+    /// parsers merge independent files into one catalog.
+    pub(crate) const fn precedence_rank(self) -> u8 {
+        match self {
+            Self::CurrentProject => 4,
+            Self::Dlc => 3,
+            Self::IntegratedDlc => 2,
+            Self::BaseGame => 1,
+        }
+    }
 }
 
 /// The actual read-only storage for a resolved logical source.
@@ -247,7 +262,7 @@ impl ProjectSources {
     /// project only and is not recomputed here.
     pub fn set_validated_base_game_root(&mut self, root: Option<PathBuf>) {
         self.resolver.base_game_root = root.clone();
-        self.resolver.lower_source_cache = RefCell::new(LowerSourceCache::default());
+        self.resolver.lower_source_cache = RwLock::new(LowerSourceCache::default());
         self.manifest.base_game_root = root;
     }
 
@@ -484,14 +499,29 @@ impl ReplacePathSet {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SourceResolver {
     current_project_root: Option<PathBuf>,
     current_project_map_dir: Option<PathBuf>,
     base_game_root: Option<PathBuf>,
     replace_paths: ReplacePathSet,
     project_generation: SourceGeneration,
-    lower_source_cache: RefCell<LowerSourceCache>,
+    lower_source_cache: RwLock<LowerSourceCache>,
+}
+
+impl Clone for SourceResolver {
+    fn clone(&self) -> Self {
+        Self {
+            current_project_root: self.current_project_root.clone(),
+            current_project_map_dir: self.current_project_map_dir.clone(),
+            base_game_root: self.base_game_root.clone(),
+            replace_paths: self.replace_paths.clone(),
+            project_generation: self.project_generation,
+            // Container metadata is a safe optimization, never part of source
+            // identity. Clones rediscover lazily under their own lock.
+            lower_source_cache: RwLock::new(LowerSourceCache::default()),
+        }
+    }
 }
 
 impl PartialEq for SourceResolver {
@@ -514,7 +544,7 @@ impl SourceResolver {
             base_game_root: None,
             replace_paths: ReplacePathSet::new(),
             project_generation,
-            lower_source_cache: RefCell::new(LowerSourceCache::default()),
+            lower_source_cache: RwLock::new(LowerSourceCache::default()),
         }
     }
 
@@ -535,7 +565,7 @@ impl SourceResolver {
 
     pub fn with_optional_base_game_root(mut self, root: Option<PathBuf>) -> Self {
         self.base_game_root = root;
-        self.lower_source_cache = RefCell::new(LowerSourceCache::default());
+        self.lower_source_cache = RwLock::new(LowerSourceCache::default());
         self
     }
 
@@ -760,7 +790,10 @@ impl SourceResolver {
         let Some(base_root) = self.base_game_root.as_deref() else {
             return Ok(None);
         };
-        let mut cache = self.lower_source_cache.borrow_mut();
+        let mut cache = self
+            .lower_source_cache
+            .write()
+            .expect("lower-source cache lock was poisoned");
         cache.ensure_discovered(base_root)?;
         for container in &mut cache.containers {
             if let Some(location) = container.resolve(logical_path)? {
@@ -782,7 +815,10 @@ impl SourceResolver {
         let Some(base_root) = self.base_game_root.as_deref() else {
             return Ok(Vec::new());
         };
-        let mut cache = self.lower_source_cache.borrow_mut();
+        let mut cache = self
+            .lower_source_cache
+            .write()
+            .expect("lower-source cache lock was poisoned");
         cache.ensure_discovered(base_root)?;
         let mut sources = Vec::new();
         for container in &mut cache.containers {

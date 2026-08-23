@@ -9698,12 +9698,10 @@ impl Canvas {
         if self.political_country_catalog.is_some() {
             return;
         }
-        self.political_country_catalog = self.project.as_ref().map(|project| {
-            PoliticalCountryCatalog::load(
-                &project.paths.root,
-                self.definition_base_game_root.as_deref(),
-            )
-        });
+        self.political_country_catalog = self
+            .project
+            .as_ref()
+            .map(|project| PoliticalCountryCatalog::load(project.paths.sources.clone()));
         if self.political_country_catalog.is_some() {
             self.political_cache_generation = Some(self.project_generation);
         }
@@ -9860,12 +9858,10 @@ impl Canvas {
         if self.resource_icon_resolver.is_some() {
             return;
         }
-        self.resource_icon_resolver = self.project.as_ref().map(|project| {
-            ResourceIconResolver::load(
-                &project.paths.root,
-                self.definition_base_game_root.as_deref(),
-            )
-        });
+        self.resource_icon_resolver = self
+            .project
+            .as_ref()
+            .map(|project| ResourceIconResolver::load(project.paths.sources.clone()));
     }
 
     fn resource_icon_texture(&mut self, key: &str) -> Option<&Texture> {

@@ -4,12 +4,15 @@
 //! `GFX_resources_strip` sprite.  It is not a general `.gfx` renderer.
 
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
 
 use image::{GenericImageView, RgbaImage};
 
 use super::political::{PoliticalProvince, TerritoryAnchorIndex};
+use super::project::{ProjectSources, ResolvedSource, SourceLookup};
 use super::state::{PdxBlock, PdxEntry, PdxValue, parse_text};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,14 +86,22 @@ pub const fn resource_label_visible(territory_pixels: u64, zoom: f64) -> bool {
 
 #[derive(Debug, Clone)]
 struct ResourceStrip {
-    path: PathBuf,
+    gfx_source: ResolvedSource,
+    texture_source: ResolvedSource,
     frames: u32,
 }
 
+#[derive(Debug, Clone)]
+struct ResourceFrame {
+    frame: u32,
+    source: ResolvedSource,
+}
+
 /// Layered, lazy decoder for the seven-frame HOI4 resource strip.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ResourceIconResolver {
-    frames: BTreeMap<String, u32>,
+    sources: ProjectSources,
+    frames: BTreeMap<String, ResourceFrame>,
     strip: Option<ResourceStrip>,
     decoded_strip: Option<Option<RgbaImage>>,
     cached_icons: BTreeMap<String, Option<RgbaImage>>,
@@ -99,14 +110,17 @@ pub struct ResourceIconResolver {
 }
 
 impl ResourceIconResolver {
-    pub fn load(project_root: &Path, base_game_root: Option<&Path>) -> Self {
-        let mut resolver = Self::default();
-        let roots = base_game_root
-            .into_iter()
-            .chain(std::iter::once(project_root));
-        for root in roots {
-            resolver.load_layer(root);
-        }
+    pub fn load(sources: ProjectSources) -> Self {
+        let mut resolver = Self {
+            sources,
+            frames: BTreeMap::new(),
+            strip: None,
+            decoded_strip: None,
+            cached_icons: BTreeMap::new(),
+            #[cfg(test)]
+            strip_decode_attempts: 0,
+        };
+        resolver.load_sources();
         resolver
     }
 
@@ -118,12 +132,22 @@ impl ResourceIconResolver {
         self.cached_icons.get(key).and_then(Option::as_ref)
     }
 
-    fn load_layer(&mut self, root: &Path) {
-        for path in text_files_recursive(&root.join("common/resources"), "txt") {
-            let Ok(text) = fs::read_to_string(&path) else {
+    pub fn resource_source(&self, key: &str) -> Option<&ResolvedSource> {
+        self.frames.get(key).map(|frame| &frame.source)
+    }
+
+    pub fn strip_sources(&self) -> Option<(&ResolvedSource, &ResolvedSource)> {
+        self.strip
+            .as_ref()
+            .map(|strip| (&strip.gfx_source, &strip.texture_source))
+    }
+
+    fn load_sources(&mut self) {
+        for source in listed_text_files(&self.sources, "common/resources") {
+            let Some(text) = read_text(&self.sources, &source) else {
                 continue;
             };
-            let document = parse_text(&path, text);
+            let document = parse_text(&source.logical_path, text);
             let entries = document
                 .entries
                 .iter()
@@ -145,29 +169,50 @@ impl ResourceIconResolver {
                 if let Some(frame) =
                     scalar(block, "icon_frame").and_then(|value| value.parse().ok())
                 {
-                    self.frames.insert(key.to_owned(), frame);
+                    let candidate = ResourceFrame {
+                        frame,
+                        source: source.clone(),
+                    };
+                    if self.frames.get(key).is_none_or(|existing| {
+                        candidate.source.source_kind.precedence_rank()
+                            >= existing.source.source_kind.precedence_rank()
+                    }) {
+                        self.frames.insert(key.to_owned(), candidate);
+                    }
                 }
             }
         }
         // HOI4 declares the real strip in `interface/general_stuff.gfx`.  A
         // focused sibling name supports compact mod fixtures without turning
         // this into a recursive game-interface framework.
-        for path in [
-            root.join("interface/general_stuff.gfx"),
-            root.join("interface/resources.gfx"),
-        ] {
-            let Ok(text) = fs::read_to_string(&path) else {
+        for logical in ["interface/general_stuff.gfx", "interface/resources.gfx"] {
+            let Ok(SourceLookup::Found(gfx_source)) = self.sources.resolve(logical) else {
                 continue;
             };
-            let document = parse_text(&path, text);
-            if let Some(strip) = find_resource_strip(&document.entries, root) {
-                self.strip = Some(strip);
+            let Some(text) = read_text(&self.sources, &gfx_source) else {
+                continue;
+            };
+            let document = parse_text(&gfx_source.logical_path, text);
+            if let Some((texture, frames)) = find_resource_strip(&document.entries)
+                && let Ok(SourceLookup::Found(texture_source)) = self.sources.resolve(texture)
+            {
+                let candidate = ResourceStrip {
+                    gfx_source,
+                    texture_source,
+                    frames,
+                };
+                if self.strip.as_ref().is_none_or(|existing| {
+                    candidate.gfx_source.source_kind.precedence_rank()
+                        >= existing.gfx_source.source_kind.precedence_rank()
+                }) {
+                    self.strip = Some(candidate);
+                }
             }
         }
     }
 
     fn decode_icon(&mut self, key: &str) -> Option<RgbaImage> {
-        let frame = self.frames.get(key)?.checked_sub(1)?;
+        let frame = self.frames.get(key)?.frame.checked_sub(1)?;
         let frames = self.strip.as_ref()?.frames;
         if frame >= frames {
             return None;
@@ -189,9 +234,14 @@ impl ResourceIconResolver {
                 self.strip_decode_attempts += 1;
             }
             let decoded = self.strip.as_ref().and_then(|strip| {
-                image::open(&strip.path)
+                self.sources
+                    .read_resolved(&strip.texture_source)
                     .ok()
-                    .or_else(|| decode_uncompressed_dds(&strip.path))
+                    .and_then(|bytes| {
+                        image::load_from_memory(&bytes)
+                            .ok()
+                            .or_else(|| decode_uncompressed_dds(&bytes))
+                    })
                     .map(|image| image.to_rgba8())
             });
             self.decoded_strip = Some(decoded);
@@ -203,8 +253,7 @@ impl ResourceIconResolver {
 /// HOI4's observed `resources_strip.dds` is a 32-bit BGRA DDS. `image` does
 /// not decode that legacy variant, so support only this narrow, non-compressed
 /// form instead of adding a general DDS framework.
-fn decode_uncompressed_dds(path: &Path) -> Option<image::DynamicImage> {
-    let bytes = fs::read(path).ok()?;
+fn decode_uncompressed_dds(bytes: &[u8]) -> Option<image::DynamicImage> {
     if bytes.len() < 128 || &bytes[..4] != b"DDS " {
         return None;
     }
@@ -257,7 +306,7 @@ fn dds_component(value: u32, mask: u32) -> Option<u8> {
     Some((((value & mask) >> shift) * 255 / max) as u8)
 }
 
-fn find_resource_strip(entries: &[PdxEntry], root: &Path) -> Option<ResourceStrip> {
+fn find_resource_strip(entries: &[PdxEntry]) -> Option<(String, u32)> {
     for entry in entries {
         if entry
             .key
@@ -271,13 +320,10 @@ fn find_resource_strip(entries: &[PdxEntry], root: &Path) -> Option<ResourceStri
             let frames = scalar(block, "noOfFrames")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(1);
-            return Some(ResourceStrip {
-                path: root.join(texture.replace('/', std::path::MAIN_SEPARATOR_STR)),
-                frames,
-            });
+            return Some((texture.replace('\\', "/"), frames));
         }
         if let Some(block) = block(&entry.value)
-            && let Some(found) = find_resource_strip(&block.entries, root)
+            && let Some(found) = find_resource_strip(&block.entries)
         {
             return Some(found);
         }
@@ -305,24 +351,26 @@ fn scalar<'a>(block: &'a PdxBlock, name: &str) -> Option<&'a str> {
     })
 }
 
-fn text_files_recursive(root: &Path, extension: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let Ok(entries) = fs::read_dir(root) else {
-        return paths;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            paths.extend(text_files_recursive(&path, extension));
-        } else if path
-            .extension()
-            .is_some_and(|value| value.eq_ignore_ascii_case(extension))
-        {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    paths
+fn listed_text_files(sources: &ProjectSources, logical_directory: &str) -> Vec<ResolvedSource> {
+    sources
+        .list_files(logical_directory)
+        .map(|listing| {
+            listing
+                .files
+                .into_iter()
+                .filter(|source| {
+                    source
+                        .logical_path
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn read_text(sources: &ProjectSources, source: &ResolvedSource) -> Option<String> {
+    String::from_utf8(sources.read_resolved(source).ok()?).ok()
 }
 
 #[cfg(test)]
@@ -337,6 +385,20 @@ mod tests {
             center,
             pixel_count: pixels,
         }
+    }
+
+    fn resolver_from_roots(project: &Path, base: Option<&Path>) -> ResourceIconResolver {
+        fs::create_dir_all(project.join("map")).unwrap();
+        fs::write(project.join("map/provinces.bmp"), []).unwrap();
+        fs::write(project.join("map/definition.csv"), []).unwrap();
+        ResourceIconResolver::load(
+            ProjectSources::discover(
+                project,
+                base.map(Path::to_owned),
+                super::super::project::SourceGeneration::new(1),
+            )
+            .unwrap(),
+        )
     }
 
     #[test]
@@ -386,7 +448,7 @@ mod tests {
         write_resource_fixture(&base, 1, [[10, 0, 0, 255], [20, 0, 0, 255]]);
         write_resource_fixture(&project, 2, [[30, 0, 0, 255], [40, 0, 0, 255]]);
 
-        let mut resolver = ResourceIconResolver::load(&project, Some(&base));
+        let mut resolver = resolver_from_roots(&project, Some(&base));
         assert_eq!(
             resolver.icon("steel").unwrap().get_pixel(0, 0).0,
             [40, 0, 0, 255]
@@ -416,7 +478,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut resolver = ResourceIconResolver::load(&root, None);
+        let mut resolver = resolver_from_roots(&root, None);
         assert_eq!(
             resolver.icon("steel").unwrap().get_pixel(0, 0).0,
             [10, 0, 0, 255]
@@ -428,6 +490,93 @@ mod tests {
         );
         assert_eq!(resolver.strip_decode_attempts, 1);
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn replace_path_resources_excludes_lower_definitions() {
+        let root = std::env::temp_dir().join(format!(
+            "hoi4-resource-replace-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let base = root.join("base");
+        let project = root.join("project");
+        write_resource_fixture(&base, 1, [[10, 0, 0, 255], [20, 0, 0, 255]]);
+        fs::create_dir_all(project.join("common/resources")).unwrap();
+        fs::write(
+            project.join("descriptor.mod"),
+            "replace_path = \"common/resources\"",
+        )
+        .unwrap();
+        fs::write(
+            project.join("common/resources/custom.txt"),
+            "custom = { icon_frame = 1 }",
+        )
+        .unwrap();
+
+        let resolver = resolver_from_roots(&project, Some(&base));
+        assert!(resolver.resource_source("steel").is_none());
+        assert_eq!(
+            resolver.resource_source("custom").unwrap().source_kind,
+            super::super::project::SourceKind::CurrentProject
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resource_gfx_and_texture_resolve_across_layers_and_interface_can_block_them() {
+        let root = std::env::temp_dir().join(format!(
+            "hoi4-resource-layered-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let base = root.join("base");
+        let project = root.join("project");
+        fs::create_dir_all(project.join("common/resources")).unwrap();
+        fs::write(
+            project.join("common/resources/resources.txt"),
+            "steel = { icon_frame = 2 }",
+        )
+        .unwrap();
+        let dlc = base.join("dlc/dlc001/interface");
+        fs::create_dir_all(&dlc).unwrap();
+        fs::write(
+            dlc.join("resources.gfx"),
+            "spriteTypes = { spriteType = { name = \"GFX_resources_strip\" texturefile = \"gfx/interface/resources_strip.png\" noOfFrames = 2 } }",
+        )
+        .unwrap();
+        fs::create_dir_all(base.join("gfx/interface")).unwrap();
+        let mut image = RgbaImage::new(2, 1);
+        image.put_pixel(0, 0, image::Rgba([10, 0, 0, 255]));
+        image.put_pixel(1, 0, image::Rgba([20, 0, 0, 255]));
+        image
+            .save(base.join("gfx/interface/resources_strip.png"))
+            .unwrap();
+
+        let mut resolver = resolver_from_roots(&project, Some(&base));
+        assert_eq!(
+            resolver.icon("steel").unwrap().get_pixel(0, 0).0,
+            [20, 0, 0, 255]
+        );
+        let (gfx, texture) = resolver.strip_sources().unwrap();
+        assert_eq!(gfx.source_kind, super::super::project::SourceKind::Dlc);
+        assert_eq!(
+            texture.source_kind,
+            super::super::project::SourceKind::BaseGame
+        );
+
+        fs::write(
+            project.join("descriptor.mod"),
+            "replace_path = \"interface\"",
+        )
+        .unwrap();
+        let mut blocked = resolver_from_roots(&project, Some(&base));
+        assert!(blocked.icon("steel").is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn write_resource_fixture(root: &Path, frame: u32, pixels: [[u8; 4]; 2]) {

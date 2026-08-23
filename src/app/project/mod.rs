@@ -749,7 +749,7 @@ mod tests {
             std::env::var_os("HOI4_STATE_EDITOR_BASE_GAME_ROOT").map(PathBuf::from);
         let total_started = Instant::now();
         let paths_started = Instant::now();
-        let paths = ProjectPaths::discover(&root).expect("discover external project paths");
+        let mut paths = ProjectPaths::discover(&root).expect("discover external project paths");
         let paths_in = paths_started.elapsed();
 
         let bundle_started = Instant::now();
@@ -771,6 +771,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         let states_started = Instant::now();
+        paths.set_validated_base_game_root(base_game_root.clone());
         let mut project = Hoi4Project::new(paths);
         project.load_states(&province_ids, &land_province_ids);
         let states_in = states_started.elapsed();
@@ -784,11 +785,11 @@ mod tests {
         let state_view_in = state_view_started.elapsed();
 
         let political_started = Instant::now();
-        let _political = PoliticalCountryCatalog::load(&root, base_game_root.as_deref());
+        let _political = PoliticalCountryCatalog::load(project.paths.sources.clone());
         let political_in = political_started.elapsed();
 
         let resources_started = Instant::now();
-        let _resources = ResourceIconResolver::load(&root, base_game_root.as_deref());
+        let _resources = ResourceIconResolver::load(project.paths.sources.clone());
         let resources_in = resources_started.elapsed();
 
         println!(
@@ -829,7 +830,7 @@ mod tests {
             .expect("set HOI4_STATE_EDITOR_TEST_PROJECT_ROOT to a HOI4 project root");
         let base_game_root =
             std::env::var_os("HOI4_STATE_EDITOR_BASE_GAME_ROOT").map(PathBuf::from);
-        let paths = ProjectPaths::discover(&root).expect("discover external project paths");
+        let mut paths = ProjectPaths::discover(&root).expect("discover external project paths");
         let bundle = Bundle::load(
             &Location::Directory(paths.map_directory.clone()),
             Config {
@@ -845,6 +846,7 @@ mod tests {
             .filter(|(_, province)| province.kind == ProvinceKind::Land)
             .filter_map(|(_, province)| province.preserved_id)
             .collect::<BTreeSet<_>>();
+        paths.set_validated_base_game_root(base_game_root.clone());
         let mut project = Hoi4Project::new(paths);
         project.load_states(&province_ids, &land_province_ids);
 
@@ -910,7 +912,7 @@ mod tests {
         });
 
         let resolver_started = Instant::now();
-        let mut resolver = ResourceIconResolver::load(&root, base_game_root.as_deref());
+        let mut resolver = ResourceIconResolver::load(project.paths.sources.clone());
         let resolver_in = resolver_started.elapsed();
         let unique_keys = labels
             .iter()

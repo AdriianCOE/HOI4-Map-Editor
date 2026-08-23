@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,6 +8,7 @@ use image::RgbaImage;
 
 use super::map::Color;
 use super::map_layers::{MapBaseView, political_fallback_color};
+use super::project::{ProjectSources, ResolvedSource, SourceLookup};
 
 #[derive(Debug, Clone)]
 pub struct CountryMetadata {
@@ -32,6 +34,7 @@ pub struct CountryColorResolution {
     pub rgb: Option<Color>,
     pub source_path: Option<PathBuf>,
     pub source_type: Option<&'static str>,
+    pub source: Option<ResolvedSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +74,14 @@ impl PoliticalOwnerResolution {
                 if let Some(path) = &resolution.source_path {
                     lines.push(format!("Resolution source path: {}", path.display()));
                 }
+                if let Some(source) = &resolution.source {
+                    lines.push(format!(
+                        "Resolution source: {} ({:?}, generation {})",
+                        source.logical_path.display(),
+                        source.source_kind,
+                        source.project_generation.value()
+                    ));
+                }
                 if resolution.kind != CountryColorResolutionKind::Resolved {
                     lines.push(format!(
                         "Fallback reason: {}",
@@ -92,8 +103,9 @@ impl PoliticalOwnerResolution {
 
 #[derive(Debug, Clone)]
 pub struct PoliticalCountryCatalog {
-    roots: Vec<PathBuf>,
-    country_source_layers: Vec<CountrySourceLayer>,
+    sources: ProjectSources,
+    colors_file: Option<CountryColorFile>,
+    country_files: BTreeMap<String, ResolvedSource>,
     country_histories: BTreeMap<String, CountryHistory>,
     localized_names: BTreeMap<String, LocalizedName>,
     known_tags: BTreeSet<String>,
@@ -101,46 +113,25 @@ pub struct PoliticalCountryCatalog {
 }
 
 impl PoliticalCountryCatalog {
-    pub fn load(project_root: &Path, base_game_root: Option<&Path>) -> Self {
-        let mut roots = base_game_root
-            .map(Path::to_owned)
-            .into_iter()
-            .collect::<Vec<_>>();
-        roots.push(project_root.to_owned());
-        let mut country_histories = BTreeMap::new();
-        let mut localized_names = BTreeMap::new();
-        for root in &roots {
-            country_histories.extend(scan_country_histories(root));
-            localized_names.extend(scan_localized_country_names(root));
-        }
-        // A mod layer wins as a whole: colors.txt, then its per-country files,
-        // before continuing to the next (base-game) layer.
-        let country_source_layers = roots
-            .iter()
-            .rev()
-            .map(|root| CountrySourceLayer {
-                colors_file: scan_country_colors_files(root).into_iter().next(),
-                country_files: scan_country_files(root),
-            })
-            .collect::<Vec<_>>();
-        let mut known_tags = country_source_layers
-            .iter()
-            .flat_map(|layer| layer.country_files.keys().cloned())
-            .collect::<BTreeSet<_>>();
+    pub fn load(sources: ProjectSources) -> Self {
+        let country_histories = scan_country_histories(&sources);
+        let localized_names = scan_localized_country_names(&sources);
+        let colors_file = scan_country_colors_file(&sources);
+        let country_files = scan_country_files(&sources);
+        let mut known_tags = country_files.keys().cloned().collect::<BTreeSet<_>>();
         known_tags.extend(country_histories.keys().cloned());
         known_tags.extend(
             localized_names
                 .keys()
                 .filter_map(|key| localization_tag(key).map(str::to_owned)),
         );
-        for layer in &country_source_layers {
-            if let Some(file) = &layer.colors_file {
-                known_tags.extend(file.colors.keys().cloned());
-            }
+        if let Some(file) = &colors_file {
+            known_tags.extend(file.colors.keys().cloned());
         }
         Self {
-            roots,
-            country_source_layers,
+            sources,
+            colors_file,
+            country_files,
             country_histories,
             localized_names,
             known_tags,
@@ -217,40 +208,51 @@ impl PoliticalCountryCatalog {
                 rgb: None,
                 source_path: None,
                 source_type: None,
+                source: None,
             };
         }
-        for layer in &self.country_source_layers {
-            if let Some(file) = &layer.colors_file
-                && let Some(result) = file.colors.get(tag)
+        let colors = self.colors_file.as_ref().and_then(|file| {
+            file.colors
+                .get(tag)
+                .copied()
+                .map(|color| (color, &file.source))
+        });
+        let country = self
+            .country_files
+            .get(tag)
+            .map(|source| (parse_country_color(&self.sources, source), source));
+        match (colors, country) {
+            (Some((color, color_source)), Some((_country, country_source)))
+                if color_source.source_kind.precedence_rank()
+                    >= country_source.source_kind.precedence_rank() =>
             {
-                return result.to_resolution(tag, &file.path, "common/countries/colors.txt");
+                color.to_resolution(tag, color_source, "common/countries/colors.txt")
             }
-            if let Some(path) = layer.country_files.get(tag) {
-                return parse_country_color(path).to_resolution(
-                    tag,
-                    path,
-                    "per-country definition",
-                );
+            (_, Some((color, source))) => {
+                color.to_resolution(tag, source, "per-country definition")
             }
-        }
-        CountryColorResolution {
-            kind: CountryColorResolutionKind::ColorMissing,
-            tag: tag.to_owned(),
-            rgb: None,
-            source_path: None,
-            source_type: None,
+            (Some((color, source)), None) => {
+                color.to_resolution(tag, source, "common/countries/colors.txt")
+            }
+            (None, None) => CountryColorResolution {
+                kind: CountryColorResolutionKind::ColorMissing,
+                tag: tag.to_owned(),
+                rgb: None,
+                source_path: None,
+                source_type: None,
+                source: None,
+            },
         }
     }
 
     fn load_flag(&self, tag: &str) -> Option<RgbaImage> {
-        for root in self.roots.iter().rev() {
-            for extension in ["tga", "dds", "png", "bmp"] {
-                let path = root.join("gfx/flags").join(format!("{tag}.{extension}"));
-                if path.is_file()
-                    && let Ok(image) = image::open(path)
-                {
-                    return Some(image.to_rgba8());
-                }
+        for extension in ["tga", "dds", "png", "bmp"] {
+            let logical = PathBuf::from("gfx/flags").join(format!("{tag}.{extension}"));
+            if let Ok(SourceLookup::Found(source)) = self.sources.resolve(logical)
+                && let Ok(bytes) = self.sources.read_resolved(&source)
+                && let Ok(image) = image::load_from_memory(&bytes)
+            {
+                return Some(image.to_rgba8());
             }
         }
         None
@@ -508,10 +510,10 @@ fn squared_distance(left: [f64; 2], right: [f64; 2]) -> f64 {
     dx * dx + dy * dy
 }
 
-fn scan_country_files(root: &Path) -> BTreeMap<String, PathBuf> {
+fn scan_country_files(sources: &ProjectSources) -> BTreeMap<String, ResolvedSource> {
     let mut files = BTreeMap::new();
-    for path in text_files_recursive(&root.join("common/country_tags")) {
-        let Ok(text) = fs::read_to_string(&path) else {
+    for source in listed_text_files(sources, "common/country_tags") {
+        let Some(text) = read_text(sources, &source) else {
             continue;
         };
         for line in text.lines().map(strip_comment) {
@@ -521,12 +523,16 @@ fn scan_country_files(root: &Path) -> BTreeMap<String, PathBuf> {
             let tag = tag.trim();
             let target = target.trim().trim_matches('"');
             if is_country_tag(tag) && !target.is_empty() {
-                files.insert(tag.to_owned(), root.join("common").join(target));
+                let logical = PathBuf::from("common").join(target);
+                if let Ok(SourceLookup::Found(country)) = sources.resolve(logical) {
+                    insert_preferred(&mut files, tag.to_owned(), country);
+                }
             }
         }
     }
-    for path in text_files_recursive(&root.join("common/countries")) {
-        let Some(tag) = path
+    for source in listed_text_files(sources, "common/countries") {
+        let Some(tag) = source
+            .logical_path
             .file_name()
             .and_then(|name| name.to_str())
             .and_then(|name| name.split_whitespace().next())
@@ -534,21 +540,15 @@ fn scan_country_files(root: &Path) -> BTreeMap<String, PathBuf> {
         else {
             continue;
         };
-        files.entry(tag.to_owned()).or_insert(path);
+        insert_preferred(&mut files, tag.to_owned(), source);
     }
     files
 }
 
 #[derive(Debug, Clone)]
 struct CountryColorFile {
-    path: PathBuf,
+    source: ResolvedSource,
     colors: BTreeMap<String, ParsedColor>,
-}
-
-#[derive(Debug, Clone)]
-struct CountrySourceLayer {
-    colors_file: Option<CountryColorFile>,
-    country_files: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -572,7 +572,7 @@ impl ParsedColor {
     fn to_resolution(
         self,
         tag: &str,
-        path: &Path,
+        source: &ResolvedSource,
         source_type: &'static str,
     ) -> CountryColorResolution {
         match self {
@@ -580,42 +580,47 @@ impl ParsedColor {
                 kind: CountryColorResolutionKind::Resolved,
                 tag: tag.to_owned(),
                 rgb: Some(rgb),
-                source_path: Some(path.to_owned()),
+                source_path: source.filesystem_path().map(Path::to_owned),
                 source_type: Some(source_type),
+                source: Some(source.clone()),
             },
             Self::Invalid => CountryColorResolution {
                 kind: CountryColorResolutionKind::ColorParseFailed,
                 tag: tag.to_owned(),
                 rgb: None,
-                source_path: Some(path.to_owned()),
+                source_path: source.filesystem_path().map(Path::to_owned),
                 source_type: Some(source_type),
+                source: Some(source.clone()),
             },
             Self::Missing => CountryColorResolution {
                 kind: CountryColorResolutionKind::ColorMissing,
                 tag: tag.to_owned(),
                 rgb: None,
-                source_path: Some(path.to_owned()),
+                source_path: source.filesystem_path().map(Path::to_owned),
                 source_type: Some(source_type),
+                source: Some(source.clone()),
             },
         }
     }
 }
 
-fn scan_country_colors_files(root: &Path) -> Vec<CountryColorFile> {
-    let path = root.join("common/countries/colors.txt");
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Vec::new();
+fn scan_country_colors_file(sources: &ProjectSources) -> Option<CountryColorFile> {
+    let SourceLookup::Found(source) = sources.resolve("common/countries/colors.txt").ok()? else {
+        return None;
     };
-    vec![CountryColorFile {
-        path,
+    let text = read_text(sources, &source)?;
+    Some(CountryColorFile {
+        source,
         colors: parse_multi_country_colors(&text),
-    }]
+    })
 }
 
-fn scan_country_histories(root: &Path) -> BTreeMap<String, CountryHistory> {
+fn scan_country_histories(sources: &ProjectSources) -> BTreeMap<String, CountryHistory> {
     let mut histories = BTreeMap::new();
-    for path in text_files_recursive(&root.join("history/countries")) {
-        let Some(tag) = path
+    let mut origins = BTreeMap::new();
+    for source in listed_text_files(sources, "history/countries") {
+        let Some(tag) = source
+            .logical_path
             .file_name()
             .and_then(|name| name.to_str())
             .and_then(|name| {
@@ -626,20 +631,25 @@ fn scan_country_histories(root: &Path) -> BTreeMap<String, CountryHistory> {
         else {
             continue;
         };
-        let Ok(text) = fs::read_to_string(&path) else {
+        let tag = tag.to_owned();
+        let Some(text) = read_text(sources, &source) else {
             continue;
         };
         let ruling_ideology = parse_ruling_ideology(&text);
-        histories.insert(tag.to_owned(), CountryHistory { ruling_ideology });
+        if should_replace(origins.get(&tag), &source) {
+            origins.insert(tag.clone(), source);
+            histories.insert(tag, CountryHistory { ruling_ideology });
+        }
     }
     histories
 }
 
-fn scan_localized_country_names(root: &Path) -> BTreeMap<String, LocalizedName> {
+fn scan_localized_country_names(sources: &ProjectSources) -> BTreeMap<String, LocalizedName> {
     let header = format!("l_{}:", hoi4_language());
     let mut names = BTreeMap::new();
-    for path in text_files_recursive(&root.join("localisation")) {
-        let Ok(text) = fs::read_to_string(path) else {
+    let mut origins = BTreeMap::new();
+    for source in listed_text_files(sources, "localisation") {
+        let Some(text) = read_text(sources, &source) else {
             continue;
         };
         if !text.contains(&header) {
@@ -659,7 +669,8 @@ fn scan_localized_country_names(root: &Path) -> BTreeMap<String, LocalizedName> 
             let Some((localized, _)) = localized.split_once('"') else {
                 continue;
             };
-            if !localized.is_empty() {
+            if !localized.is_empty() && should_replace(origins.get(key), &source) {
+                origins.insert(key.to_owned(), source.clone());
                 names.insert(
                     key.to_owned(),
                     LocalizedName {
@@ -672,10 +683,48 @@ fn scan_localized_country_names(root: &Path) -> BTreeMap<String, LocalizedName> 
     names
 }
 
-fn parse_country_color(path: &Path) -> ParsedColor {
-    fs::read_to_string(path)
+fn parse_country_color(sources: &ProjectSources, source: &ResolvedSource) -> ParsedColor {
+    read_text(sources, source)
         .map(|text| parse_color_block(&text))
         .unwrap_or(ParsedColor::Missing)
+}
+
+fn listed_text_files(sources: &ProjectSources, logical_directory: &str) -> Vec<ResolvedSource> {
+    sources
+        .list_files(logical_directory)
+        .map(|listing| {
+            listing
+                .files
+                .into_iter()
+                .filter(|source| {
+                    source.logical_path.extension().is_some_and(|extension| {
+                        extension.eq_ignore_ascii_case("txt")
+                            || extension.eq_ignore_ascii_case("yml")
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn read_text(sources: &ProjectSources, source: &ResolvedSource) -> Option<String> {
+    String::from_utf8(sources.read_resolved(source).ok()?).ok()
+}
+
+fn should_replace(existing: Option<&ResolvedSource>, candidate: &ResolvedSource) -> bool {
+    existing.is_none_or(|existing| {
+        candidate.source_kind.precedence_rank() >= existing.source_kind.precedence_rank()
+    })
+}
+
+fn insert_preferred(
+    entries: &mut BTreeMap<String, ResolvedSource>,
+    key: String,
+    candidate: ResolvedSource,
+) {
+    if should_replace(entries.get(&key), &candidate) {
+        entries.insert(key, candidate);
+    }
 }
 
 fn parse_multi_country_colors(text: &str) -> BTreeMap<String, ParsedColor> {
@@ -769,25 +818,6 @@ fn brace_delta(text: &str) -> i32 {
     })
 }
 
-fn text_files_recursive(root: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
-    };
-    let mut paths = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            paths.extend(text_files_recursive(&path));
-        } else if path.extension().is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("txt") || extension.eq_ignore_ascii_case("yml")
-        }) {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    paths
-}
-
 fn strip_comment(line: &str) -> &str {
     line.split_once('#').map_or(line, |(before, _)| before)
 }
@@ -840,6 +870,7 @@ mod tests {
                             rgb: *color,
                             source_path: None,
                             source_type: None,
+                            source: None,
                         },
                         flag: flag.then(|| RgbaImage::new(1, 1)),
                     },
@@ -847,8 +878,9 @@ mod tests {
             })
             .collect();
         PoliticalCountryCatalog {
-            roots: Vec::new(),
-            country_source_layers: Vec::new(),
+            sources: ProjectSources::for_test_placeholder(),
+            colors_file: None,
+            country_files: BTreeMap::new(),
             country_histories: BTreeMap::new(),
             localized_names: BTreeMap::new(),
             known_tags: entries
@@ -879,6 +911,20 @@ mod tests {
         root
     }
 
+    fn catalog_from_roots(project: &Path, base: Option<&Path>) -> PoliticalCountryCatalog {
+        fs::create_dir_all(project.join("map")).unwrap();
+        fs::write(project.join("map/provinces.bmp"), []).unwrap();
+        fs::write(project.join("map/definition.csv"), []).unwrap();
+        PoliticalCountryCatalog::load(
+            ProjectSources::discover(
+                project,
+                base.map(Path::to_owned),
+                super::super::project::SourceGeneration::new(1),
+            )
+            .unwrap(),
+        )
+    }
+
     #[test]
     fn reads_mod_country_color_localized_name_and_optional_flag() {
         let root = fixture_root("metadata");
@@ -905,7 +951,7 @@ mod tests {
             .save(root.join("gfx/flags/BRA.png"))
             .unwrap();
 
-        let mut catalog = PoliticalCountryCatalog::load(&root, None);
+        let mut catalog = catalog_from_roots(&root, None);
         catalog.resolve_tags(["BRA".to_owned()]);
         let country = catalog.metadata("BRA").unwrap();
         assert_eq!(country.color, Some([12, 34, 56]));
@@ -920,7 +966,7 @@ mod tests {
     #[test]
     fn missing_optional_country_assets_leave_a_tag_only_country_renderable() {
         let root = fixture_root("missing-assets");
-        let mut catalog = PoliticalCountryCatalog::load(&root, None);
+        let mut catalog = catalog_from_roots(&root, None);
         catalog.resolve_tags(["BRA".to_owned()]);
         let country = catalog.metadata("BRA").unwrap();
         assert_eq!(country.display_name, "BRA");
@@ -1075,7 +1121,7 @@ mod tests {
             "color = { 4 5 6 }\n",
         )
         .unwrap();
-        let mut catalog = PoliticalCountryCatalog::load(&project, Some(&base));
+        let mut catalog = catalog_from_roots(&project, Some(&base));
         catalog.resolve_tags(["BRA".to_owned()]);
         assert_eq!(catalog.metadata("BRA").unwrap().color, Some([4, 5, 6]));
         fs::remove_dir_all(base).unwrap();
@@ -1094,7 +1140,7 @@ mod tests {
              INV = { color = rgb { 105 82 56 } }\n",
         )
         .unwrap();
-        let mut catalog = PoliticalCountryCatalog::load(&root, None);
+        let mut catalog = catalog_from_roots(&root, None);
         catalog.resolve_tags(["THK", "GYE", "CBS", "INV"].map(str::to_owned));
         assert_eq!(catalog.metadata("THK").unwrap().color, Some([255, 13, 20]));
         assert_eq!(catalog.metadata("GYE").unwrap().color, Some([24, 25, 34]));
@@ -1119,7 +1165,7 @@ mod tests {
             )
             .unwrap();
         }
-        let mut catalog = PoliticalCountryCatalog::load(&project, Some(&base));
+        let mut catalog = catalog_from_roots(&project, Some(&base));
         catalog.resolve_tags(["THK".to_owned()]);
         let country = catalog.metadata("THK").unwrap();
         assert_eq!(country.color, Some([255, 13, 20]));
@@ -1156,7 +1202,7 @@ mod tests {
             "color = rgb { 255 13 20 }",
         )
         .unwrap();
-        let mut catalog = PoliticalCountryCatalog::load(&project, Some(&base));
+        let mut catalog = catalog_from_roots(&project, Some(&base));
         catalog.resolve_tags(["THK".to_owned()]);
         assert_eq!(catalog.metadata("THK").unwrap().color, Some([255, 13, 20]));
         fs::remove_dir_all(base).unwrap();
@@ -1181,7 +1227,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let mut catalog = PoliticalCountryCatalog::load(&root, None);
+        let mut catalog = catalog_from_roots(&root, None);
         catalog.resolve_tags(["THK", "INV", "ZZZ"].map(str::to_owned));
         assert_eq!(
             catalog.metadata("THK").unwrap().display_name,
@@ -1212,13 +1258,145 @@ mod tests {
             format!("l_{}:\n THK: \"Mod Thiryn\"\n", hoi4_language()),
         )
         .unwrap();
-        let mut catalog = PoliticalCountryCatalog::load(&project, Some(&base));
+        let mut catalog = catalog_from_roots(&project, Some(&base));
         catalog.resolve_tags(["THK", "ASV"].map(str::to_owned));
         assert_eq!(catalog.metadata("THK").unwrap().display_name, "Mod Thiryn");
         assert_eq!(
             catalog.metadata("ASV").unwrap().display_name,
             "Ash Vultures"
         );
+        fs::remove_dir_all(base).unwrap();
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn replace_path_country_tags_excludes_lower_tags_but_keeps_current_tags() {
+        let base = fixture_root("replace-tags-base");
+        let project = fixture_root("replace-tags-project");
+        fs::create_dir_all(base.join("common/country_tags")).unwrap();
+        fs::create_dir_all(base.join("common/countries")).unwrap();
+        fs::write(
+            base.join("common/country_tags/base.txt"),
+            "BAS = \"countries/BAS.txt\"",
+        )
+        .unwrap();
+        fs::write(base.join("common/countries/BAS.txt"), "color = { 1 2 3 }").unwrap();
+        fs::create_dir_all(project.join("common/country_tags")).unwrap();
+        fs::create_dir_all(project.join("common/countries")).unwrap();
+        fs::write(
+            project.join("descriptor.mod"),
+            "replace_path = \"common/country_tags\"",
+        )
+        .unwrap();
+        fs::write(
+            project.join("common/country_tags/custom.txt"),
+            "MOD = \"countries/MOD.txt\"",
+        )
+        .unwrap();
+        fs::write(
+            project.join("common/countries/MOD.txt"),
+            "color = { 4 5 6 }",
+        )
+        .unwrap();
+
+        let catalog = catalog_from_roots(&project, Some(&base));
+        assert!(catalog.known_tags.contains("MOD"));
+        assert!(!catalog.known_tags.contains("BAS"));
+        fs::remove_dir_all(base).unwrap();
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn replace_path_countries_blocks_lower_country_definitions_and_colors() {
+        let base = fixture_root("replace-countries-base");
+        let project = fixture_root("replace-countries-project");
+        fs::create_dir_all(base.join("common/countries")).unwrap();
+        fs::write(
+            base.join("common/countries/colors.txt"),
+            "BAS = { color = { 1 2 3 } }",
+        )
+        .unwrap();
+        fs::write(base.join("common/countries/BAS.txt"), "color = { 1 2 3 }").unwrap();
+        fs::create_dir_all(project.join("common/country_tags")).unwrap();
+        fs::write(
+            project.join("descriptor.mod"),
+            "replace_path = \"common/countries\"",
+        )
+        .unwrap();
+        fs::write(
+            project.join("common/country_tags/tags.txt"),
+            "BAS = \"countries/BAS.txt\"",
+        )
+        .unwrap();
+
+        let mut catalog = catalog_from_roots(&project, Some(&base));
+        catalog.resolve_tags(["BAS".to_owned()]);
+        assert_eq!(catalog.metadata("BAS").unwrap().color, None);
+        assert_eq!(
+            catalog.metadata("BAS").unwrap().color_resolution.kind,
+            CountryColorResolutionKind::CountryTagUnknown
+        );
+        fs::remove_dir_all(base).unwrap();
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn political_catalog_reads_dlc_inputs_and_honors_localisation_and_flag_replacements() {
+        let base = fixture_root("dlc-political-base");
+        let project = fixture_root("dlc-political-project");
+        let dlc = base.join("dlc/dlc001");
+        fs::create_dir_all(dlc.join("common/country_tags")).unwrap();
+        fs::create_dir_all(dlc.join("common/countries")).unwrap();
+        fs::write(
+            dlc.join("common/country_tags/dlc.txt"),
+            "DLC = \"countries/DLC.txt\"",
+        )
+        .unwrap();
+        fs::write(dlc.join("common/countries/DLC.txt"), "color = { 7 8 9 }").unwrap();
+        fs::create_dir_all(base.join("localisation")).unwrap();
+        fs::write(
+            base.join("localisation/countries.yml"),
+            format!("l_{}:\n DLC:0 \"Base DLC\"", hoi4_language()),
+        )
+        .unwrap();
+        fs::create_dir_all(base.join("gfx/flags")).unwrap();
+        RgbaImage::new(1, 1)
+            .save(base.join("gfx/flags/DLC.png"))
+            .unwrap();
+        fs::create_dir_all(project.join("localisation")).unwrap();
+        fs::write(
+            project.join("localisation/override.yml"),
+            format!("l_{}:\n DLC:0 \"Project DLC\"", hoi4_language()),
+        )
+        .unwrap();
+
+        let mut catalog = catalog_from_roots(&project, Some(&base));
+        catalog.resolve_tags(["DLC".to_owned()]);
+        let metadata = catalog.metadata("DLC").unwrap();
+        assert_eq!(metadata.color, Some([7, 8, 9]));
+        assert_eq!(metadata.display_name, "Project DLC");
+        assert!(metadata.flag.is_some());
+        assert_eq!(
+            metadata
+                .color_resolution
+                .source
+                .as_ref()
+                .unwrap()
+                .source_kind,
+            super::super::project::SourceKind::Dlc
+        );
+
+        fs::write(
+            project.join("descriptor.mod"),
+            "replace_path = \"localisation\"\nreplace_path = \"gfx/flags\"",
+        )
+        .unwrap();
+        fs::remove_dir_all(project.join("localisation")).unwrap();
+        let mut replaced = catalog_from_roots(&project, Some(&base));
+        replaced.resolve_tags(["DLC".to_owned()]);
+        let metadata = replaced.metadata("DLC").unwrap();
+        assert_eq!(metadata.display_name, "DLC");
+        assert!(metadata.flag.is_none());
         fs::remove_dir_all(base).unwrap();
         fs::remove_dir_all(project).unwrap();
     }
@@ -1243,7 +1421,7 @@ mod tests {
             "color = rgb { 1 nope 3 }",
         )
         .unwrap();
-        let mut catalog = PoliticalCountryCatalog::load(&root, None);
+        let mut catalog = catalog_from_roots(&root, None);
         catalog.resolve_tags(["BRA", "BAD", "ZZZ"].map(str::to_owned));
         assert_eq!(
             catalog.owner_resolution(None),
@@ -1257,6 +1435,7 @@ mod tests {
                 rgb: None,
                 source_path: None,
                 source_type: None,
+                source: None,
             })
         );
         assert_eq!(
