@@ -1,0 +1,16 @@
+# Copy to tools/compatibility_cases.local.toml for local installs or mods.
+# Keep absolute paths out of committed files.
+
+[[cases]]
+name = "synthetic_x_crossing"
+project_root = "tests/compatibility/synthetic_x_crossing"
+enabled_domains = ["province_geometry", "definition"]
+snapshot = "tools/compatibility_snapshots/synthetic_x_crossing.toml"
+notes = "Committed synthetic fixture; no proprietary assets."
+
+[[cases]]
+name = "local_mod"
+project_root = "${HOI4_COMPAT_PROJECT_ROOT}"
+base_game_root = "${HOI4_COMPAT_BASE_GAME_ROOT}"
+enabled_domains = ["province_geometry", "states", "adjacency", "rivers", "railways", "supply"]
+notes = "Local-only configuration; snapshots must redact physical paths."

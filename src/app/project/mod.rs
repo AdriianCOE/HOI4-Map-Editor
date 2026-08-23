@@ -1,6 +1,7 @@
 mod brush;
 mod catalog;
 mod compatibility;
+mod compatibility_harness;
 mod diagnostics;
 mod edit;
 mod indexes;
@@ -29,6 +30,13 @@ pub use compatibility::{
     BitmapCompatibilityMetadata, CompatibilityCode, CompatibilityContext, CompatibilityFinding,
     CompatibilityReport, CompatibilitySeverity, DefinitionCompatibilityMetadata, ProvinceColor,
     RelatedBitmapCompatibilityMetadata, StateCompatibilityMetadata, scan_project,
+};
+pub use compatibility_harness::{
+    ComparisonClass, CompatibilityCase, CompatibilityComparison, CompatibilityDifference,
+    CompatibilityFinding as DifferentialCompatibilityFinding, CompatibilityFindingSource,
+    CompatibilitySnapshot, CompatibilitySnapshotError, CompatibilitySnapshotProvenance,
+    ExpectedDifference, FindingSeverity, ReviewClassification, compare_findings,
+    fingerprint_inputs, normalize_editor_diagnostic, normalize_herbix_finding,
 };
 pub use diagnostics::{DiagnosticSeverity, ProjectDiagnostic, ProjectDiagnosticKind};
 pub use edit::{

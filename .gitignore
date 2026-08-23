@@ -12,6 +12,8 @@ logs/
 *.old
 .env
 .env.*
+tools/compatibility_cases.local.toml
+tools/compatibility_snapshots.local/
 .idea/
 .vscode/
 .DS_Store
