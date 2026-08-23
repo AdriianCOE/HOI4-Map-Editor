@@ -165,6 +165,7 @@ fn construct_map_data_inner(
     // malformed or unsupported records are preserved for validation and round-trip.
     let mut preserved_unsupported_adjacencies = Vec::new();
     let mut connection_data_map = AHashMap::with_capacity(adjacencies_table.len());
+    let all_adjacencies = adjacencies_table.clone();
     for a in adjacencies_table.into_iter() {
         let resolve_color = |id| loaded_id_index.color_for_id(id);
         if let Some(rel) = UOrd::new([a.from_id, a.to_id]).try_map_opt(resolve_color) {
@@ -207,6 +208,7 @@ fn construct_map_data_inner(
             rivers_overlay: rivers_overlay.map(Arc::new),
         },
         boundaries: AHashMap::default(),
+        all_adjacencies,
         preserved_unsupported_adjacencies,
     };
 

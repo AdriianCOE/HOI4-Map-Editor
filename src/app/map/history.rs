@@ -565,6 +565,7 @@ mod tests {
                 rivers_overlay: None,
             },
             boundaries: AHashMap::default(),
+            all_adjacencies: Vec::new(),
             preserved_unsupported_adjacencies: Vec::new(),
         }
     }
@@ -609,6 +610,7 @@ mod tests {
                 rivers_overlay: None,
             },
             boundaries: AHashMap::default(),
+            all_adjacencies: Vec::new(),
             preserved_unsupported_adjacencies: Vec::new(),
         }
     }

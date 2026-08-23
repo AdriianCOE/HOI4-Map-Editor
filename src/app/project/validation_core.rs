@@ -1,11 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::app::format::{Definition, ParseCsv};
 use crate::app::map::{Bundle, Color, ProvinceKind};
-use crate::app::state::TextSpan;
+use crate::app::state::{PdxEntry, PdxValue, TextSpan, parse_text};
 
 use super::diagnostics::DiagnosticDomain;
-use super::{DiagnosticSeverity, Hoi4Project, ProjectDiagnostic, ProjectDiagnosticKind};
+use super::province_geometry::ProvinceGeometryAnalysis;
+use super::{
+    DiagnosticSeverity, Hoi4Project, ProjectDiagnostic, ProjectDiagnosticKind, ResolvedSource,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectValidationTarget {
@@ -50,6 +54,9 @@ pub struct ProjectValidationDiagnostic {
     pub span: Option<TextSpan>,
     pub province_id: Option<u32>,
     pub state_id: Option<u32>,
+    pub map_location: Option<[u32; 2]>,
+    pub related_province_ids: Vec<u32>,
+    pub source: Option<ResolvedSource>,
     pub blocks_save: bool,
     pub message: String,
 }
@@ -80,9 +87,14 @@ pub fn validate_project(
         .map(ProjectValidationDiagnostic::from_project)
         .collect::<Vec<_>>();
 
+    validate_definition_consistency(bundle, project, &mut diagnostics);
     validate_provinces(bundle, project, &mut diagnostics);
+    validate_province_geometry(bundle, project, &mut diagnostics);
+    validate_terrain_catalog(bundle, project, &mut diagnostics);
+    validate_continent_catalog(bundle, project, &mut diagnostics);
     validate_states(bundle, project, &mut diagnostics);
     validate_adjacencies(bundle, project, &mut diagnostics);
+    validate_river_dimensions(bundle, project, &mut diagnostics);
     sort_and_dedup(&mut diagnostics);
 
     let summary = summarize(&diagnostics);
@@ -287,9 +299,9 @@ impl ProjectValidationDelta {
 
 impl ProjectValidationChange {
     fn after_is_error(&self) -> bool {
-        self.after
-            .as_ref()
-            .is_some_and(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+        self.after.as_ref().is_some_and(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Error && diagnostic.blocks_save
+        })
     }
 
     fn after_is_warning(&self) -> bool {
@@ -316,6 +328,9 @@ impl ProjectValidationDiagnostic {
             state_id: diagnostic
                 .state_id
                 .or_else(|| extract_message_id(&diagnostic.message, "state")),
+            map_location: None,
+            related_province_ids: Vec::new(),
+            source: None,
             blocks_save: diagnostic.blocks_save,
             message: diagnostic.message.clone(),
         }
@@ -340,8 +355,39 @@ impl ProjectValidationDiagnostic {
         self
     }
 
+    fn with_optional_province_id(mut self, province_id: Option<u32>) -> Self {
+        self.province_id = province_id;
+        self
+    }
+
     fn with_state_id(mut self, state_id: Option<u32>) -> Self {
         self.state_id = state_id;
+        self
+    }
+
+    fn with_map_location(mut self, location: [u32; 2]) -> Self {
+        self.map_location = Some(location);
+        self
+    }
+
+    fn with_related_province_ids(mut self, mut ids: Vec<u32>) -> Self {
+        ids.sort_unstable();
+        ids.dedup();
+        self.related_province_ids = ids;
+        self
+    }
+
+    fn with_source(mut self, source: ResolvedSource) -> Self {
+        self.path = source
+            .filesystem_path()
+            .map(Path::to_path_buf)
+            .or_else(|| Some(source.logical_path.clone()));
+        self.source = Some(source);
+        self
+    }
+
+    fn with_blocks_save(mut self, blocks_save: bool) -> Self {
+        self.blocks_save = blocks_save;
         self
     }
 }
@@ -355,6 +401,114 @@ impl ProjectValidationDomain {
             DiagnosticDomain::States => Self::State,
             DiagnosticDomain::CrossDomain => Self::CrossDomain,
             DiagnosticDomain::Transaction => Self::Transaction,
+        }
+    }
+}
+
+fn validate_definition_consistency(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+    diagnostics: &mut Vec<ProjectValidationDiagnostic>,
+) {
+    let source = project.paths.sources.source_files().definition_csv.clone();
+    let definitions = match project.paths.sources.read_resolved(&source) {
+        Ok(bytes) => Definition::read_records(std::io::Cursor::new(bytes)),
+        Err(error) => {
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::InvalidDefinition,
+                    DiagnosticSeverity::Error,
+                    None,
+                    format!("definition table cannot be read: {error}"),
+                )
+                .with_domain(ProjectValidationDomain::Definition)
+                .with_source(source)
+                .with_blocks_save(true),
+            );
+            return;
+        }
+    };
+    let definitions = match definitions {
+        Ok(definitions) => definitions,
+        Err(error) => {
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::InvalidDefinition,
+                    DiagnosticSeverity::Error,
+                    None,
+                    format!("definition table cannot be parsed: {error}"),
+                )
+                .with_domain(ProjectValidationDomain::Definition)
+                .with_source(source)
+                .with_blocks_save(true),
+            );
+            return;
+        }
+    };
+    let bitmap_colors = bundle
+        .map
+        .iter_province_data()
+        .map(|(color, _)| color)
+        .collect::<BTreeSet<_>>();
+    let mut ids = BTreeMap::<u32, Color>::new();
+    let mut colors = BTreeMap::<Color, u32>::new();
+    for definition in definitions {
+        if let Some(first_color) = ids.insert(definition.id, definition.rgb) {
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::DuplicateProvinceId,
+                    DiagnosticSeverity::Error,
+                    None,
+                    format!(
+                        "province id {} is used by colors {} and {}",
+                        definition.id,
+                        color_text(first_color),
+                        color_text(definition.rgb)
+                    ),
+                )
+                .with_domain(ProjectValidationDomain::Definition)
+                .with_province_id(definition.id)
+                .with_source(source.clone())
+                .with_blocks_save(true),
+            );
+        }
+        if let Some(first_id) = colors.insert(definition.rgb, definition.id) {
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::DuplicateProvinceRgb,
+                    DiagnosticSeverity::Error,
+                    None,
+                    format!(
+                        "province color {} is used by ids {} and {}",
+                        color_text(definition.rgb),
+                        first_id,
+                        definition.id
+                    ),
+                )
+                .with_domain(ProjectValidationDomain::Definition)
+                .with_province_id(definition.id)
+                .with_related_province_ids(vec![first_id, definition.id])
+                .with_source(source.clone())
+                .with_blocks_save(true),
+            );
+        }
+        if definition.id != 0 && !bitmap_colors.contains(&definition.rgb) {
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::UnusedDefinition,
+                    DiagnosticSeverity::Error,
+                    None,
+                    format!(
+                        "province definition {} ({}) is absent from provinces bitmap",
+                        definition.id,
+                        color_text(definition.rgb)
+                    ),
+                )
+                .with_domain(ProjectValidationDomain::CrossDomain)
+                .with_province_id(definition.id)
+                .with_source(source.clone())
+                .with_blocks_save(false),
+            );
         }
     }
 }
@@ -418,7 +572,19 @@ fn validate_provinces(
                 format!("{province_label} has no coastal value"),
             ));
         }
-        if !province.kind.valid_continent_id(province.continent) {
+        if province.kind == ProvinceKind::Land && province.continent == 0 {
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::LandProvinceNoContinent,
+                    DiagnosticSeverity::Warning,
+                    Some(project.paths.definition_csv.clone()),
+                    format!("{province_label} is land but has no continent"),
+                )
+                .with_domain(ProjectValidationDomain::Definition)
+                .with_optional_province_id(province_id)
+                .with_blocks_save(false),
+            );
+        } else if !province.kind.valid_continent_id(province.continent) {
             diagnostics.push(province_error(
                 project,
                 ProjectDiagnosticKind::InvalidContinent,
@@ -439,6 +605,291 @@ fn validate_provinces(
             ));
         }
     }
+}
+
+fn validate_province_geometry(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+    diagnostics: &mut Vec<ProjectValidationDiagnostic>,
+) {
+    let source = project.paths.sources.source_files().provinces_bmp.clone();
+    let analysis = ProvinceGeometryAnalysis::analyze(bundle);
+    for info in analysis.provinces.values() {
+        if info.pixel_count == 1 {
+            let location = info.representative_locations[0];
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::ProvinceOnePixel,
+                    DiagnosticSeverity::Warning,
+                    None,
+                    format!(
+                        "province {} occupies one pixel at {},{}",
+                        province_label(info.province_id, info.color),
+                        location[0],
+                        location[1]
+                    ),
+                )
+                .with_domain(ProjectValidationDomain::Province)
+                .with_optional_province_id(info.province_id)
+                .with_map_location(location)
+                .with_source(source.clone())
+                .with_blocks_save(false),
+            );
+        }
+        if info.component_count > 1 {
+            let location = info.representative_locations[1];
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::ProvinceDisconnectedComponents,
+                    DiagnosticSeverity::Warning,
+                    None,
+                    format!(
+                        "province {} has {} disconnected components; additional component starts at {},{}",
+                        province_label(info.province_id, info.color),
+                        info.component_count,
+                        location[0],
+                        location[1]
+                    ),
+                )
+                .with_domain(ProjectValidationDomain::Province)
+                .with_optional_province_id(info.province_id)
+                .with_map_location(location)
+                .with_source(source.clone())
+                .with_blocks_save(false),
+            );
+        }
+    }
+    for crossing in analysis.x_crossings {
+        let ids = crossing
+            .colors
+            .into_iter()
+            .filter_map(|color| bundle.map.province_id_for_color(color))
+            .collect::<Vec<_>>();
+        diagnostics.push(
+            ProjectValidationDiagnostic::custom(
+                ProjectDiagnosticKind::MapXCrossing,
+                DiagnosticSeverity::Error,
+                None,
+                format!(
+                    "four-province X crossing at {},{} affects {}",
+                    crossing.location[0],
+                    crossing.location[1],
+                    ids.iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+            .with_domain(ProjectValidationDomain::Province)
+            .with_map_location(crossing.location)
+            .with_related_province_ids(ids)
+            .with_source(source.clone())
+            .with_blocks_save(false),
+        );
+    }
+}
+
+fn validate_terrain_catalog(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+    diagnostics: &mut Vec<ProjectValidationDiagnostic>,
+) {
+    let catalog = match terrain_catalog(bundle, project) {
+        Ok(catalog) => catalog,
+        Err(detail) => {
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::TerrainCatalogUnavailable,
+                    DiagnosticSeverity::Warning,
+                    None,
+                    format!("terrain catalog is unavailable: {detail}"),
+                )
+                .with_domain(ProjectValidationDomain::Project)
+                .with_blocks_save(false),
+            );
+            return;
+        }
+    };
+    let Some(catalog) = catalog else {
+        return;
+    };
+    let source = project.paths.sources.source_files().definition_csv.clone();
+    for (color, province) in sorted_provinces(bundle) {
+        if province.terrain.trim().is_empty()
+            || province.terrain == "unknown"
+            || catalog.contains(&province.terrain)
+        {
+            continue;
+        }
+        diagnostics.push(
+            ProjectValidationDiagnostic::custom(
+                ProjectDiagnosticKind::ProvinceTerrainUndefined,
+                DiagnosticSeverity::Error,
+                None,
+                format!(
+                    "province {} references undefined terrain '{}'",
+                    province_label(province.preserved_id, color),
+                    province.terrain
+                ),
+            )
+            .with_domain(ProjectValidationDomain::Definition)
+            .with_optional_province_id(province.preserved_id)
+            .with_source(source.clone())
+            .with_blocks_save(false),
+        );
+    }
+}
+
+fn validate_continent_catalog(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+    diagnostics: &mut Vec<ProjectValidationDiagnostic>,
+) {
+    let Some(source) = project.paths.sources.source_files().continent_txt.clone() else {
+        return;
+    };
+    let catalog = match continent_catalog(project, &source) {
+        Ok(catalog) => catalog,
+        Err(detail) => {
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::ContinentCatalogUnavailable,
+                    DiagnosticSeverity::Warning,
+                    None,
+                    format!("continent catalog is unavailable: {detail}"),
+                )
+                .with_domain(ProjectValidationDomain::Project)
+                .with_source(source)
+                .with_blocks_save(false),
+            );
+            return;
+        }
+    };
+    let definition_source = project.paths.sources.source_files().definition_csv.clone();
+    for (color, province) in sorted_provinces(bundle) {
+        if province.kind != ProvinceKind::Land
+            || province.continent == 0
+            || catalog.contains(&province.continent)
+        {
+            continue;
+        }
+        diagnostics.push(
+            ProjectValidationDiagnostic::custom(
+                ProjectDiagnosticKind::ProvinceContinentUndefined,
+                DiagnosticSeverity::Error,
+                None,
+                format!(
+                    "province {} references undefined continent {}",
+                    province_label(province.preserved_id, color),
+                    province.continent
+                ),
+            )
+            .with_domain(ProjectValidationDomain::Definition)
+            .with_optional_province_id(province.preserved_id)
+            .with_source(definition_source.clone())
+            .with_blocks_save(false),
+        );
+    }
+}
+
+fn terrain_catalog(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+) -> Result<Option<BTreeSet<String>>, String> {
+    let listing = project
+        .paths
+        .sources
+        .list_files("common/terrain")
+        .map_err(|error| error.to_string())?;
+    if listing.files.is_empty() {
+        // The editor configuration is an intentional fallback for standalone
+        // maps with no configured lower source. A real source graph always
+        // takes precedence and can provide mod-defined terrains.
+        return Ok(Some(bundle.config.terrains.keys().cloned().collect()));
+    }
+    let mut terrains = BTreeSet::new();
+    for source in listing.files {
+        let text = String::from_utf8(
+            project
+                .paths
+                .sources
+                .read_resolved(&source)
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("{} is not UTF-8: {error}", source.logical_path.display()))?;
+        let document = parse_text(&source.logical_path, text);
+        if !document.diagnostics.is_empty() {
+            return Err(format!(
+                "{} has syntax errors",
+                source.logical_path.display()
+            ));
+        }
+        let Some(categories) = find_block(&document.entries, "categories") else {
+            continue;
+        };
+        for entry in &categories.entries {
+            if let Some(key) = &entry.key {
+                terrains.insert(key.text.clone());
+            }
+        }
+    }
+    (!terrains.is_empty())
+        .then_some(terrains)
+        .ok_or_else(|| "no terrain categories were found".to_owned())
+        .map(Some)
+}
+
+fn continent_catalog(
+    project: &Hoi4Project,
+    source: &ResolvedSource,
+) -> Result<BTreeSet<u16>, String> {
+    let text = String::from_utf8(
+        project
+            .paths
+            .sources
+            .read_resolved(source)
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("{} is not UTF-8: {error}", source.logical_path.display()))?;
+    let document = parse_text(&source.logical_path, text);
+    if !document.diagnostics.is_empty() {
+        return Err(format!(
+            "{} has syntax errors",
+            source.logical_path.display()
+        ));
+    }
+    let Some(continents) = find_block(&document.entries, "continents") else {
+        return Err("continents block is missing".to_owned());
+    };
+    let count = continents
+        .entries
+        .iter()
+        .filter(|entry| entry.key.is_none())
+        .count();
+    if count == 0 {
+        return Err("continents block has no entries".to_owned());
+    }
+    Ok((1..=count)
+        .filter_map(|id| u16::try_from(id).ok())
+        .collect())
+}
+
+fn find_block<'a>(entries: &'a [PdxEntry], key: &str) -> Option<&'a crate::app::state::PdxBlock> {
+    entries.iter().find_map(|entry| {
+        (entry.key.as_ref()?.text == key)
+            .then_some(match &entry.value {
+                PdxValue::Block(block) => Some(block),
+                PdxValue::Scalar(_) => None,
+            })
+            .flatten()
+    })
+}
+
+fn province_label(province_id: Option<u32>, color: Color) -> String {
+    province_id.map_or_else(
+        || format!("color {}", color_text(color)),
+        |id| id.to_string(),
+    )
 }
 
 fn validate_states(
@@ -587,35 +1038,103 @@ fn validate_adjacencies(
     project: &Hoi4Project,
     diagnostics: &mut Vec<ProjectValidationDiagnostic>,
 ) {
-    let adjacency_path = project.paths.adjacencies_csv.clone();
+    let source = project.paths.sources.source_files().adjacencies_csv.clone();
+    let [width, height] = bundle.map.dimensions();
     for adjacency in bundle.map.unresolved_adjacencies() {
-        for (field, province_id) in [
-            ("source", adjacency.from_id),
-            ("destination", adjacency.to_id),
+        for (field, province_id, kind) in [
+            (
+                "source",
+                adjacency.from_id,
+                ProjectDiagnosticKind::AdjacencyFromProvinceMissing,
+            ),
+            (
+                "destination",
+                adjacency.to_id,
+                ProjectDiagnosticKind::AdjacencyToProvinceMissing,
+            ),
         ]
         .into_iter()
-        .chain(
-            adjacency
-                .through
-                .map(|province_id| ("through", province_id)),
-        ) {
+        .chain(adjacency.through.map(|province_id| {
+            (
+                "through",
+                province_id,
+                ProjectDiagnosticKind::AdjacencyThroughProvinceMissing,
+            )
+        })) {
             if bundle.map.contains_province_id(province_id) {
                 continue;
             }
-            diagnostics.push(
-                ProjectValidationDiagnostic::custom(
-                    ProjectDiagnosticKind::UnknownAdjacencyProvince,
-                    DiagnosticSeverity::Error,
-                    adjacency_path.clone(),
-                    format!(
-                        "adjacency {field} references removed or missing province {province_id}"
-                    ),
-                )
-                .with_domain(ProjectValidationDomain::CrossDomain)
-                .with_province_id(province_id),
-            );
+            let diagnostic = ProjectValidationDiagnostic::custom(
+                kind,
+                DiagnosticSeverity::Error,
+                None,
+                format!("adjacency {field} references removed or missing province {province_id}"),
+            )
+            .with_domain(ProjectValidationDomain::CrossDomain)
+            .with_province_id(province_id)
+            .with_blocks_save(true);
+            diagnostics.push(match source.clone() {
+                Some(source) => diagnostic.with_source(source),
+                None => diagnostic,
+            });
         }
     }
+    for adjacency in bundle.map.adjacencies() {
+        for (field, location) in [("start", adjacency.start), ("stop", adjacency.stop)] {
+            let Some([x, y]) = location else {
+                continue;
+            };
+            if x < width && y < height {
+                continue;
+            }
+            let diagnostic = ProjectValidationDiagnostic::custom(
+                ProjectDiagnosticKind::AdjacencyCoordinateOutOfBounds,
+                DiagnosticSeverity::Error,
+                None,
+                format!(
+                    "adjacency {field} coordinate {x},{y} is outside map bounds {width}x{height}"
+                ),
+            )
+            .with_domain(ProjectValidationDomain::CrossDomain)
+            .with_map_location([x, y])
+            .with_blocks_save(false);
+            diagnostics.push(match source.clone() {
+                Some(source) => diagnostic.with_source(source),
+                None => diagnostic,
+            });
+        }
+    }
+}
+
+fn validate_river_dimensions(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+    diagnostics: &mut Vec<ProjectValidationDiagnostic>,
+) {
+    let Some(rivers) = bundle.map.get_rivers_overlay() else {
+        return;
+    };
+    let [width, height] = bundle.map.dimensions();
+    if rivers.dimensions() == (width, height) {
+        return;
+    }
+    let diagnostic = ProjectValidationDiagnostic::custom(
+        ProjectDiagnosticKind::RiverDimensionMismatch,
+        DiagnosticSeverity::Error,
+        None,
+        format!(
+            "rivers bitmap dimensions {}x{} do not match provinces bitmap dimensions {width}x{height}",
+            rivers.width(),
+            rivers.height()
+        ),
+    )
+    .with_domain(ProjectValidationDomain::Province)
+    .with_blocks_save(false);
+    let source = project.paths.sources.source_files().rivers_bmp.clone();
+    diagnostics.push(match source {
+        Some(source) => diagnostic.with_source(source),
+        None => diagnostic,
+    });
 }
 
 fn province_lookup(bundle: &Bundle) -> BTreeMap<u32, (bool, ProvinceKind, bool)> {
@@ -685,6 +1204,9 @@ fn same_identity(left: &ProjectValidationDiagnostic, right: &ProjectValidationDi
         && left.span == right.span
         && left.province_id == right.province_id
         && left.state_id == right.state_id
+        && left.map_location == right.map_location
+        && left.related_province_ids == right.related_province_ids
+        && source_identity(left.source.as_ref()) == source_identity(right.source.as_ref())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -698,6 +1220,9 @@ struct DiagnosticIdentity {
     span: Option<(usize, usize)>,
     province_id: Option<u32>,
     state_id: Option<u32>,
+    map_location: Option<[u32; 2]>,
+    related_province_ids: Vec<u32>,
+    source: Option<(String, String, u64)>,
 }
 
 fn grouped_by_identity(
@@ -735,6 +1260,9 @@ fn identity(diagnostic: &ProjectValidationDiagnostic, root: &Path) -> Diagnostic
         span: span_key(diagnostic.span),
         province_id: diagnostic.province_id,
         state_id: diagnostic.state_id,
+        map_location: diagnostic.map_location,
+        related_province_ids: diagnostic.related_province_ids.clone(),
+        source: source_identity(diagnostic.source.as_ref()),
     }
 }
 
@@ -780,6 +1308,7 @@ fn cmp_stable(
         left.path.as_ref(),
         left.state_id,
         left.province_id,
+        (left.map_location, &left.related_province_ids),
         span_key(left.span),
         left.kind,
         left.related_path.as_ref(),
@@ -793,6 +1322,7 @@ fn cmp_stable(
             right.path.as_ref(),
             right.state_id,
             right.province_id,
+            (right.map_location, &right.related_province_ids),
             span_key(right.span),
             right.kind,
             right.related_path.as_ref(),
@@ -812,6 +1342,16 @@ fn severity_rank(severity: DiagnosticSeverity) -> u8 {
 
 fn span_key(span: Option<TextSpan>) -> Option<(usize, usize)> {
     span.map(|span| (span.start, span.len))
+}
+
+fn source_identity(source: Option<&ResolvedSource>) -> Option<(String, String, u64)> {
+    source.map(|source| {
+        (
+            source.logical_path.to_string_lossy().to_string(),
+            format!("{:?}", source.source_kind),
+            source.project_generation.value(),
+        )
+    })
 }
 
 fn extract_message_id(message: &str, label: &str) -> Option<u32> {
@@ -919,7 +1459,7 @@ mod tests {
         TempProject::new(
             name,
             "0;0;0;0;land;false;unknown;0\n1;1;0;0;land;true;plains;1\n",
-            &[[1, 0, 0]],
+            &[[1, 0, 0], [1, 0, 0]],
         )
     }
 
@@ -965,6 +1505,35 @@ mod tests {
         }
     }
 
+    fn bundle_from_image(image: image::RgbImage, definitions: Vec<Definition>) -> Bundle {
+        construct_map_data_for_sparse_tests(
+            image,
+            definitions,
+            Vec::new(),
+            None,
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn definitions(colors: &[[u8; 3]]) -> Vec<Definition> {
+        colors
+            .iter()
+            .enumerate()
+            .map(|(index, &rgb)| Definition {
+                id: index as u32 + 1,
+                rgb,
+                kind: DefinitionKind::Land,
+                coastal: false,
+                terrain: "plains".to_owned(),
+                continent: 1,
+            })
+            .collect()
+    }
+
     #[test]
     fn valid_project_has_empty_report() {
         let temp = valid_fixture("valid");
@@ -976,6 +1545,279 @@ mod tests {
         assert_eq!(report.total, 0);
         assert!(!report.blocks_save);
         assert!(!report.requires_warning_review);
+    }
+
+    #[test]
+    fn x_crossing_carries_coordinate_related_ids_and_is_not_a_save_blocker() {
+        let colors = [[1, 0, 0], [2, 0, 0], [3, 0, 0], [4, 0, 0]];
+        let temp = TempProject::new(
+            "x-crossing",
+            "0;0;0;0;land;false;unknown;0\n1;1;0;0;land;false;plains;1\n2;2;0;0;land;false;plains;1\n3;3;0;0;land;false;plains;1\n4;4;0;0;land;false;plains;1\n",
+            &colors,
+        );
+        let image = image::RgbImage::from_fn(2, 2, |x, y| image::Rgb(colors[(y * 2 + x) as usize]));
+        let bundle = bundle_from_image(image, definitions(&colors));
+        let report = validate_project(
+            &bundle,
+            &project(&temp, Vec::new()),
+            ProjectValidationTarget::PendingChanges,
+        );
+        let crossing = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "MAP_X_CROSSING")
+            .expect("X crossing diagnostic");
+        assert_eq!(crossing.map_location, Some([0, 0]));
+        assert_eq!(crossing.related_province_ids, vec![1, 2, 3, 4]);
+        assert!(!crossing.blocks_save);
+        assert!(!report.blocks_save);
+    }
+
+    #[test]
+    fn geometry_wraps_horizontally_but_reports_true_disconnected_components() {
+        let colors = [[1, 0, 0], [2, 0, 0]];
+        let temp = TempProject::new(
+            "components",
+            "0;0;0;0;land;false;unknown;0\n1;1;0;0;land;false;plains;1\n2;2;0;0;land;false;plains;1\n",
+            &colors,
+        );
+        let seam = image::RgbImage::from_fn(4, 1, |x, _| {
+            image::Rgb(if x == 0 || x == 3 {
+                colors[0]
+            } else {
+                colors[1]
+            })
+        });
+        let seam_report = validate_project(
+            &bundle_from_image(seam, definitions(&colors)),
+            &project(&temp, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(
+            !seam_report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PROVINCE_DISCONNECTED_COMPONENTS")
+        );
+
+        let disconnected = image::RgbImage::from_fn(4, 1, |x, _| {
+            image::Rgb(if x == 0 || x == 2 {
+                colors[0]
+            } else {
+                colors[1]
+            })
+        });
+        let report = validate_project(
+            &bundle_from_image(disconnected, definitions(&colors)),
+            &project(&temp, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "PROVINCE_DISCONNECTED_COMPONENTS"
+                && diagnostic.province_id == Some(1)
+                && !diagnostic.blocks_save
+        }));
+    }
+
+    #[test]
+    fn raw_definition_validation_retains_unused_and_duplicate_identity_evidence() {
+        let temp = valid_fixture("raw-definition");
+        let bundle = temp.bundle();
+        fs::write(
+            temp.0.join("map/definition.csv"),
+            "0;0;0;0;land;false;unknown;0\n1;1;0;0;land;false;plains;1\n1;2;0;0;land;false;plains;1\n2;3;0;0;land;false;plains;1\n3;3;0;0;land;false;plains;1\n",
+        )
+        .unwrap();
+        let report = validate_project(
+            &bundle,
+            &project(&temp, Vec::new()),
+            ProjectValidationTarget::PendingChanges,
+        );
+        assert!(report.diagnostics.iter().any(|diagnostic| diagnostic.code
+            == "definition.id.duplicate"
+            && diagnostic.blocks_save));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "definition.rgb.duplicate"
+                    && diagnostic.blocks_save)
+        );
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "cross.definition.unused" && !diagnostic.blocks_save
+        }));
+    }
+
+    #[test]
+    fn terrain_and_custom_default_map_continent_catalogs_use_resolved_sources() {
+        let temp = TempProject::new(
+            "source-catalogs",
+            "0;0;0;0;land;false;unknown;0\n1;1;0;0;land;false;made_up;2\n",
+            &[[1, 0, 0]],
+        );
+        fs::create_dir_all(temp.0.join("common/terrain")).unwrap();
+        fs::write(
+            temp.0.join("common/terrain/00_test.txt"),
+            "categories = { plains = { } forest = { } }",
+        )
+        .unwrap();
+        fs::write(
+            temp.0.join("map/default.map"),
+            "continent = custom_continents.txt",
+        )
+        .unwrap();
+        fs::write(
+            temp.0.join("map/custom_continents.txt"),
+            "continents = { europe }",
+        )
+        .unwrap();
+        let bundle = temp.bundle();
+        let report = validate_project(
+            &bundle,
+            &project(&temp, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PROVINCE_TERRAIN_UNDEFINED")
+        );
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PROVINCE_CONTINENT_UNDEFINED")
+        );
+    }
+
+    #[test]
+    fn terrain_catalog_accepts_project_entries_and_replace_path_blocks_lower_entries() {
+        let temp = TempProject::new(
+            "terrain-replace-path",
+            "0;0;0;0;land;false;unknown;0\n1;1;0;0;land;false;mod_only;1\n",
+            &[[1, 0, 0]],
+        );
+        let base = temp.0.with_file_name(format!(
+            "hoi4-validation-core-base-terrain-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("common/terrain")).unwrap();
+        fs::write(
+            base.join("common/terrain/00_base.txt"),
+            "categories = { lower_only = { } }",
+        )
+        .unwrap();
+        fs::write(
+            temp.0.join("descriptor.mod"),
+            "replace_path = \"common/terrain\"",
+        )
+        .unwrap();
+        fs::create_dir_all(temp.0.join("common/terrain")).unwrap();
+        fs::write(
+            temp.0.join("common/terrain/00_mod.txt"),
+            "categories = { mod_only = { } }",
+        )
+        .unwrap();
+        let mut definition = definitions(&[[1, 0, 0]]);
+        definition[0].terrain = "mod_only".to_owned();
+        let bundle = bundle_from_image(
+            image::RgbImage::from_pixel(1, 1, image::Rgb([1, 0, 0])),
+            definition,
+        );
+        let mut loaded_project = project(&temp, Vec::new());
+        loaded_project
+            .paths
+            .set_validated_base_game_root(Some(base.clone()));
+        let report = validate_project(
+            &bundle,
+            &loaded_project,
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PROVINCE_TERRAIN_UNDEFINED")
+        );
+
+        fs::remove_dir_all(temp.0.join("common/terrain")).unwrap();
+        fs::write(
+            temp.0.join("map/definition.csv"),
+            "0;0;0;0;land;false;unknown;0\n1;1;0;0;land;false;lower_only;1\n",
+        )
+        .unwrap();
+        let mut definition = definitions(&[[1, 0, 0]]);
+        definition[0].terrain = "lower_only".to_owned();
+        let bundle = bundle_from_image(
+            image::RgbImage::from_pixel(1, 1, image::Rgb([1, 0, 0])),
+            definition,
+        );
+        let mut project = project(&temp, Vec::new());
+        project
+            .paths
+            .set_validated_base_game_root(Some(base.clone()));
+        let report = validate_project(&bundle, &project, ProjectValidationTarget::CurrentProject);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PROVINCE_TERRAIN_UNDEFINED")
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn land_without_continent_is_a_nonblocking_warning_and_water_zero_is_ignored() {
+        let temp = TempProject::new(
+            "land-no-continent",
+            "0;0;0;0;land;false;unknown;0\n1;1;0;0;land;false;plains;0\n2;2;0;0;sea;false;ocean;0\n3;3;0;0;lake;false;lakes;0\n",
+            &[[1, 0, 0], [2, 0, 0], [3, 0, 0]],
+        );
+        let report = validate_project(
+            &temp.bundle(),
+            &project(&temp, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "LAND_PROVINCE_NO_CONTINENT"
+                && diagnostic.severity == DiagnosticSeverity::Warning
+                && !diagnostic.blocks_save
+        }));
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PROVINCE_CONTINENT_UNDEFINED")
+        );
+    }
+
+    #[test]
+    fn adjacency_bounds_checks_do_not_assume_dense_ids() {
+        let temp = valid_fixture("adjacency-bounds");
+        let mut row = adjacency(7, 500, Some(42));
+        row.start = Some([4, 0]);
+        row.stop = Some([0, 1]);
+        let report = validate_project(
+            &sparse_bundle(vec![row]),
+            &project(&temp, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        let coordinates = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "ADJACENCY_COORDINATE_OUT_OF_BOUNDS")
+            .map(|diagnostic| diagnostic.map_location)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(coordinates, BTreeSet::from([Some([4, 0]), Some([0, 1])]));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "ADJACENCY_COORDINATE_OUT_OF_BOUNDS")
+                .all(|diagnostic| !diagnostic.blocks_save)
+        );
     }
 
     #[test]
@@ -1073,7 +1915,12 @@ mod tests {
             ProjectValidationTarget::CurrentProject,
         );
         assert!(!report.blocks_save);
-        assert!(report.diagnostics.is_empty());
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .all(|diagnostic| !diagnostic.blocks_save)
+        );
 
         let bundle = sparse_bundle(vec![adjacency(7, 999, Some(998))]);
         let mut invalid = state(1, &[1, 999]);
@@ -1090,7 +1937,14 @@ mod tests {
         let adjacency_diagnostics = report
             .diagnostics
             .iter()
-            .filter(|diagnostic| diagnostic.code == "cross.adjacency.province.unknown")
+            .filter(|diagnostic| {
+                matches!(
+                    diagnostic.code.as_str(),
+                    "ADJACENCY_FROM_PROVINCE_MISSING"
+                        | "ADJACENCY_TO_PROVINCE_MISSING"
+                        | "ADJACENCY_THROUGH_PROVINCE_MISSING"
+                )
+            })
             .map(|diagnostic| diagnostic.province_id)
             .collect::<BTreeSet<_>>();
         assert_eq!(

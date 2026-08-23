@@ -8,6 +8,7 @@ mod lasso;
 mod patch;
 mod paths;
 mod properties;
+mod province_geometry;
 mod save;
 mod save_plan;
 mod sources;

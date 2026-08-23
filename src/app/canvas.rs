@@ -11437,7 +11437,7 @@ fn validation_problem_matches(
         && view.severity.matches(diagnostic.severity)
         && view.domain.matches(diagnostic.domain)
         && (!view.blocking_only
-            || diagnostic.severity == DiagnosticSeverity::Error
+            || diagnostic.blocks_save
                 && matches!(
                     source,
                     ValidationSourceFilter::New | ValidationSourceFilter::Aggravated
@@ -11464,7 +11464,7 @@ fn validation_problem_details(
     diagnostic: &ProjectValidationDiagnostic,
 ) -> String {
     format!(
-        "Source: {}\nSeverity: {:?}\nDomain: {:?}\nCode: {}\nMessage: {}\nPath: {}\nProvince: {}\nState: {}",
+        "Source: {}\nSeverity: {:?}\nDomain: {:?}\nCode: {}\nMessage: {}\nPath: {}\nProvince: {}\nRelated Provinces: {}\nState: {}\nMap coordinate: {}\nResolved source: {}",
         source.label(),
         diagnostic.severity,
         diagnostic.domain,
@@ -11477,9 +11477,31 @@ fn validation_problem_details(
         diagnostic
             .province_id
             .map_or_else(|| "-".to_owned(), |id| id.to_string()),
+        if diagnostic.related_province_ids.is_empty() {
+            "-".to_owned()
+        } else {
+            diagnostic
+                .related_province_ids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
         diagnostic
             .state_id
             .map_or_else(|| "-".to_owned(), |id| id.to_string()),
+        diagnostic
+            .map_location
+            .map_or_else(|| "-".to_owned(), |[x, y]| format!("{x},{y}")),
+        diagnostic.source.as_ref().map_or_else(
+            || "-".to_owned(),
+            |source| format!(
+                "{} ({:?}, {:?})",
+                source.logical_path.display(),
+                source.source_kind,
+                source.location
+            )
+        ),
     )
 }
 
@@ -13253,6 +13275,9 @@ mod tests {
             span: None,
             province_id: Some(501),
             state_id: Some(123),
+            map_location: None,
+            related_province_ids: Vec::new(),
+            source: None,
             blocks_save: true,
             message: "Province reference is invalid".to_owned(),
         };
@@ -13296,6 +13321,9 @@ mod tests {
             span: None,
             province_id: Some(501),
             state_id: Some(123),
+            map_location: None,
+            related_province_ids: Vec::new(),
+            source: None,
             blocks_save: true,
             message: "Province reference is invalid".to_owned(),
         };

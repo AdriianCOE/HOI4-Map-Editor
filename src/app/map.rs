@@ -217,6 +217,7 @@ impl std::fmt::Debug for MapBase {
 pub struct Map {
     base: MapBase,
     boundaries: AHashMap<UOrd<Vector2<u32>>, bool>,
+    all_adjacencies: Vec<Adjacency>,
     preserved_unsupported_adjacencies: Vec<Adjacency>,
 }
 
@@ -871,6 +872,13 @@ impl Map {
     /// endpoints that do not resolve to an existing province.
     pub(crate) fn unresolved_adjacencies(&self) -> &[Adjacency] {
         &self.preserved_unsupported_adjacencies
+    }
+
+    /// Original adjacency rows retained for read-only validation. Save
+    /// serialization continues to derive its rows from the editable connection
+    /// model, so this does not broaden the save surface.
+    pub(crate) fn adjacencies(&self) -> &[Adjacency] {
+        &self.all_adjacencies
     }
 
     pub fn adjacency_references_province_id(&self, id: u32) -> bool {

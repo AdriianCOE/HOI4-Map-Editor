@@ -85,6 +85,19 @@ pub enum ProjectDiagnosticKind {
     InvalidContinent,
     SeaOrLakeAssigned,
     NavalBaseNonCoastal,
+    MapXCrossing,
+    ProvinceOnePixel,
+    ProvinceDisconnectedComponents,
+    TerrainCatalogUnavailable,
+    ProvinceTerrainUndefined,
+    ContinentCatalogUnavailable,
+    ProvinceContinentUndefined,
+    LandProvinceNoContinent,
+    AdjacencyFromProvinceMissing,
+    AdjacencyToProvinceMissing,
+    AdjacencyThroughProvinceMissing,
+    AdjacencyCoordinateOutOfBounds,
+    RiverDimensionMismatch,
     CandidateMismatch,
     ExternalChange,
     TransactionFailure,
@@ -132,6 +145,19 @@ impl ProjectDiagnosticKind {
             Self::InvalidContinent => "definition.continent.invalid",
             Self::SeaOrLakeAssigned => "cross.non_land.assigned",
             Self::NavalBaseNonCoastal => "cross.naval_base.non_coastal",
+            Self::MapXCrossing => "MAP_X_CROSSING",
+            Self::ProvinceOnePixel => "PROVINCE_ONE_PIXEL",
+            Self::ProvinceDisconnectedComponents => "PROVINCE_DISCONNECTED_COMPONENTS",
+            Self::TerrainCatalogUnavailable => "TERRAIN_CATALOG_UNAVAILABLE",
+            Self::ProvinceTerrainUndefined => "PROVINCE_TERRAIN_UNDEFINED",
+            Self::ContinentCatalogUnavailable => "CONTINENT_CATALOG_UNAVAILABLE",
+            Self::ProvinceContinentUndefined => "PROVINCE_CONTINENT_UNDEFINED",
+            Self::LandProvinceNoContinent => "LAND_PROVINCE_NO_CONTINENT",
+            Self::AdjacencyFromProvinceMissing => "ADJACENCY_FROM_PROVINCE_MISSING",
+            Self::AdjacencyToProvinceMissing => "ADJACENCY_TO_PROVINCE_MISSING",
+            Self::AdjacencyThroughProvinceMissing => "ADJACENCY_THROUGH_PROVINCE_MISSING",
+            Self::AdjacencyCoordinateOutOfBounds => "ADJACENCY_COORDINATE_OUT_OF_BOUNDS",
+            Self::RiverDimensionMismatch => "RIVER_DIMENSION_MISMATCH",
             Self::CandidateMismatch => "project.candidate.mismatch",
             Self::ExternalChange => "transaction.external_change",
             Self::TransactionFailure => "transaction.failure",
@@ -147,6 +173,17 @@ impl ProjectDiagnosticKind {
             | Self::InvalidProvinceType
             | Self::InvalidCoastal
             | Self::InvalidContinent => DiagnosticDomain::Definition,
+            Self::ProvinceTerrainUndefined | Self::ProvinceContinentUndefined => {
+                DiagnosticDomain::Definition
+            }
+            Self::LandProvinceNoContinent => DiagnosticDomain::Definition,
+            Self::MapXCrossing
+            | Self::ProvinceOnePixel
+            | Self::ProvinceDisconnectedComponents
+            | Self::RiverDimensionMismatch => DiagnosticDomain::ProvinceMap,
+            Self::TerrainCatalogUnavailable | Self::ContinentCatalogUnavailable => {
+                DiagnosticDomain::Project
+            }
             Self::ProvinceInMultipleStates
             | Self::UnknownProvince
             | Self::LandProvinceWithoutState
@@ -157,6 +194,10 @@ impl ProjectDiagnosticKind {
             | Self::UnusedDefinition
             | Self::SeaOrLakeAssigned
             | Self::NavalBaseNonCoastal => DiagnosticDomain::CrossDomain,
+            Self::AdjacencyFromProvinceMissing
+            | Self::AdjacencyToProvinceMissing
+            | Self::AdjacencyThroughProvinceMissing
+            | Self::AdjacencyCoordinateOutOfBounds => DiagnosticDomain::CrossDomain,
             Self::ExternalChange | Self::TransactionFailure => DiagnosticDomain::Transaction,
             Self::CandidateMismatch => DiagnosticDomain::Project,
             _ => DiagnosticDomain::States,
