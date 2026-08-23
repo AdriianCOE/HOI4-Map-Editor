@@ -36,17 +36,18 @@ use super::political::{
 };
 use super::project::{
     BrushProvinceClassification, BuildingScope, CombinedRoundTripValidationReport,
-    DiagnosticSeverity, EditableProvinceData, EditableStateProperties, GameDefinitionCatalog,
-    Hoi4Project, LassoSelectionMode, MapViewMode, ProjectPatchPlan, ProjectSavePlan,
-    ProjectValidationChange, ProjectValidationDiagnostic, ProjectValidationDomain,
-    ProjectValidationReport, ProjectValidationTarget, ProvinceAdjacency, ProvinceDataDraft,
-    ProvinceDataValidationError, ProvinceInclusionMode, ProvinceRemovalPolicy, RecoveryInfo,
-    RoundTripCancellation, RoundTripStage, RoundTripStatus, RoundTripValidationPolicy,
-    RoundTripValidationReport, RoundTripValidator, SaveTransactionState, StateBrushMode,
-    StateEditSession, StateFillMode, StateFillPreview, StateFillProvince, StateFillProvinceKind,
-    StateLassoPhase, StatePropertyDraft, StateRemovalPolicy, StateSaveCancellation,
-    StateSaveConditions, StateSaveFault, StateSaveOutcome, StateSaveReport, StateSelection,
-    WorkingStateOrigin, boundaries_for_state, classify_state_lasso, detect_state_save_recovery,
+    DiagnosticAction, DiagnosticSeverity, EditableProvinceData, EditableStateProperties,
+    GameDefinitionCatalog, Hoi4Project, LassoSelectionMode, MapViewMode, ProblemsOverlayModel,
+    ProjectPatchPlan, ProjectSavePlan, ProjectValidationChange, ProjectValidationDiagnostic,
+    ProjectValidationDomain, ProjectValidationReport, ProjectValidationTarget, ProvinceAdjacency,
+    ProvinceDataDraft, ProvinceDataValidationError, ProvinceInclusionMode, ProvinceRemovalPolicy,
+    RecoveryInfo, RoundTripCancellation, RoundTripStage, RoundTripStatus,
+    RoundTripValidationPolicy, RoundTripValidationReport, RoundTripValidator, SaveTransactionState,
+    SourceGeneration, StateBrushMode, StateEditSession, StateFillMode, StateFillPreview,
+    StateFillProvince, StateFillProvinceKind, StateLassoPhase, StatePropertyDraft,
+    StateRemovalPolicy, StateSaveCancellation, StateSaveConditions, StateSaveFault,
+    StateSaveOutcome, StateSaveReport, StateSelection, WorkingStateOrigin, boundaries_for_state,
+    build_overlay, classify_state_lasso, detect_state_save_recovery, diagnostic_actions,
     execute_project_save, execute_state_save, format_integer_pt_br, generate_state_view,
     generate_state_view_for, generate_state_view_region_for, parse_grouped_nonnegative_integer,
     plan_state_fill, plan_state_patches, recover_interrupted_state_save, sample_segment,
@@ -167,6 +168,9 @@ pub struct Canvas {
     last_project_save_summary: Option<ProjectSavePresentationSummary>,
     project_save_validation: Option<CombinedRoundTripValidationReport>,
     project_validation_report: Option<ProjectValidationReport>,
+    problems_overlay: ProblemsOverlayModel,
+    problems_overlay_revision: u64,
+    diagnostic_navigation_marker: Option<[u32; 2]>,
     validation_problems_view: ValidationProblemsView,
     last_validation: Option<LastValidationState>,
     province_save_report: Option<ProvinceSaveReport>,
@@ -310,6 +314,7 @@ pub enum StateApplyDialogAction {
     ConfirmSave,
     ConfirmProjectSave,
     OpenSource(PathBuf),
+    RevealSource(PathBuf),
     CopyDetails(String),
     ChooseImageOverlay,
     UseProjectHeightmap,
@@ -455,6 +460,7 @@ struct ValidationProblemsView {
     filters_expanded: bool,
     show_technical_details: bool,
     blocking_only: bool,
+    action_index: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -614,6 +620,8 @@ impl Canvas {
         }
         self.territory_anchor_generation = None;
         self.round_trip_failure_snapshot = None;
+        self.problems_overlay = ProblemsOverlayModel::default();
+        self.diagnostic_navigation_marker = None;
     }
 
     pub fn load(location: Location) -> Result<Canvas, Error> {
@@ -873,6 +881,9 @@ impl Canvas {
             last_project_save_summary: None,
             project_save_validation: None,
             project_validation_report: None,
+            problems_overlay: ProblemsOverlayModel::default(),
+            problems_overlay_revision: 0,
+            diagnostic_navigation_marker: None,
             validation_problems_view: ValidationProblemsView::default(),
             last_validation: None,
             province_save_report: None,
@@ -2664,6 +2675,7 @@ impl Canvas {
     }
 
     fn select_state_by_id(&mut self, interface: &Interface, state_id: u32, alerts: &mut Alerts) {
+        self.diagnostic_navigation_marker = None;
         if self.property_draft_is_modified() {
             alerts.push(Err(
                 "Apply or discard the modified draft before changing state",
@@ -2733,6 +2745,7 @@ impl Canvas {
         province_id: u32,
         alerts: &mut Alerts,
     ) {
+        self.diagnostic_navigation_marker = None;
         if self.property_draft_is_modified() {
             alerts.push(Err(
                 "Apply or discard the modified draft before changing province",
@@ -3375,6 +3388,8 @@ impl Canvas {
         }
 
         self.draw_problems(ctx, interface, gl);
+        self.draw_problems_overlay(ctx, interface, gl);
+        self.draw_diagnostic_navigation_marker(ctx, interface, gl);
 
         self.draw_tool(ctx, interface, cursor_pos, gl);
         if self.project.is_none() {
@@ -3707,22 +3722,17 @@ impl Canvas {
                 if problems.is_empty() {
                     lines.push(tr("project_validation.no_matching_problems").to_owned());
                 }
-                let navigation = self.selected_validation_problem().map(|(_, diagnostic)| diagnostic);
+                let action = self.selected_diagnostic_action();
+                let action_count = self.selected_diagnostic_actions().len();
                 (
                     tr("workspace.validation_results"),
-                    if navigation.and_then(|diagnostic| diagnostic.province_id).is_some() {
-                        tr("project_validation.go_to_province")
-                    } else if navigation.and_then(|diagnostic| diagnostic.state_id).is_some() {
-                        tr("project_validation.go_to_state")
-                    } else if navigation
-                        .and_then(|diagnostic| validation_source_path(diagnostic, self.project.as_ref()))
-                        .is_some()
-                    {
-                        tr("project_validation.open_file")
-                    } else {
-                        tr("project_validation.validate_again")
-                    },
-                    if self.validation_problems_view.show_technical_details { tr("project_validation.hide_technical_details") } else { tr("project_validation.show_technical_details") },
+                    action.as_ref().map_or_else(
+                        || tr("project_validation.validate_again"),
+                        diagnostic_action_label,
+                    ),
+                    if action_count > 1 {
+                        tr("project_validation.next_action")
+                    } else if self.validation_problems_view.show_technical_details { tr("project_validation.hide_technical_details") } else { tr("project_validation.show_technical_details") },
                     tr("project_validation.close"),
                     lines,
                 )
@@ -6149,6 +6159,72 @@ impl Canvas {
         }
     }
 
+    fn draw_problems_overlay(&self, ctx: Context, interface: &Interface, gl: &mut GlGraphics) {
+        if !self.map_layers.show_problems {
+            return;
+        }
+        for marker in &self.problems_overlay.markers {
+            let position = self.camera.compute_position(
+                interface,
+                [
+                    f64::from(marker.location[0]) + 0.5,
+                    f64::from(marker.location[1]) + 0.5,
+                ],
+            );
+            if !self.camera.within_viewport(interface, position) {
+                continue;
+            }
+            let color = match marker.severity {
+                DiagnosticSeverity::Error => [0.95, 0.22, 0.18, 0.95],
+                DiagnosticSeverity::Warning => [0.95, 0.70, 0.12, 0.95],
+                DiagnosticSeverity::Information => [0.30, 0.65, 1.0, 0.85],
+            };
+            let radius = 5.0 + (marker.count.saturating_sub(1).min(4) as f64 * 1.5);
+            Ellipse::new_border(color, 2.0).resolution(16).draw_from_to(
+                [radius, radius],
+                [-radius, -radius],
+                &Default::default(),
+                ctx.transform.trans_pos(position),
+                gl,
+            );
+        }
+    }
+
+    fn draw_diagnostic_navigation_marker(
+        &self,
+        ctx: Context,
+        interface: &Interface,
+        gl: &mut GlGraphics,
+    ) {
+        let Some(location) = self.diagnostic_navigation_marker else {
+            return;
+        };
+        let position = self.camera.compute_position(
+            interface,
+            [f64::from(location[0]) + 0.5, f64::from(location[1]) + 0.5],
+        );
+        if !self.camera.within_viewport(interface, position) {
+            return;
+        }
+        let color = [1.0, 1.0, 1.0, 0.95];
+        graphics::line_from_to(
+            color,
+            2.0,
+            [position[0] - 10.0, position[1]],
+            [position[0] + 10.0, position[1]],
+            ctx.transform,
+            gl,
+        );
+        graphics::line_from_to(
+            color,
+            2.0,
+            [position[0], position[1] - 10.0],
+            [position[0], position[1] + 10.0],
+            ctx.transform,
+            gl,
+        );
+    }
+
     fn draw_tool(
         &self,
         ctx: Context,
@@ -6346,6 +6422,70 @@ impl Canvas {
                 "hidden"
             }
         )));
+    }
+
+    pub fn toggle_problems_overlay(&mut self, alerts: &mut Alerts) {
+        self.map_layers.show_problems = !self.map_layers.show_problems;
+        if self.map_layers.show_problems {
+            self.refresh_problems_overlay();
+        }
+        alerts.push(Ok(format!(
+            "Problems overlay: {}",
+            if self.map_layers.show_problems {
+                "shown"
+            } else {
+                "hidden"
+            }
+        )));
+    }
+
+    fn refresh_problems_overlay(&mut self) {
+        self.problems_overlay_revision = self.problems_overlay_revision.wrapping_add(1);
+        let diagnostics = self
+            .project_validation_report
+            .as_ref()
+            .map(|report| report.diagnostics.clone())
+            .unwrap_or_default();
+        let province_locations = self
+            .bundle
+            .map
+            .iter_province_data()
+            .filter_map(|(_, province)| {
+                let id = province.preserved_id?;
+                let center = province.center_of_mass();
+                Some((id, [center[0].floor() as u32, center[1].floor() as u32]))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let state_locations = self
+            .state_edit_session
+            .as_ref()
+            .map(|edit| {
+                edit.valid_state_ids()
+                    .iter()
+                    .copied()
+                    .filter_map(|state_id| {
+                        let province_id = edit.state_data(state_id)?.provinces.first().copied()?;
+                        Some((state_id, *province_locations.get(&province_id)?))
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        self.problems_overlay = build_overlay(
+            SourceGeneration::new(self.project_generation.0),
+            self.problems_overlay_revision,
+            &diagnostics,
+            |province_id| province_locations.get(&province_id).copied(),
+            |state_id| state_locations.get(&state_id).copied(),
+        );
+    }
+
+    fn focus_diagnostic_location(&mut self, interface: &Interface, location: [u32; 2]) {
+        self.camera.ensure_scale(interface, 2.0);
+        self.camera.center_on(
+            interface,
+            [f64::from(location[0]) + 0.5, f64::from(location[1]) + 0.5],
+        );
+        self.diagnostic_navigation_marker = Some(location);
     }
 
     pub fn enabled_options(&self) -> [bool; 7] {
@@ -7171,37 +7311,10 @@ impl Canvas {
                     }
                 }
                 StateApplyDialog::ValidationResults => {
-                    let selected = self
-                        .selected_validation_problem()
-                        .map(|(_, diagnostic)| diagnostic);
-                    let navigation = selected.and_then(|diagnostic| {
-                        diagnostic
-                            .province_id
-                            .map(|province_id| (Some(province_id), None))
-                            .or_else(|| diagnostic.state_id.map(|state_id| (None, Some(state_id))))
-                    });
-                    if let Some((Some(province_id), _)) = navigation {
-                        self.state_apply_dialog = None;
-                        self.select_province_by_id(interface, province_id, alerts);
-                    } else if let Some((_, Some(state_id))) = navigation {
-                        self.state_apply_dialog = None;
-                        self.select_state_by_id(interface, state_id, alerts);
-                    } else if let Some(path) = selected.and_then(|diagnostic| {
-                        validation_source_path(diagnostic, self.project.as_ref())
-                    }) {
-                        return StateApplyDialogAction::OpenSource(path);
-                    } else if let Some(diagnostic) = selected
-                        && diagnostic.path.is_some()
-                    {
-                        alerts.push(Ok(format!(
-                            "Pending file: {}",
-                            validation_display_path(diagnostic, self.project.as_ref())
-                                .strip_prefix("File: ")
-                                .unwrap_or_default()
-                        )));
-                    } else {
-                        self.validate_project_for_ui(alerts);
+                    if let Some(action) = self.selected_diagnostic_action() {
+                        return self.execute_diagnostic_action(interface, action, alerts);
                     }
+                    self.validate_project_for_ui(alerts);
                 }
                 StateApplyDialog::IntegrityProblem => self.state_apply_dialog = None,
                 StateApplyDialog::ImageOverlay => self.toggle_image_overlay(alerts),
@@ -7219,8 +7332,14 @@ impl Canvas {
                     self.open_validation_problems(false, ValidationSourceFilter::All);
                 }
                 StateApplyDialog::ValidationResults => {
-                    self.validation_problems_view.show_technical_details =
-                        !self.validation_problems_view.show_technical_details
+                    let action_count = self.selected_diagnostic_actions().len();
+                    if action_count > 1 {
+                        self.validation_problems_view.action_index =
+                            (self.validation_problems_view.action_index + 1) % action_count;
+                    } else {
+                        self.validation_problems_view.show_technical_details =
+                            !self.validation_problems_view.show_technical_details;
+                    }
                 }
                 StateApplyDialog::IntegrityProblem => {
                     if let Some(snapshot) = self.active_round_trip_failure_snapshot() {
@@ -7290,6 +7409,63 @@ impl Canvas {
                     .min(problems.len().saturating_sub(1)),
             )
             .copied()
+    }
+
+    fn selected_diagnostic_actions(&self) -> Vec<DiagnosticAction> {
+        self.selected_validation_problem()
+            .map(|(_, diagnostic)| {
+                diagnostic_actions(diagnostic, SourceGeneration::new(self.project_generation.0))
+            })
+            .unwrap_or_default()
+    }
+
+    fn selected_diagnostic_action(&self) -> Option<DiagnosticAction> {
+        let actions = self.selected_diagnostic_actions();
+        actions
+            .get(self.validation_problems_view.action_index % actions.len().max(1))
+            .cloned()
+    }
+
+    fn execute_diagnostic_action(
+        &mut self,
+        interface: &Interface,
+        action: DiagnosticAction,
+        alerts: &mut Alerts,
+    ) -> StateApplyDialogAction {
+        match action {
+            DiagnosticAction::GoToProvince(province_id) => {
+                self.state_apply_dialog = None;
+                self.select_province_by_id(interface, province_id, alerts);
+            }
+            DiagnosticAction::GoToState(state_id) => {
+                self.state_apply_dialog = None;
+                self.select_state_by_id(interface, state_id, alerts);
+            }
+            DiagnosticAction::GoToLocation(location) => {
+                self.state_apply_dialog = None;
+                self.focus_diagnostic_location(interface, location);
+                alerts.push(Ok(format!(
+                    "Focused diagnostic location {},{}",
+                    location[0], location[1]
+                )));
+            }
+            DiagnosticAction::OpenSource(path) => {
+                if path.is_file() {
+                    return StateApplyDialogAction::OpenSource(path);
+                }
+                alerts.push(Err("Diagnostic source file no longer exists"));
+            }
+            DiagnosticAction::RevealSource(path) => {
+                if path.exists() {
+                    return StateApplyDialogAction::RevealSource(path);
+                }
+                alerts.push(Err("Diagnostic source container no longer exists"));
+            }
+            DiagnosticAction::CopySourcePath(path) => {
+                return StateApplyDialogAction::CopyDetails(path);
+            }
+        }
+        StateApplyDialogAction::None
     }
 
     fn print_patch_preview_details(&self) {
@@ -7730,6 +7906,7 @@ impl Canvas {
         dialog: StateApplyDialog,
     ) {
         self.project_validation_report = combined.project_validation.clone();
+        self.refresh_problems_overlay();
         self.round_trip_report = Some(combined.round_trip.clone());
         self.round_trip_status = Some(combined.round_trip.summary_text());
         self.round_trip_failure_snapshot = (!matches!(
@@ -7827,6 +8004,7 @@ impl Canvas {
             unexpected_diagnostics: 0,
         });
         self.project_validation_report = Some(report);
+        self.refresh_problems_overlay();
         self.validation_problems_view = ValidationProblemsView::default();
         self.state_apply_dialog = Some(StateApplyDialog::ValidationResults);
         self.refresh_state_information();
@@ -11347,7 +11525,21 @@ fn validation_problem_summary(
     if let Some(id) = diagnostic.state_id {
         context.push(format!("State {id}"));
     }
+    if diagnostic.blocks_save {
+        context.push("Blocks Save".to_owned());
+    }
     format!("{} — {}", context.join(" · "), diagnostic.message)
+}
+
+fn diagnostic_action_label(action: &DiagnosticAction) -> &'static str {
+    match action {
+        DiagnosticAction::GoToProvince(_) => tr("project_validation.go_to_province"),
+        DiagnosticAction::GoToState(_) => tr("project_validation.go_to_state"),
+        DiagnosticAction::GoToLocation(_) => tr("project_validation.go_to_location"),
+        DiagnosticAction::OpenSource(_) => tr("project_validation.open_source_file"),
+        DiagnosticAction::RevealSource(_) => tr("project_validation.reveal_source"),
+        DiagnosticAction::CopySourcePath(_) => tr("project_validation.copy_source_path"),
+    }
 }
 
 fn validation_delta_items(
@@ -11462,9 +11654,10 @@ fn validation_problem_details(
     diagnostic: &ProjectValidationDiagnostic,
 ) -> String {
     format!(
-        "Source: {}\nSeverity: {:?}\nDomain: {:?}\nCode: {}\nMessage: {}\nPath: {}\nProvince: {}\nRelated Provinces: {}\nState: {}\nMap coordinate: {}\nResolved source: {}",
+        "Source: {}\nSeverity: {:?}\nBlocks Save: {}\nDomain: {:?}\nCode: {}\nMessage: {}\nPath: {}\nProvince: {}\nRelated Provinces: {}\nState: {}\nMap coordinate: {}\nResolved source: {}",
         source.label(),
         diagnostic.severity,
+        if diagnostic.blocks_save { "Yes" } else { "No" },
         diagnostic.domain,
         diagnostic.code,
         diagnostic.message,
@@ -11500,54 +11693,6 @@ fn validation_problem_details(
                 source.location
             )
         ),
-    )
-}
-
-fn validation_source_path(
-    diagnostic: &ProjectValidationDiagnostic,
-    project: Option<&Hoi4Project>,
-) -> Option<PathBuf> {
-    let project = project?;
-    let path = diagnostic.path.as_ref()?;
-    let logical_path = if let Ok(relative) = path.strip_prefix(&project.paths.root) {
-        PathBuf::from(relative)
-    } else {
-        let parts = path.components().collect::<Vec<_>>();
-        let index = parts
-            .iter()
-            .position(|part| part.as_os_str().eq_ignore_ascii_case("candidate"))?;
-        parts[index + 1..].iter().collect::<PathBuf>()
-    };
-    let source = project.paths.root.join(logical_path);
-    source.is_file().then_some(source)
-}
-
-fn validation_display_path(
-    diagnostic: &ProjectValidationDiagnostic,
-    project: Option<&Hoi4Project>,
-) -> String {
-    let Some(path) = diagnostic.path.as_ref() else {
-        return String::new();
-    };
-    if let Some(project) = project
-        && let Ok(relative) = path.strip_prefix(&project.paths.root)
-    {
-        return format!("File: {}", relative.display());
-    }
-    let parts = path.components().collect::<Vec<_>>();
-    if let Some(index) = parts
-        .iter()
-        .position(|part| part.as_os_str().eq_ignore_ascii_case("candidate"))
-    {
-        let relative = parts[index + 1..].iter().collect::<PathBuf>();
-        return format!("File: {}", relative.display());
-    }
-    format!(
-        "File: {}",
-        path.file_name().map_or_else(
-            || path.display().to_string(),
-            |name| name.to_string_lossy().into_owned()
-        )
     )
 }
 

@@ -154,6 +154,8 @@ pub struct MapLayerState {
     pub show_state_boundaries: bool,
     /// Resource labels are a presentation layer over the selected base map.
     pub show_resources: bool,
+    /// Read-only markers derived from the latest validation report.
+    pub show_problems: bool,
     pub developer_overlay: Option<DeveloperMapOverlay>,
 }
 
@@ -169,6 +171,7 @@ impl Default for MapLayerState {
             show_province_boundaries: false,
             show_state_boundaries: true,
             show_resources: false,
+            show_problems: false,
             developer_overlay: None,
         }
     }

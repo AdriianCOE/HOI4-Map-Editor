@@ -435,6 +435,9 @@ impl EventHandler for App {
             (Some(canvas), true, Key::C) if mods.shift => canvas.calculate_coastal_provinces(),
             (Some(canvas), true, Key::R) if mods.shift => canvas.calculate_recolor_map(),
             (Some(canvas), true, Key::P) if mods.shift => canvas.display_problems(&mut self.alerts),
+            (Some(canvas), true, Key::O) if mods.shift => {
+                canvas.toggle_problems_overlay(&mut self.alerts)
+            }
             (Some(canvas), true, Key::M) if mods.shift => canvas.tool.cycle_brush_mask(),
             (Some(canvas), true, Key::H) => canvas.camera.reset(),
             (Some(canvas), true, Key::A) => canvas.set_tool_mode(ToolMode::PaintArea),
@@ -519,6 +522,10 @@ impl EventHandler for App {
                 }
                 StateApplyDialogAction::OpenSource(path) => {
                     let result = open_source_with(&path, |path| open_file_default(path));
+                    self.handle_result_none(result);
+                }
+                StateApplyDialogAction::RevealSource(path) => {
+                    let result = reveal_in_file_browser(&path);
                     self.handle_result_none(result);
                 }
                 StateApplyDialogAction::CopyDetails(text) => {

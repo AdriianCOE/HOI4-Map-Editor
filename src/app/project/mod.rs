@@ -9,6 +9,7 @@ mod lasso;
 mod logistics;
 mod patch;
 mod paths;
+mod problems_presentation;
 mod properties;
 mod province_geometry;
 mod reference_index;
@@ -58,6 +59,10 @@ pub use patch::{
     SourceFingerprint, TextPatchOperation, plan_state_patches,
 };
 pub use paths::{ProjectPathError, ProjectPaths};
+pub use problems_presentation::{
+    DiagnosticAction, ProblemsOverlayMarker, ProblemsOverlayModel, build_overlay,
+    diagnostic_actions,
+};
 pub use properties::{
     EditableProvinceData, EditableStateProperties, NamedIntegerValue, PropertyValidationError,
     ProvinceDataDraft, ProvinceDataValidationError, StatePropertyDraft, format_integer_pt_br,
