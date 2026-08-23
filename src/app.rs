@@ -7,6 +7,7 @@ pub mod interface;
 pub mod map;
 pub mod map_layers;
 pub mod political;
+pub(crate) mod presentation;
 pub mod project;
 pub mod resources;
 pub mod state;
@@ -19,16 +20,14 @@ use piston::input::{Key, MouseButton};
 use vecmath::Vector2;
 
 use self::alerts::Alerts;
-use self::canvas::{
-    Canvas, InspectorExternalRequest, ProjectGeneration, StateApplyDialogAction, ToolMode, ViewMode,
-};
+use self::canvas::{Canvas, InspectorExternalRequest, StateApplyDialogAction, ToolMode, ViewMode};
 use self::interface::{ButtonId, Interface, StateActionAvailability, get_interface};
 use self::map::ProvinceSaveMode;
 use self::map_layers::WorkspaceMode;
 use self::project::{
     CompatibilityCode, CompatibilityFinding, Hoi4Project, LassoSelectionMode, MapViewMode,
-    ProjectPathError, ProjectPaths, ProvinceInclusionMode, StateBrushMode, StateFillMode,
-    scan_project,
+    ProjectGeneration, ProjectPathError, ProjectPaths, ProvinceInclusionMode, StateBrushMode,
+    StateFillMode, scan_project,
 };
 use crate::config::{ConfigIssue, FileFingerprint, GlobalConfig, ProjectConfig, SaveConfigError};
 use crate::error::Error;

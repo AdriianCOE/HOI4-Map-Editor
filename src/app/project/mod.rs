@@ -4,6 +4,7 @@ mod compatibility;
 mod compatibility_harness;
 mod diagnostics;
 mod edit;
+mod generation;
 mod indexes;
 mod lasso;
 mod logistics;
@@ -45,6 +46,7 @@ pub use edit::{
     ProvinceRemovalPolicy, StateEditError, StateEditSession, StateEditSummary, StateEditTimings,
     StateRemovalPolicy, WorkingStateLifecycle, WorkingStateOrigin,
 };
+pub(crate) use generation::ProjectGeneration;
 pub use indexes::{StateIndexes, index_state_documents};
 pub use lasso::{
     LassoCandidateSet, LassoSelectionMode, ProvinceInclusionMode, StateLassoError, StateLassoPhase,
@@ -56,7 +58,7 @@ pub use logistics::{
 };
 pub use map_presentation::{
     MapPresentationModel, StatePresentation, VictoryPointMarker, build_map_presentation,
-    category_color, checked_export_dimensions, manpower_color, paint_victory_points, save_png,
+    category_color, manpower_color, paint_victory_points,
 };
 pub use patch::{
     PatchDiagnostic, PatchDiagnosticKind, PatchPlanSummary, PatchPlanTimings, PatchSafety,

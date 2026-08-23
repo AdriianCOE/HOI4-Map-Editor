@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use image::{ImageFormat, Rgba, RgbaImage, imageops::FilterType};
+use image::{Rgba, RgbaImage};
 
 use crate::app::map::Color;
 use crate::app::project::SourceGeneration;
@@ -110,39 +110,6 @@ pub fn manpower_color(manpower: Option<u64>, maximum: u64) -> Color {
     }
 }
 
-pub fn checked_export_dimensions(width: u32, height: u32, scale: u32) -> Result<[u32; 2], String> {
-    if !matches!(scale, 1 | 2 | 4) {
-        return Err("Export scale must be 1x, 2x, or 4x".to_owned());
-    }
-    let width = width
-        .checked_mul(scale)
-        .ok_or_else(|| "Export width overflows supported dimensions".to_owned())?;
-    let height = height
-        .checked_mul(scale)
-        .ok_or_else(|| "Export height overflows supported dimensions".to_owned())?;
-    let bytes = u64::from(width)
-        .checked_mul(u64::from(height))
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| "Export image size overflows supported memory".to_owned())?;
-    const MAX_EXPORT_BYTES: u64 = 512 * 1024 * 1024;
-    if bytes > MAX_EXPORT_BYTES {
-        return Err("Export image is too large (limit: 512 MiB of RGBA pixels)".to_owned());
-    }
-    Ok([width, height])
-}
-
-pub fn save_png(path: &std::path::Path, image: &RgbaImage, scale: u32) -> Result<(), String> {
-    let [width, height] = checked_export_dimensions(image.width(), image.height(), scale)?;
-    let output = if scale == 1 {
-        image.clone()
-    } else {
-        image::imageops::resize(image, width, height, FilterType::Nearest)
-    };
-    output
-        .save_with_format(path, ImageFormat::Png)
-        .map_err(|error| format!("Could not write PNG: {error}"))
-}
-
 pub fn paint_victory_points(image: &mut RgbaImage, markers: &[VictoryPointMarker]) {
     for marker in markers {
         for y in marker.location[1].saturating_sub(2)..=marker.location[1].saturating_add(2) {
@@ -167,8 +134,6 @@ fn blend(low: Color, high: Color, amount: f64) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use image::GenericImageView;
-
     use super::*;
     use crate::app::state::VictoryPoint;
 
@@ -241,40 +206,5 @@ mod tests {
             });
         assert!(first.states[&10].demilitarized_zone);
         assert!(!second.states.contains_key(&10));
-    }
-
-    #[test]
-    fn png_export_scales_and_rejects_unsafe_dimensions() {
-        assert_eq!(checked_export_dimensions(3, 2, 1).unwrap(), [3, 2]);
-        assert_eq!(checked_export_dimensions(3, 2, 2).unwrap(), [6, 4]);
-        assert_eq!(checked_export_dimensions(3, 2, 4).unwrap(), [12, 8]);
-        assert_eq!(checked_export_dimensions(130, 70, 1).unwrap(), [130, 70]);
-        assert!(checked_export_dimensions(u32::MAX, u32::MAX, 4).is_err());
-    }
-
-    #[test]
-    fn png_export_writes_a_decodable_scaled_composition() {
-        let mut image = RgbaImage::from_pixel(3, 2, Rgba([10, 20, 30, 255]));
-        paint_victory_points(
-            &mut image,
-            &[VictoryPointMarker {
-                province_id: 1,
-                value: 5,
-                location: [1, 1],
-            }],
-        );
-        let path = std::env::temp_dir().join(format!(
-            "hoi4-map-presentation-{}-{}.png",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        save_png(&path, &image, 4).unwrap();
-        let decoded = image::open(&path).unwrap();
-        assert_eq!(decoded.dimensions(), (12, 8));
-        assert_eq!(&std::fs::read(&path).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
-        std::fs::remove_file(path).unwrap();
     }
 }
