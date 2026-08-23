@@ -97,7 +97,13 @@ pub enum ProjectDiagnosticKind {
     AdjacencyToProvinceMissing,
     AdjacencyThroughProvinceMissing,
     AdjacencyCoordinateOutOfBounds,
+    RiverImageFormatUnsupported,
     RiverDimensionMismatch,
+    RiverNoSource,
+    RiverMultipleSources,
+    RiverNoFlowEndpoint,
+    RiverInvalidFlowMarker,
+    RiverPossibleLoop,
     CandidateMismatch,
     ExternalChange,
     TransactionFailure,
@@ -157,7 +163,13 @@ impl ProjectDiagnosticKind {
             Self::AdjacencyToProvinceMissing => "ADJACENCY_TO_PROVINCE_MISSING",
             Self::AdjacencyThroughProvinceMissing => "ADJACENCY_THROUGH_PROVINCE_MISSING",
             Self::AdjacencyCoordinateOutOfBounds => "ADJACENCY_COORDINATE_OUT_OF_BOUNDS",
+            Self::RiverImageFormatUnsupported => "RIVER_IMAGE_FORMAT_UNSUPPORTED",
             Self::RiverDimensionMismatch => "RIVER_DIMENSION_MISMATCH",
+            Self::RiverNoSource => "RIVER_NO_SOURCE",
+            Self::RiverMultipleSources => "RIVER_MULTIPLE_SOURCES",
+            Self::RiverNoFlowEndpoint => "RIVER_NO_FLOW_ENDPOINT",
+            Self::RiverInvalidFlowMarker => "RIVER_INVALID_FLOW_MARKER",
+            Self::RiverPossibleLoop => "RIVER_POSSIBLE_LOOP",
             Self::CandidateMismatch => "project.candidate.mismatch",
             Self::ExternalChange => "transaction.external_change",
             Self::TransactionFailure => "transaction.failure",
@@ -180,7 +192,13 @@ impl ProjectDiagnosticKind {
             Self::MapXCrossing
             | Self::ProvinceOnePixel
             | Self::ProvinceDisconnectedComponents
+            | Self::RiverImageFormatUnsupported
             | Self::RiverDimensionMismatch => DiagnosticDomain::ProvinceMap,
+            Self::RiverNoSource
+            | Self::RiverMultipleSources
+            | Self::RiverNoFlowEndpoint
+            | Self::RiverInvalidFlowMarker
+            | Self::RiverPossibleLoop => DiagnosticDomain::ProvinceMap,
             Self::TerrainCatalogUnavailable | Self::ContinentCatalogUnavailable => {
                 DiagnosticDomain::Project
             }

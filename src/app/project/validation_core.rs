@@ -7,6 +7,7 @@ use crate::app::state::{PdxEntry, PdxValue, TextSpan, parse_text};
 
 use super::diagnostics::DiagnosticDomain;
 use super::province_geometry::ProvinceGeometryAnalysis;
+use super::river_topology::{IndexedRiverBitmap, RiverTopologyAnalysis};
 use super::{
     DiagnosticSeverity, Hoi4Project, ProjectDiagnostic, ProjectDiagnosticKind, ResolvedSource,
 };
@@ -94,7 +95,7 @@ pub fn validate_project(
     validate_continent_catalog(bundle, project, &mut diagnostics);
     validate_states(bundle, project, &mut diagnostics);
     validate_adjacencies(bundle, project, &mut diagnostics);
-    validate_river_dimensions(bundle, project, &mut diagnostics);
+    validate_river_topology(bundle, project, &mut diagnostics);
     sort_and_dedup(&mut diagnostics);
 
     let summary = summarize(&diagnostics);
@@ -1106,35 +1107,142 @@ fn validate_adjacencies(
     }
 }
 
-fn validate_river_dimensions(
+fn validate_river_topology(
     bundle: &Bundle,
     project: &Hoi4Project,
     diagnostics: &mut Vec<ProjectValidationDiagnostic>,
 ) {
-    let Some(rivers) = bundle.map.get_rivers_overlay() else {
+    let Some(source) = project.paths.sources.source_files().rivers_bmp.clone() else {
         return;
     };
+    let image = match project.paths.sources.read_resolved(&source) {
+        Ok(bytes) => match IndexedRiverBitmap::parse(&bytes) {
+            Ok(image) => image,
+            Err(detail) => {
+                diagnostics.push(
+                    ProjectValidationDiagnostic::custom(
+                        ProjectDiagnosticKind::RiverImageFormatUnsupported,
+                        DiagnosticSeverity::Error,
+                        None,
+                        format!("rivers bitmap format is unsupported: {detail}"),
+                    )
+                    .with_domain(ProjectValidationDomain::Province)
+                    .with_source(source)
+                    .with_blocks_save(false),
+                );
+                return;
+            }
+        },
+        Err(error) => {
+            diagnostics.push(
+                ProjectValidationDiagnostic::custom(
+                    ProjectDiagnosticKind::RiverImageFormatUnsupported,
+                    DiagnosticSeverity::Error,
+                    None,
+                    format!("rivers bitmap cannot be read: {error}"),
+                )
+                .with_domain(ProjectValidationDomain::Province)
+                .with_source(source)
+                .with_blocks_save(false),
+            );
+            return;
+        }
+    };
     let [width, height] = bundle.map.dimensions();
-    if rivers.dimensions() == (width, height) {
+    if (image.width, image.height) != (width, height) {
+        diagnostics.push(
+            ProjectValidationDiagnostic::custom(
+                ProjectDiagnosticKind::RiverDimensionMismatch,
+                DiagnosticSeverity::Error,
+                None,
+                format!(
+                    "rivers bitmap dimensions {}x{} do not match provinces bitmap dimensions {width}x{height}",
+                    image.width, image.height
+                ),
+            )
+            .with_domain(ProjectValidationDomain::Province)
+            .with_source(source)
+            .with_blocks_save(false),
+        );
         return;
     }
-    let diagnostic = ProjectValidationDiagnostic::custom(
-        ProjectDiagnosticKind::RiverDimensionMismatch,
-        DiagnosticSeverity::Error,
-        None,
-        format!(
-            "rivers bitmap dimensions {}x{} do not match provinces bitmap dimensions {width}x{height}",
-            rivers.width(),
-            rivers.height()
-        ),
-    )
-    .with_domain(ProjectValidationDomain::Province)
-    .with_blocks_save(false);
-    let source = project.paths.sources.source_files().rivers_bmp.clone();
-    diagnostics.push(match source {
-        Some(source) => diagnostic.with_source(source),
-        None => diagnostic,
-    });
+
+    for component in RiverTopologyAnalysis::analyze(&image).components {
+        let component_label = component.id + 1;
+        if component.valid_sources.is_empty() {
+            diagnostics.push(river_diagnostic(
+                ProjectDiagnosticKind::RiverNoSource,
+                DiagnosticSeverity::Error,
+                source.clone(),
+                component.representative_location,
+                format!("river component {component_label} has no source marker at an endpoint"),
+            ));
+        } else if component.valid_sources.len() > 1 {
+            let locations = component
+                .valid_sources
+                .iter()
+                .map(|[x, y]| format!("{x},{y}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            diagnostics.push(river_diagnostic(
+                ProjectDiagnosticKind::RiverMultipleSources,
+                DiagnosticSeverity::Error,
+                source.clone(),
+                component.valid_sources[0],
+                format!(
+                    "river component {component_label} has multiple source markers at {locations}"
+                ),
+            ));
+        }
+        if component.valid_flow_markers.is_empty() {
+            diagnostics.push(
+                river_diagnostic(
+                    ProjectDiagnosticKind::RiverNoFlowEndpoint,
+                    DiagnosticSeverity::Error,
+                    source.clone(),
+                    component.representative_location,
+                    format!("river component {component_label} has no flow-in or flow-out marker connected to river body"),
+                ),
+            );
+        }
+        for location in component.invalid_flow_markers {
+            diagnostics.push(
+                river_diagnostic(
+                    ProjectDiagnosticKind::RiverInvalidFlowMarker,
+                    DiagnosticSeverity::Error,
+                    source.clone(),
+                    location,
+                    format!(
+                        "river component {component_label} has a flow marker at {},{} not connected to river body",
+                        location[0], location[1]
+                    ),
+                ),
+            );
+        }
+        if component.edge_count >= component.pixel_count {
+            diagnostics.push(river_diagnostic(
+                ProjectDiagnosticKind::RiverPossibleLoop,
+                DiagnosticSeverity::Warning,
+                source.clone(),
+                component.representative_location,
+                format!("river component {component_label} contains a possible loop"),
+            ));
+        }
+    }
+}
+
+fn river_diagnostic(
+    kind: ProjectDiagnosticKind,
+    severity: DiagnosticSeverity,
+    source: ResolvedSource,
+    location: [u32; 2],
+    message: String,
+) -> ProjectValidationDiagnostic {
+    ProjectValidationDiagnostic::custom(kind, severity, None, message)
+        .with_domain(ProjectValidationDomain::Province)
+        .with_map_location(location)
+        .with_source(source)
+        .with_blocks_save(false)
 }
 
 fn province_lookup(bundle: &Bundle) -> BTreeMap<u32, (bool, ProvinceKind, bool)> {
@@ -1377,7 +1485,7 @@ mod tests {
 
     use crate::app::format::{Adjacency, AdjacencyKind, Definition, DefinitionKind};
     use crate::app::map::{Bundle, construct_map_data_for_sparse_tests, write_rgb_bmp_image};
-    use crate::app::project::ProjectPaths;
+    use crate::app::project::{ProjectPaths, SourceLookup};
     use crate::app::state::{StateData, StateDocument, StateHistory, VictoryPoint, parse_text};
     use crate::config::Config;
     use crate::util::files::Location;
@@ -1519,6 +1627,58 @@ mod tests {
         .unwrap()
     }
 
+    fn write_indexed_river_bmp(path: &Path, width: u32, height: u32, pixels: &[u8]) {
+        assert_eq!(pixels.len(), width as usize * height as usize);
+        let stride = (width as usize).div_ceil(4) * 4;
+        let pixel_offset = 14 + 40 + 256 * 4;
+        let mut bytes = vec![0; pixel_offset + stride * height as usize];
+        let file_length = bytes.len() as u32;
+        bytes[0..2].copy_from_slice(b"BM");
+        bytes[2..6].copy_from_slice(&file_length.to_le_bytes());
+        bytes[10..14].copy_from_slice(&(pixel_offset as u32).to_le_bytes());
+        bytes[14..18].copy_from_slice(&40u32.to_le_bytes());
+        bytes[18..22].copy_from_slice(&(width as i32).to_le_bytes());
+        bytes[22..26].copy_from_slice(&(height as i32).to_le_bytes());
+        bytes[26..28].copy_from_slice(&1u16.to_le_bytes());
+        bytes[28..30].copy_from_slice(&8u16.to_le_bytes());
+        for (index, entry) in bytes[54..pixel_offset].chunks_exact_mut(4).enumerate() {
+            let shade = index as u8;
+            entry.copy_from_slice(&[shade, shade, shade, 0]);
+        }
+        for map_y in 0..height as usize {
+            let file_y = height as usize - 1 - map_y;
+            let start = pixel_offset + file_y * stride;
+            bytes[start..start + width as usize]
+                .copy_from_slice(&pixels[map_y * width as usize..(map_y + 1) * width as usize]);
+        }
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn river_fixture(name: &str, width: u32, height: u32, rivers: &[u8]) -> TempProject {
+        let temp = TempProject::new(
+            name,
+            "0;0;0;0;land;false;unknown;0\n1;1;0;0;land;false;plains;1\n",
+            &[[1, 0, 0]],
+        );
+        let provinces = image::RgbImage::from_pixel(width, height, image::Rgb([1, 0, 0]));
+        let mut province_bytes = Vec::new();
+        write_rgb_bmp_image(&mut province_bytes, &provinces).unwrap();
+        fs::write(temp.0.join("map/provinces.bmp"), province_bytes).unwrap();
+        write_indexed_river_bmp(&temp.0.join("map/rivers.bmp"), width, height, rivers);
+        temp
+    }
+
+    fn river_bundle(temp: &TempProject) -> Bundle {
+        Bundle::load_project(
+            &temp.paths(),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap()
+    }
+
     fn definitions(colors: &[[u8; 3]]) -> Vec<Definition> {
         colors
             .iter()
@@ -1545,6 +1705,293 @@ mod tests {
         assert_eq!(report.total, 0);
         assert!(!report.blocks_save);
         assert!(!report.requires_warning_review);
+    }
+
+    #[test]
+    fn valid_indexed_river_has_no_topology_diagnostic() {
+        let temp = river_fixture("river-valid", 3, 1, &[0, 3, 2]);
+        let report = validate_project(
+            &river_bundle(&temp),
+            &project(&temp, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.starts_with("RIVER_"))
+        );
+    }
+
+    #[test]
+    fn river_without_source_has_coordinate_provenance_and_does_not_block_save() {
+        let temp = river_fixture("river-no-source", 2, 1, &[3, 2]);
+        let report = validate_project(
+            &river_bundle(&temp),
+            &project(&temp, Vec::new()),
+            ProjectValidationTarget::PendingChanges,
+        );
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "RIVER_NO_SOURCE")
+            .expect("no-source diagnostic");
+
+        assert_eq!(diagnostic.map_location, Some([0, 0]));
+        assert_eq!(
+            diagnostic
+                .source
+                .as_ref()
+                .unwrap()
+                .logical_path
+                .to_string_lossy()
+                .replace('\\', "/"),
+            "map/rivers.bmp"
+        );
+        assert!(!diagnostic.blocks_save);
+        assert!(!report.blocks_save);
+    }
+
+    #[test]
+    fn river_topology_reports_multiple_sources_missing_flow_and_invalid_marker() {
+        let multiple = river_fixture(
+            "river-multiple-sources",
+            3,
+            3,
+            &[0, 255, 0, 3, 3, 3, 255, 2, 255],
+        );
+        let multiple_paths = multiple.paths();
+        let multiple_source = multiple_paths
+            .sources
+            .source_files()
+            .rivers_bmp
+            .as_ref()
+            .unwrap();
+        let multiple_image = IndexedRiverBitmap::parse(
+            &multiple_paths
+                .sources
+                .read_resolved(multiple_source)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            RiverTopologyAnalysis::analyze(&multiple_image).components[0]
+                .valid_sources
+                .len(),
+            2
+        );
+        let multiple_report = validate_project(
+            &river_bundle(&multiple),
+            &project(&multiple, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        let source = multiple_report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "RIVER_MULTIPLE_SOURCES")
+            .expect("multiple-source diagnostic");
+        assert_eq!(source.map_location, Some([0, 0]));
+
+        let no_endpoint = river_fixture("river-no-endpoint", 2, 1, &[0, 3]);
+        let endpoint_report = validate_project(
+            &river_bundle(&no_endpoint),
+            &project(&no_endpoint, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(
+            endpoint_report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "RIVER_NO_FLOW_ENDPOINT")
+        );
+
+        let invalid = river_fixture("river-invalid-marker", 4, 1, &[0, 3, 2, 1]);
+        let invalid_report = validate_project(
+            &river_bundle(&invalid),
+            &project(&invalid, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(invalid_report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "RIVER_INVALID_FLOW_MARKER"
+                && diagnostic.map_location == Some([3, 0])
+        }));
+    }
+
+    #[test]
+    fn river_loop_is_warning_and_branching_tree_is_not_a_false_positive() {
+        let looped = river_fixture("river-loop", 4, 2, &[0, 3, 3, 255, 255, 3, 3, 2]);
+        let loop_report = validate_project(
+            &river_bundle(&looped),
+            &project(&looped, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        let loop_diagnostic = loop_report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "RIVER_POSSIBLE_LOOP")
+            .expect("loop diagnostic");
+        assert_eq!(loop_diagnostic.severity, DiagnosticSeverity::Warning);
+        assert!(!loop_diagnostic.blocks_save);
+
+        let branch = river_fixture("river-branch", 3, 3, &[255, 0, 255, 2, 3, 2, 255, 3, 255]);
+        let branch_report = validate_project(
+            &river_bundle(&branch),
+            &project(&branch, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(
+            !branch_report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "RIVER_POSSIBLE_LOOP")
+        );
+    }
+
+    #[test]
+    fn river_format_and_dimensions_are_root_diagnostics_without_topology_cascades() {
+        let format = river_fixture("river-format", 2, 1, &[0, 3]);
+        let unsupported = image::RgbImage::from_pixel(2, 1, image::Rgb([0, 255, 0]));
+        let mut bytes = Vec::new();
+        write_rgb_bmp_image(&mut bytes, &unsupported).unwrap();
+        fs::write(format.0.join("map/rivers.bmp"), bytes).unwrap();
+        let format_report = validate_project(
+            &river_bundle(&format),
+            &project(&format, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert_eq!(
+            format_report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code.starts_with("RIVER_"))
+                .count(),
+            1
+        );
+        assert!(
+            format_report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "RIVER_IMAGE_FORMAT_UNSUPPORTED")
+        );
+
+        let dimensions = river_fixture("river-dimensions", 2, 1, &[0, 3]);
+        write_indexed_river_bmp(&dimensions.0.join("map/rivers.bmp"), 1, 1, &[0]);
+        let dimension_report = validate_project(
+            &river_bundle(&dimensions),
+            &project(&dimensions, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert_eq!(
+            dimension_report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code.starts_with("RIVER_"))
+                .count(),
+            1
+        );
+        assert!(
+            dimension_report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "RIVER_DIMENSION_MISMATCH")
+        );
+    }
+
+    #[test]
+    fn custom_default_map_river_path_and_current_project_ownership_are_respected() {
+        let custom = river_fixture("river-custom-path", 3, 1, &[255, 255, 255]);
+        fs::write(
+            custom.0.join("map/default.map"),
+            "rivers = custom_rivers.bmp",
+        )
+        .unwrap();
+        fs::remove_file(custom.0.join("map/rivers.bmp")).unwrap();
+        write_indexed_river_bmp(&custom.0.join("map/custom_rivers.bmp"), 3, 1, &[0, 3, 2]);
+        let custom_report = validate_project(
+            &river_bundle(&custom),
+            &project(&custom, Vec::new()),
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(
+            !custom_report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.starts_with("RIVER_"))
+        );
+
+        let owned = valid_fixture("river-replace-path");
+        fs::write(owned.0.join("descriptor.mod"), "replace_path = \"map\"").unwrap();
+        let base = owned.0.with_file_name(format!(
+            "hoi4-validation-core-river-base-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("map")).unwrap();
+        write_indexed_river_bmp(&base.join("map/rivers.bmp"), 1, 1, &[0]);
+        let mut owned_project = project(&owned, Vec::new());
+        owned_project
+            .paths
+            .set_validated_base_game_root(Some(base.clone()));
+        assert!(matches!(
+            owned_project
+                .paths
+                .sources
+                .resolve("map/rivers.bmp")
+                .unwrap(),
+            SourceLookup::BlockedByReplacePath { .. }
+        ));
+        let owned_report = validate_project(
+            &owned.bundle(),
+            &owned_project,
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(
+            !owned_report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.starts_with("RIVER_"))
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn river_diagnostics_do_not_cross_project_generations() {
+        let project_a = river_fixture("river-project-a", 2, 1, &[3, 2]);
+        let project_b = river_fixture("river-project-b", 3, 1, &[0, 3, 2]);
+        let mut loaded_a = project(&project_a, Vec::new());
+        loaded_a.paths.bind_project_generation(71);
+        let report_a = validate_project(
+            &river_bundle(&project_a),
+            &loaded_a,
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(
+            report_a
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "RIVER_NO_SOURCE")
+        );
+
+        let mut loaded_b = project(&project_b, Vec::new());
+        loaded_b.paths.bind_project_generation(72);
+        let report_b = validate_project(
+            &river_bundle(&project_b),
+            &loaded_b,
+            ProjectValidationTarget::CurrentProject,
+        );
+        assert!(
+            !report_b
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.starts_with("RIVER_"))
+        );
+        assert!(report_b.diagnostics.iter().all(|diagnostic| {
+            diagnostic
+                .source
+                .as_ref()
+                .is_none_or(|source| source.project_generation.value() == 72)
+        }));
     }
 
     #[test]

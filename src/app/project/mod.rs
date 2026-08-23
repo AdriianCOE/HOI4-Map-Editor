@@ -9,6 +9,7 @@ mod patch;
 mod paths;
 mod properties;
 mod province_geometry;
+mod river_topology;
 mod save;
 mod save_plan;
 mod sources;
