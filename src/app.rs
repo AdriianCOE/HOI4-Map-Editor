@@ -11,6 +11,7 @@ pub(crate) mod presentation;
 pub(crate) mod problems_ui;
 pub mod project;
 pub mod resources;
+pub(crate) mod save_ui;
 pub mod state;
 
 use glutin::window::CursorIcon;

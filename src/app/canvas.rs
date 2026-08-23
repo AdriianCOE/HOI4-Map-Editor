@@ -35,7 +35,7 @@ use super::political::{
 use super::presentation::{ExportOverlays, PresentationRuntime, compose_export_overlays, save_png};
 use super::problems_ui::{
     ProblemsRequest, ProjectProblemsController, ValidationSourceFilter, problems_request_label,
-    project_validation_blockers, validation_problem_details, validation_problem_summary,
+    validation_problem_details, validation_problem_summary,
 };
 use super::project::{
     BrushProvinceClassification, BuildingScope, CombinedRoundTripValidationReport,
@@ -59,6 +59,10 @@ use super::project::{
 use super::resources::{
     ResourceIconResolver, ResourceMapState, prepare_resource_labels_with_index,
     resource_label_visible,
+};
+use super::save_ui::{
+    ProjectSavePresentationSummary, SaveReviewModel, SaveUiController, SaveUiRequest,
+    integrity_problem_presentation, progress_presentation, result_presentation,
 };
 use super::{FontGlyphCache, colors};
 use crate::config::{Config, ImageOverlayProjectSettings, ProjectConfig};
@@ -157,6 +161,7 @@ pub struct Canvas {
     project_save_plan: Option<ProjectSavePlan>,
     last_project_save_summary: Option<ProjectSavePresentationSummary>,
     project_save_validation: Option<CombinedRoundTripValidationReport>,
+    save_ui: SaveUiController,
     project_validation_report: Option<ProjectValidationReport>,
     diagnostic_navigation_marker: Option<[u32; 2]>,
     problems_ui: ProjectProblemsController,
@@ -308,44 +313,6 @@ pub enum StateApplyDialogAction {
     ConfirmProvinceReferenceRemoval,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ProjectSavePresentationSummary {
-    province_files: usize,
-    state_files: usize,
-    coastal_flags_recalculated: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProjectSaveReviewPrimaryAction {
-    ConfirmSave,
-    ViewBlockingProblems,
-    ViewIntegrityProblem,
-}
-
-fn project_save_review_primary_action(
-    validation_blocked: bool,
-    round_trip_failed: bool,
-) -> ProjectSaveReviewPrimaryAction {
-    if validation_blocked {
-        ProjectSaveReviewPrimaryAction::ViewBlockingProblems
-    } else if round_trip_failed {
-        ProjectSaveReviewPrimaryAction::ViewIntegrityProblem
-    } else {
-        ProjectSaveReviewPrimaryAction::ConfirmSave
-    }
-}
-
-impl ProjectSavePresentationSummary {
-    fn from_plan(plan: &ProjectSavePlan) -> Self {
-        let dirty = plan.dirty();
-        Self {
-            province_files: dirty.province_files,
-            state_files: dirty.state_files,
-            coastal_flags_recalculated: plan.coastal_flags_recalculated(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct ProvinceRemovalDraft {
     province_id: u32,
@@ -467,6 +434,7 @@ impl Canvas {
         self.presentation.on_project_replaced(generation);
         self.diagnostic_navigation_marker = None;
         self.problems_ui.reset();
+        self.save_ui.reset_for_generation(generation);
     }
 
     pub fn load(location: Location) -> Result<Canvas, Error> {
@@ -716,6 +684,7 @@ impl Canvas {
             project_save_plan: None,
             last_project_save_summary: None,
             project_save_validation: None,
+            save_ui: SaveUiController::default(),
             project_validation_report: None,
             diagnostic_navigation_marker: None,
             problems_ui: ProjectProblemsController::default(),
@@ -3410,91 +3379,27 @@ impl Canvas {
                 )
             }
             StateApplyDialog::ProjectSaveReview => {
-                let report = self.project_validation_report.as_ref();
-                let baseline = report.and_then(|report| report.baseline_summary.as_ref());
-                let plan = self.project_save_plan.as_ref();
-                let dirty = plan.map(ProjectSavePlan::dirty).unwrap_or_default();
-                let files = plan.map_or(0, |plan| plan.patch_plan().files_len());
-                let coastal = plan.map_or(0, ProjectSavePlan::coastal_flags_recalculated);
-                let validation_blocked = report.is_some_and(|report| report.delta.blocks_save());
-                let round_trip_failed = !matches!(
-                    self.project_save_round_trip_status(),
-                    Some(RoundTripStatus::Passed | RoundTripStatus::PassedWithReview)
-                );
-                let blocked = validation_blocked || round_trip_failed;
-                let blocking = project_validation_blockers(report);
-                let mut lines = vec![
-                    tr("project_validation.changes").to_owned(),
-                    tr_args("project_validation.map_provinces_files", &[("count", &dirty.province_files.to_string())]),
-                    tr_args("project_validation.states_files", &[("count", &dirty.state_files.to_string())]),
-                    if coastal != 0 {
-                        tr_args("project_validation.automatic_coastal", &[("count", &coastal.to_string())])
-                    } else {
-                        String::new()
-                    },
-                    tr_args("project_validation.files_will_update", &[("count", &files.to_string())]),
-                    tr("project_validation.validation").to_owned(),
-                ];
-                if blocked {
-                    if !blocking.is_empty() {
-                        lines.push(tr_args(
-                            "project_validation.blocking_problems_count",
-                            &[("count", &blocking.len().to_string())],
-                        ));
-                        lines.extend(blocking.iter().take(3).map(|(source, diagnostic)| {
-                            validation_problem_summary(source, diagnostic)
-                        }));
-                    } else if round_trip_failed {
-                        lines.push("Round-trip verification failed.".to_owned());
-                        lines.push(
-                            self.active_round_trip_failure_snapshot().map_or_else(
-                                || tr("project_validation.round_trip_save_blocked").to_owned(),
-                                |snapshot| snapshot.summary.clone(),
-                            ),
-                        );
-                    }
-                } else {
-                    lines.push(tr("project_validation.no_new_blockers").to_owned());
-                }
-                lines.push(if let Some(baseline) = baseline {
-                    tr_args("project_validation.existing_project_issues", &[
-                        ("errors", &baseline.errors.to_string()),
-                        ("warnings", &baseline.warnings.to_string()),
-                    ])
-                } else {
-                    tr("project_validation.current_project_issues_unclassified").to_owned()
-                });
+                let model = self.project_save_review_model();
+                let presentation = model.presentation();
                 (
-                    if blocked {
-                        tr("project_validation.save_blocked")
-                    } else {
-                        tr("project_validation.ready_to_save")
-                    },
-                    if validation_blocked {
-                        tr("project_validation.view_blocking_problems")
-                    } else if round_trip_failed {
-                        "View Integrity Problem"
-                    } else {
-                        tr("workspace.save_project")
-                    },
-                    if blocked { tr("project_validation.view_existing_issues") } else { tr("project_validation.view_problems") },
-                    tr("project_validation.close"),
-                    lines,
+                    presentation.title,
+                    presentation.primary,
+                    presentation.secondary,
+                    presentation.close,
+                    presentation.lines,
                 )
             }
             StateApplyDialog::IntegrityProblem => {
-                let detail = self
-                    .active_round_trip_failure_snapshot()
-                    .map_or_else(
-                        || "Round-trip verification failed before a detailed report could be retained. Prepare Save Project again to capture a fresh report.".to_owned(),
-                        |snapshot| snapshot.details.clone(),
-                    );
+                let presentation = integrity_problem_presentation(
+                    self.active_round_trip_failure_snapshot()
+                        .map(|snapshot| snapshot.details.as_str()),
+                );
                 (
-                    "ROUND-TRIP INTEGRITY PROBLEM",
-                    "Close",
-                    "Copy Details",
-                    "",
-                    detail.lines().map(str::to_owned).collect(),
+                    presentation.title,
+                    presentation.primary,
+                    presentation.secondary,
+                    presentation.close,
+                    presentation.lines,
                 )
             }
             StateApplyDialog::Blocked => (
@@ -3512,39 +3417,22 @@ impl Canvas {
                 ],
             ),
             StateApplyDialog::Progress => {
-                let validation_running = self.round_trip_task.is_some();
                 let status = self
                     .state_save_status
                     .as_ref()
                     .filter(|_| self.state_save_task.is_some())
-                    .or(self.round_trip_status.as_ref())
-                    .cloned()
-                    .unwrap_or_else(|| "Preparing...".to_owned());
+                    .or(self.round_trip_status.as_ref());
+                let presentation = progress_presentation(
+                    self.round_trip_task.is_some(),
+                    self.state_save_task.is_some(),
+                    status.map(String::as_str),
+                );
                 (
-                    if validation_running {
-                        "VALIDATING CHANGES"
-                    } else {
-                        "APPLYING CHANGES"
-                    },
-                    "Cancel Safely",
-                    "View Details",
-                    "",
-                    vec![
-                        "[x] Preparing patch".to_owned(),
-                        "[x] Checking current files".to_owned(),
-                        if validation_running {
-                            "[>] Validating temporary copy".to_owned()
-                        } else {
-                            "[x] Validating temporary copy".to_owned()
-                        },
-                        if self.state_save_task.is_some() {
-                            "[>] Backup, apply, reload and verification".to_owned()
-                        } else {
-                            "[ ] Backup, apply, reload and verification".to_owned()
-                        },
-                        String::new(),
-                        status,
-                    ],
+                    presentation.title,
+                    presentation.primary,
+                    presentation.secondary,
+                    presentation.close,
+                    presentation.lines,
                 )
             }
             StateApplyDialog::ValidationResults => {
@@ -3643,90 +3531,18 @@ impl Canvas {
                 )
             }
             StateApplyDialog::Result => {
-                let project_summary = self.last_project_save_summary;
-                let (title, lines) = if let Some(report) = self.state_save_report.as_ref() {
-                    if report.outcome == StateSaveOutcome::Completed {
-                        let mut lines = vec![tr("project_validation.changes").to_owned()];
-                        if let Some(summary) = project_summary {
-                            if summary.province_files != 0 {
-                                lines.push(tr_args(
-                                    "project_validation.map_provinces_files",
-                                    &[("count", &summary.province_files.to_string())],
-                                ));
-                            }
-                            if summary.state_files != 0 {
-                                lines.push(tr_args(
-                                    "project_validation.states_files",
-                                    &[("count", &summary.state_files.to_string())],
-                                ));
-                            }
-                            if summary.coastal_flags_recalculated != 0 {
-                                lines.push(tr_args(
-                                    "project_validation.coastal_flags_recalculated",
-                                    &[(
-                                        "count",
-                                        &summary.coastal_flags_recalculated.to_string(),
-                                    )],
-                                ));
-                            }
-                        }
-                        lines.extend([
-                            tr_args(
-                                "project_validation.files_updated",
-                                &[ (
-                                    "count",
-                                    &(report.modified_files
-                                        + report.created_files
-                                        + report.removed_files)
-                                        .to_string(),
-                                ) ],
-                            ),
-                            tr("project_validation.safety").to_owned(),
-                            tr("project_validation.validation_passed").to_owned(),
-                            if report.backup_path.is_some() {
-                                tr("project_validation.backup_created").to_owned()
-                            } else {
-                                tr("project_validation.backup_status_unavailable").to_owned()
-                            },
-                            tr("project_validation.round_trip_verified").to_owned(),
-                        ]);
-                        (
-                            tr("project_validation.project_saved"),
-                            lines,
-                        )
-                    } else if report.outcome == StateSaveOutcome::RolledBack {
-                        (
-                            tr("project_validation.save_failed_restored"),
-                            vec![
-                                report.error.clone().unwrap_or_else(|| {
-                                    tr("project_validation.commit_failure").to_owned()
-                                }),
-                                tr("project_validation.original_files_restored").to_owned(),
-                                tr("project_validation.no_partial_changes").to_owned(),
-                            ],
-                        )
-                    } else {
-                        (
-                            tr("project_validation.save_blocked"),
-                            vec![
-                                report
-                                    .error
-                                    .clone()
-                                    .unwrap_or_else(|| report.state.label().to_owned()),
-                                tr("project_validation.no_changes_committed").to_owned(),
-                            ],
-                        )
-                    }
-                } else {
-                    (
-                        tr("project_validation.validation_result"),
-                        vec![self
-                            .round_trip_status
-                            .clone()
-                            .unwrap_or_else(|| tr("project_validation.validation_incomplete").to_owned())],
-                    )
-                };
-                (title, "Done", "View Report", "Close", lines)
+                let presentation = result_presentation(
+                    self.state_save_report.as_ref(),
+                    self.last_project_save_summary,
+                    self.round_trip_status.as_deref(),
+                );
+                (
+                    presentation.title,
+                    presentation.primary,
+                    presentation.secondary,
+                    presentation.close,
+                    presentation.lines,
+                )
             }
         };
 
@@ -7168,6 +6984,16 @@ impl Canvas {
             .map(|validation| validation.round_trip.status)
     }
 
+    fn project_save_review_model(&self) -> SaveReviewModel {
+        SaveReviewModel::from_engine(
+            self.project_save_plan.as_ref(),
+            self.project_validation_report.as_ref(),
+            self.project_save_round_trip_status(),
+            self.active_round_trip_failure_snapshot()
+                .map(|snapshot| snapshot.summary.as_str()),
+        )
+    }
+
     fn active_round_trip_failure_snapshot(&self) -> Option<&RoundTripFailureSnapshot> {
         self.round_trip_failure_snapshot
             .as_ref()
@@ -7341,25 +7167,18 @@ impl Canvas {
                 }
                 StateApplyDialog::ViewChanges => self.state_apply_dialog = None,
                 StateApplyDialog::ProjectSaveReview => {
-                    let validation_blocked = self
-                        .project_validation_report
-                        .as_ref()
-                        .is_some_and(|report| report.delta.blocks_save());
-                    let round_trip_failed = !matches!(
-                        self.project_save_round_trip_status(),
-                        Some(RoundTripStatus::Passed | RoundTripStatus::PassedWithReview)
-                    );
-                    match project_save_review_primary_action(validation_blocked, round_trip_failed)
-                    {
-                        ProjectSaveReviewPrimaryAction::ConfirmSave => {
+                    let review = self.project_save_review_model();
+                    match self.save_ui.request_primary(&review) {
+                        SaveUiRequest::CommitPreparedProject => {
                             return StateApplyDialogAction::ConfirmProjectSave;
                         }
-                        ProjectSaveReviewPrimaryAction::ViewBlockingProblems => {
+                        SaveUiRequest::ViewBlockingProblems => {
                             self.open_validation_problems(true, ValidationSourceFilter::All);
                         }
-                        ProjectSaveReviewPrimaryAction::ViewIntegrityProblem => {
+                        SaveUiRequest::ViewIntegrityProblem => {
                             self.state_apply_dialog = Some(StateApplyDialog::IntegrityProblem);
                         }
+                        _ => {}
                     }
                 }
                 StateApplyDialog::Blocked => {
@@ -7400,7 +7219,12 @@ impl Canvas {
                     self.state_apply_dialog = Some(StateApplyDialog::Review);
                 }
                 StateApplyDialog::ProjectSaveReview => {
-                    self.open_validation_problems(false, ValidationSourceFilter::All);
+                    let review = self.project_save_review_model();
+                    if self.save_ui.request_secondary(&review)
+                        == SaveUiRequest::ViewExistingProblems
+                    {
+                        self.open_validation_problems(false, ValidationSourceFilter::All);
+                    }
                 }
                 StateApplyDialog::ValidationResults => {
                     self.problems_ui.next_action_or_details(
@@ -7796,6 +7620,7 @@ impl Canvas {
     }
 
     pub fn prepare_project_save(&mut self) -> Result<String, String> {
+        self.save_ui.reset_commit_request();
         if self.save_blocks_editing() {
             return Err(
                 "Finish or recover the active save before starting Save Project.".to_owned(),
@@ -8036,22 +7861,27 @@ impl Canvas {
 
     pub fn start_project_save(&mut self, allow_review_required: bool, alerts: &mut Alerts) {
         let Some(project) = self.project.as_ref().cloned() else {
+            self.save_ui.reset_commit_request();
             alerts.push(Err("Save Project requires a loaded HOI4 mod project."));
             return;
         };
         let Some(edit) = self.state_edit_session.as_ref().cloned() else {
+            self.save_ui.reset_commit_request();
             alerts.push(Err("The project state edit session is unavailable."));
             return;
         };
         let Some(plan) = self.project_save_plan.as_ref().cloned() else {
+            self.save_ui.reset_commit_request();
             alerts.push(Err("Review Project Changes before saving."));
             return;
         };
         let Some(validation) = self.project_save_validation.as_ref().cloned() else {
+            self.save_ui.reset_commit_request();
             alerts.push(Err("Validate Project before saving."));
             return;
         };
         if edit.revision() != plan.patch_plan().generation {
+            self.save_ui.reset_commit_request();
             alerts.push(Err(
                 "The project changed in memory after validation. Validate again.",
             ));
@@ -8093,7 +7923,10 @@ impl Canvas {
                     "Save Project started; editing is locked until verification finishes",
                 ));
             }
-            Err(error) => alerts.push(Err(format!("Failed to start Save Project: {error}"))),
+            Err(error) => {
+                self.save_ui.reset_commit_request();
+                alerts.push(Err(format!("Failed to start Save Project: {error}")));
+            }
         }
     }
 
@@ -8472,6 +8305,7 @@ impl Canvas {
             self.state_save_task = None;
             self.project_save_plan = None;
             self.project_save_validation = None;
+            self.save_ui.reset_commit_request();
             self.state_apply_dialog = Some(StateApplyDialog::Result);
             self.refresh_state_information();
         } else if disconnected {
@@ -8488,6 +8322,7 @@ impl Canvas {
                 "{action} worker ended without a report; recovery may be required."
             ));
             self.state_save_task = None;
+            self.save_ui.reset_commit_request();
             self.state_save_recovery = self
                 .project
                 .as_ref()
@@ -13282,25 +13117,5 @@ mod tests {
         assert_eq!(layout.validation_problem_row(0, false)[1], 246.0);
         assert_eq!(layout.validation_problem_row(0, true)[1], 282.0);
         assert!(layout.validation_problem_row(2, true)[1] < layout.primary()[1]);
-    }
-
-    #[test]
-    fn blocked_project_save_review_cannot_authorize_save() {
-        assert_eq!(
-            project_save_review_primary_action(true, true),
-            ProjectSaveReviewPrimaryAction::ViewBlockingProblems
-        );
-        assert_ne!(
-            project_save_review_primary_action(true, false),
-            ProjectSaveReviewPrimaryAction::ConfirmSave
-        );
-        assert_eq!(
-            project_save_review_primary_action(false, false),
-            ProjectSaveReviewPrimaryAction::ConfirmSave
-        );
-        assert_eq!(
-            project_save_review_primary_action(false, true),
-            ProjectSaveReviewPrimaryAction::ViewIntegrityProblem
-        );
     }
 }

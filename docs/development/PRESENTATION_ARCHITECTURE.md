@@ -17,6 +17,16 @@ models. `Canvas` renders those models and is the sole executor of requests: it
 keeps camera focus, State-session selection, modal transitions, alerts, and
 platform open/reveal/copy handling at the application boundary.
 
+`save_ui` is intentionally separate from `PresentationRuntime`. It derives a
+read-only `SaveReviewModel` and dialog presentation from the existing project
+save plan, combined validation, and transaction report. Its controller emits
+only commit, Problems, and integrity-review requests. Candidate construction,
+Auto Coastal, source and revision freshness checks, validation, backup/journal,
+atomic commit, rollback, and recovery remain owned by `project` save modules;
+Canvas/App execute the UI requests and retain task lifecycle ownership. Save UI
+state is reset on project generation replacement and its commit request is
+one-shot until the save engine either starts or rejects it.
+
 Political and Resources retain their focused domain parsers and existing Canvas
 draw paths. Their source-aware catalog/icon caches are owned by the runtime and
 remain generation-bound; a State revision does not parse either source again.
@@ -35,5 +45,6 @@ is rebuilt from the active session revision and cannot survive a generation
 replacement. PNG composition uses the same immutable model and overlay order
 (DMZ, Resources, Victory Points, Problems), but retains its CPU renderer.
 
-Dependency direction is `map/project/state -> presentation/problems_ui -> Canvas -> App/UI`.
-Neither presentation resource nor Problems UI code imports `Canvas` or `App`.
+Map presentation direction is `map/project/state -> presentation/problems_ui -> Canvas -> App/UI`.
+Project Save review direction is `project save engine -> SaveReviewModel -> SaveUiController -> Canvas/App`.
+Neither presentation resource, Problems UI, nor Save UI imports `Canvas` or `App`.
