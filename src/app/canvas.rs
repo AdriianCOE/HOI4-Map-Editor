@@ -686,6 +686,14 @@ impl Canvas {
         let base_game_root = remembered_base_game_root
             .filter(|root| is_base_game_root(root))
             .or_else(discover_base_game_root);
+        if let Some(project) = project.as_mut() {
+            // ProjectSources receives only the base root that this Canvas has
+            // accepted as a real HOI4 install. It remains read-only fallback
+            // metadata; core editable map paths stay project-owned.
+            project
+                .paths
+                .set_validated_base_game_root(base_game_root.clone());
+        }
         let definition_catalog = project
             .as_ref()
             .map(|project| GameDefinitionCatalog::build(project, base_game_root.as_deref()));

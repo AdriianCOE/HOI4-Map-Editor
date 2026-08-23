@@ -210,8 +210,18 @@ pub fn scan_project(root: impl Into<PathBuf>) -> CompatibilityReport {
     let sources = ProjectSources::discover(&root, None, SourceGeneration::default());
     let (province_path, definition_path) = match sources {
         Ok(sources) => (
-            sources.source_files().provinces_bmp.physical_path.clone(),
-            sources.source_files().definition_csv.physical_path.clone(),
+            sources
+                .source_files()
+                .provinces_bmp
+                .filesystem_path()
+                .expect("core project map source is a filesystem path")
+                .to_owned(),
+            sources
+                .source_files()
+                .definition_csv
+                .filesystem_path()
+                .expect("core project map source is a filesystem path")
+                .to_owned(),
         ),
         Err(_) => (
             map_directory.join("provinces.bmp"),

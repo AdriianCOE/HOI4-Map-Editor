@@ -1563,14 +1563,30 @@ fn enumerate_source_files(
     let mut files = BTreeMap::new();
     let manifest = project.paths.sources.manifest();
     let mut source_paths = vec![
-        &manifest.map_files.provinces_bmp.physical_path,
-        &manifest.map_files.definition_csv.physical_path,
+        manifest
+            .map_files
+            .provinces_bmp
+            .filesystem_path()
+            .expect("core project map source is a filesystem path"),
+        manifest
+            .map_files
+            .definition_csv
+            .filesystem_path()
+            .expect("core project map source is a filesystem path"),
     ];
     if let Some(source) = &manifest.default_map {
-        source_paths.push(&source.physical_path);
+        source_paths.push(
+            source
+                .filesystem_path()
+                .expect("core project map source is a filesystem path"),
+        );
     }
     if let Some(source) = &manifest.descriptor {
-        source_paths.push(&source.physical_path);
+        source_paths.push(
+            source
+                .filesystem_path()
+                .expect("core project map source is a filesystem path"),
+        );
     }
     for source in [
         manifest.map_files.adjacencies_csv.as_ref(),
@@ -1580,7 +1596,11 @@ fn enumerate_source_files(
     .into_iter()
     .flatten()
     {
-        source_paths.push(&source.physical_path);
+        source_paths.push(
+            source
+                .filesystem_path()
+                .expect("core project map source is a filesystem path"),
+        );
     }
     for source in source_paths {
         let relative = source

@@ -53,23 +53,36 @@ impl ProjectPaths {
         )?;
         let manifest = sources.manifest();
         let map_directory = manifest.map_directory.clone();
-        let provinces_bmp = manifest.map_files.provinces_bmp.physical_path.clone();
-        let definition_csv = manifest.map_files.definition_csv.physical_path.clone();
-        let adjacencies_csv = manifest
+        let provinces_bmp = manifest
             .map_files
-            .adjacencies_csv
-            .as_ref()
-            .map(|source| source.physical_path.clone());
-        let rivers_bmp = manifest
+            .provinces_bmp
+            .filesystem_path()
+            .expect("core project map source is a filesystem path")
+            .to_owned();
+        let definition_csv = manifest
             .map_files
-            .rivers_bmp
-            .as_ref()
-            .map(|source| source.physical_path.clone());
-        let continent_txt = manifest
-            .map_files
-            .continent_txt
-            .as_ref()
-            .map(|source| source.physical_path.clone());
+            .definition_csv
+            .filesystem_path()
+            .expect("core project map source is a filesystem path")
+            .to_owned();
+        let adjacencies_csv = manifest.map_files.adjacencies_csv.as_ref().map(|source| {
+            source
+                .filesystem_path()
+                .expect("core project map source is a filesystem path")
+                .to_owned()
+        });
+        let rivers_bmp = manifest.map_files.rivers_bmp.as_ref().map(|source| {
+            source
+                .filesystem_path()
+                .expect("core project map source is a filesystem path")
+                .to_owned()
+        });
+        let continent_txt = manifest.map_files.continent_txt.as_ref().map(|source| {
+            source
+                .filesystem_path()
+                .expect("core project map source is a filesystem path")
+                .to_owned()
+        });
 
         let history_directory = root.join("history");
         require_directory(
@@ -111,6 +124,10 @@ impl ProjectPaths {
     pub fn bind_project_generation(&mut self, generation: u64) {
         self.sources
             .rebind_generation(SourceGeneration::new(generation));
+    }
+
+    pub fn set_validated_base_game_root(&mut self, root: Option<PathBuf>) {
+        self.sources.set_validated_base_game_root(root);
     }
 
     pub fn is_project_root_candidate(root: &Path) -> bool {

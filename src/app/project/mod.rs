@@ -59,8 +59,8 @@ pub use save::{
 pub use save_plan::{ProjectDirtyState, ProjectSavePlan, SaveDomain};
 pub use sources::{
     MapFileLayout, ProjectMapSourceFiles, ProjectSourceManifest, ProjectSources, ReplacePathSet,
-    ResolvedSource, SourceGeneration, SourceKind, SourcePathError, SourcePathErrorKind,
-    SourceResolutionError, SourceResolver,
+    ResolvedLocation, ResolvedSource, SourceGeneration, SourceKind, SourceListing, SourceLookup,
+    SourcePathError, SourcePathErrorKind, SourceResolutionError, SourceResolver,
 };
 pub use state_fill::{
     ProvinceAdjacency, StateFillBlockedProvince, StateFillBlockedReason, StateFillMode,

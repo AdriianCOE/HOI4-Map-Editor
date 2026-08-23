@@ -2,15 +2,18 @@
 //!
 //! `map/default.map` may redirect the supported map files; when it is absent,
 //! conventional HOI4 names remain compatible. Core map files must be owned by
-//! the current project, while the resolver exposes read-only BaseGame fallback
+//! the current project, while the resolver exposes read-only lower-source
 //! policy for future non-map domains and honors `replace_path`. DLC and
-//! integrated DLC are intentionally not traversed in this foundation.
+//! integrated DLC discovery is lazy and ZIP entries remain read-only sources.
 
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+
+use zip::ZipArchive;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct SourceGeneration(u64);
@@ -29,15 +32,62 @@ impl SourceGeneration {
 #[non_exhaustive]
 pub enum SourceKind {
     CurrentProject,
+    Dlc,
+    IntegratedDlc,
     BaseGame,
+}
+
+/// The actual read-only storage for a resolved logical source.
+///
+/// Archive entries deliberately remain separate from filesystem paths: callers
+/// must use `SourceResolver::read_resolved` rather than accidentally treating a
+/// ZIP member as a writable file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedLocation {
+    Filesystem(PathBuf),
+    ArchiveEntry {
+        archive_path: PathBuf,
+        entry_path: PathBuf,
+    },
+}
+
+impl ResolvedLocation {
+    pub fn filesystem_path(&self) -> Option<&Path> {
+        match self {
+            Self::Filesystem(path) => Some(path),
+            Self::ArchiveEntry { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSource {
     pub logical_path: PathBuf,
-    pub physical_path: PathBuf,
+    pub location: ResolvedLocation,
     pub source_kind: SourceKind,
     pub project_generation: SourceGeneration,
+}
+
+impl ResolvedSource {
+    pub fn filesystem_path(&self) -> Option<&Path> {
+        self.location.filesystem_path()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceLookup {
+    Found(ResolvedSource),
+    NotFound,
+    BlockedByReplacePath { logical_path: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SourceListing {
+    pub files: Vec<ResolvedSource>,
+    /// Lower-priority copies which were deliberately hidden by source
+    /// precedence. This makes the editor policy observable without claiming it
+    /// is the HOI4 engine's package collision order.
+    pub shadowed: Vec<ResolvedSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +102,7 @@ impl ProjectSources {
         let generation = SourceGeneration::default();
         let source = |logical_path: &str| ResolvedSource {
             logical_path: PathBuf::from(logical_path),
-            physical_path: PathBuf::new(),
+            location: ResolvedLocation::Filesystem(PathBuf::new()),
             source_kind: SourceKind::CurrentProject,
             project_generation: generation,
         };
@@ -99,10 +149,11 @@ impl ProjectSources {
             current_project_file(&root, &default_map_logical_path(), project_generation);
         let layout = match &default_map {
             Some(source) => {
-                let text = fs::read_to_string(&source.physical_path).map_err(|io_source| {
-                    SourceResolutionError::Io {
-                        path: source.physical_path.clone(),
-                        source: io_source,
+                let bytes = resolver.read_resolved(source)?;
+                let text = String::from_utf8(bytes).map_err(|error| {
+                    SourceResolutionError::InvalidUtf8 {
+                        logical_path: source.logical_path.clone(),
+                        source: error,
                     }
                 })?;
                 MapFileLayout::parse(&source.logical_path, &text)?
@@ -171,6 +222,33 @@ impl ProjectSources {
 
     pub fn source_files(&self) -> &ProjectMapSourceFiles {
         &self.manifest.map_files
+    }
+
+    pub fn resolve(
+        &self,
+        logical_path: impl AsRef<Path>,
+    ) -> Result<SourceLookup, SourceResolutionError> {
+        self.resolver.resolve(logical_path)
+    }
+
+    pub fn list_files(
+        &self,
+        logical_directory: impl AsRef<Path>,
+    ) -> Result<SourceListing, SourceResolutionError> {
+        self.resolver.list_files(logical_directory)
+    }
+
+    pub fn read_resolved(&self, source: &ResolvedSource) -> Result<Vec<u8>, SourceResolutionError> {
+        self.resolver.read_resolved(source)
+    }
+
+    /// Binds lower-source discovery only after Canvas has accepted the
+    /// editor's validated base-game root. Core map ownership remains current
+    /// project only and is not recomputed here.
+    pub fn set_validated_base_game_root(&mut self, root: Option<PathBuf>) {
+        self.resolver.base_game_root = root.clone();
+        self.resolver.lower_source_cache = RefCell::new(LowerSourceCache::default());
+        self.manifest.base_game_root = root;
     }
 
     /// The App binds a fully loaded project to its replacement generation only
@@ -406,14 +484,27 @@ impl ReplacePathSet {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SourceResolver {
     current_project_root: Option<PathBuf>,
     current_project_map_dir: Option<PathBuf>,
     base_game_root: Option<PathBuf>,
     replace_paths: ReplacePathSet,
     project_generation: SourceGeneration,
+    lower_source_cache: RefCell<LowerSourceCache>,
 }
+
+impl PartialEq for SourceResolver {
+    fn eq(&self, other: &Self) -> bool {
+        self.current_project_root == other.current_project_root
+            && self.current_project_map_dir == other.current_project_map_dir
+            && self.base_game_root == other.base_game_root
+            && self.replace_paths == other.replace_paths
+            && self.project_generation == other.project_generation
+    }
+}
+
+impl Eq for SourceResolver {}
 
 impl SourceResolver {
     pub fn new(project_generation: SourceGeneration) -> Self {
@@ -423,6 +514,7 @@ impl SourceResolver {
             base_game_root: None,
             replace_paths: ReplacePathSet::new(),
             project_generation,
+            lower_source_cache: RefCell::new(LowerSourceCache::default()),
         }
     }
 
@@ -443,6 +535,7 @@ impl SourceResolver {
 
     pub fn with_optional_base_game_root(mut self, root: Option<PathBuf>) -> Self {
         self.base_game_root = root;
+        self.lower_source_cache = RefCell::new(LowerSourceCache::default());
         self
     }
 
@@ -459,40 +552,149 @@ impl SourceResolver {
         &self.replace_paths
     }
 
-    pub fn resolve_existing(
+    pub fn base_game_root(&self) -> Option<&Path> {
+        self.base_game_root.as_deref()
+    }
+
+    /// Returns an explicit resolution result so source diagnostics can
+    /// distinguish a missing file from `replace_path` intentionally masking
+    /// lower layers.
+    pub fn resolve(
         &self,
         logical_path: impl AsRef<Path>,
-    ) -> Result<Option<ResolvedSource>, SourceResolutionError> {
+    ) -> Result<SourceLookup, SourceResolutionError> {
         let logical_path = normalize_logical_path(logical_path)?;
 
         if let Some(physical_path) = self.current_project_physical_path(&logical_path)
             && physical_path.is_file()
         {
-            return Ok(Some(ResolvedSource {
+            return Ok(SourceLookup::Found(self.filesystem_source(
                 logical_path,
                 physical_path,
-                source_kind: SourceKind::CurrentProject,
-                project_generation: self.project_generation,
-            }));
+                SourceKind::CurrentProject,
+            )));
         }
 
         if self.replace_paths.blocks(&logical_path)? {
-            return Ok(None);
+            return Ok(SourceLookup::BlockedByReplacePath { logical_path });
+        }
+
+        if let Some(source) = self.resolve_lower(&logical_path)? {
+            return Ok(SourceLookup::Found(source));
         }
 
         if let Some(base_root) = &self.base_game_root {
             let physical_path = base_root.join(&logical_path);
             if physical_path.is_file() {
-                return Ok(Some(ResolvedSource {
+                return Ok(SourceLookup::Found(self.filesystem_source(
                     logical_path,
                     physical_path,
-                    source_kind: SourceKind::BaseGame,
-                    project_generation: self.project_generation,
-                }));
+                    SourceKind::BaseGame,
+                )));
             }
         }
 
-        Ok(None)
+        Ok(SourceLookup::NotFound)
+    }
+
+    pub fn resolve_existing(
+        &self,
+        logical_path: impl AsRef<Path>,
+    ) -> Result<Option<ResolvedSource>, SourceResolutionError> {
+        match self.resolve(logical_path)? {
+            SourceLookup::Found(source) => Ok(Some(source)),
+            SourceLookup::NotFound | SourceLookup::BlockedByReplacePath { .. } => Ok(None),
+        }
+    }
+
+    /// Lists files below one logical directory, applying source precedence at
+    /// the file level. `shadowed` retains the discarded provenance for source
+    /// debugging; regular callers consume `files` only.
+    pub fn list_files(
+        &self,
+        logical_directory: impl AsRef<Path>,
+    ) -> Result<SourceListing, SourceResolutionError> {
+        let logical_directory = normalize_logical_path(logical_directory)?;
+        let mut listing = SourceListing::default();
+        let mut winners = BTreeMap::<String, ResolvedSource>::new();
+
+        if let Some(current) = self.current_project_physical_path(&logical_directory) {
+            self.add_directory_files(
+                &mut winners,
+                &mut listing.shadowed,
+                &logical_directory,
+                &current,
+                SourceKind::CurrentProject,
+            )?;
+        }
+
+        for source in self.list_lower(&logical_directory)? {
+            self.add_source(&mut winners, &mut listing.shadowed, source);
+        }
+
+        if let Some(base_root) = &self.base_game_root {
+            self.add_directory_files(
+                &mut winners,
+                &mut listing.shadowed,
+                &logical_directory,
+                &base_root.join(&logical_directory),
+                SourceKind::BaseGame,
+            )?;
+        }
+
+        listing.files = winners.into_values().collect();
+        Ok(listing)
+    }
+
+    /// Reads a generation-bound source without exposing archive mechanics to
+    /// callers. This operation is intentionally read-only for every source.
+    pub fn read_resolved(&self, source: &ResolvedSource) -> Result<Vec<u8>, SourceResolutionError> {
+        if source.project_generation != self.project_generation {
+            return Err(SourceResolutionError::StaleGeneration {
+                source_generation: source.project_generation,
+                resolver_generation: self.project_generation,
+            });
+        }
+        match &source.location {
+            ResolvedLocation::Filesystem(path) => {
+                fs::read(path).map_err(|source| SourceResolutionError::Io {
+                    path: path.clone(),
+                    source,
+                })
+            }
+            ResolvedLocation::ArchiveEntry {
+                archive_path,
+                entry_path,
+            } => {
+                let file = fs::File::open(archive_path).map_err(|source| {
+                    SourceResolutionError::ArchiveUnavailable {
+                        archive_path: archive_path.clone(),
+                        detail: source.to_string(),
+                    }
+                })?;
+                let mut archive = ZipArchive::new(file).map_err(|source| {
+                    SourceResolutionError::ArchiveUnavailable {
+                        archive_path: archive_path.clone(),
+                        detail: source.to_string(),
+                    }
+                })?;
+                let entry_name = archive_entry_name(entry_path);
+                let mut entry = archive.by_name(&entry_name).map_err(|_| {
+                    SourceResolutionError::ArchiveEntryMissing {
+                        archive_path: archive_path.clone(),
+                        entry_path: entry_path.clone(),
+                    }
+                })?;
+                let mut bytes = Vec::with_capacity(entry.size() as usize);
+                entry
+                    .read_to_end(&mut bytes)
+                    .map_err(|source| SourceResolutionError::Io {
+                        path: archive_path.clone(),
+                        source,
+                    })?;
+                Ok(bytes)
+            }
+        }
     }
 
     pub fn load_map_layout(
@@ -502,10 +704,10 @@ impl SourceResolver {
         let Some(source) = self.resolve_existing(default_map)? else {
             return Ok(None);
         };
-        let text = fs::read_to_string(&source.physical_path).map_err(|io_source| {
-            SourceResolutionError::Io {
-                path: source.physical_path.clone(),
-                source: io_source,
+        let text = String::from_utf8(self.read_resolved(&source)?).map_err(|error| {
+            SourceResolutionError::InvalidUtf8 {
+                logical_path: source.logical_path.clone(),
+                source: error,
             }
         })?;
         let layout = MapFileLayout::parse(&source.logical_path, &text)?;
@@ -536,6 +738,383 @@ impl SourceResolver {
             _ => None,
         }
     }
+
+    fn filesystem_source(
+        &self,
+        logical_path: PathBuf,
+        physical_path: PathBuf,
+        source_kind: SourceKind,
+    ) -> ResolvedSource {
+        ResolvedSource {
+            logical_path,
+            location: ResolvedLocation::Filesystem(physical_path),
+            source_kind,
+            project_generation: self.project_generation,
+        }
+    }
+
+    fn resolve_lower(
+        &self,
+        logical_path: &Path,
+    ) -> Result<Option<ResolvedSource>, SourceResolutionError> {
+        let Some(base_root) = self.base_game_root.as_deref() else {
+            return Ok(None);
+        };
+        let mut cache = self.lower_source_cache.borrow_mut();
+        cache.ensure_discovered(base_root)?;
+        for container in &mut cache.containers {
+            if let Some(location) = container.resolve(logical_path)? {
+                return Ok(Some(ResolvedSource {
+                    logical_path: logical_path.to_owned(),
+                    location,
+                    source_kind: container.source_kind,
+                    project_generation: self.project_generation,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn list_lower(
+        &self,
+        logical_directory: &Path,
+    ) -> Result<Vec<ResolvedSource>, SourceResolutionError> {
+        let Some(base_root) = self.base_game_root.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let mut cache = self.lower_source_cache.borrow_mut();
+        cache.ensure_discovered(base_root)?;
+        let mut sources = Vec::new();
+        for container in &mut cache.containers {
+            for (logical_path, location) in container.list(logical_directory)? {
+                if !self.replace_paths.blocks(&logical_path)? {
+                    sources.push(ResolvedSource {
+                        logical_path,
+                        location,
+                        source_kind: container.source_kind,
+                        project_generation: self.project_generation,
+                    });
+                }
+            }
+        }
+        Ok(sources)
+    }
+
+    fn add_directory_files(
+        &self,
+        winners: &mut BTreeMap<String, ResolvedSource>,
+        shadowed: &mut Vec<ResolvedSource>,
+        logical_directory: &Path,
+        physical_directory: &Path,
+        source_kind: SourceKind,
+    ) -> Result<(), SourceResolutionError> {
+        for (logical_path, physical_path) in
+            filesystem_files(logical_directory, physical_directory)?
+        {
+            if source_kind != SourceKind::CurrentProject
+                && self.replace_paths.blocks(&logical_path)?
+            {
+                continue;
+            }
+            self.add_source(
+                winners,
+                shadowed,
+                self.filesystem_source(logical_path, physical_path, source_kind),
+            );
+        }
+        Ok(())
+    }
+
+    fn add_source(
+        &self,
+        winners: &mut BTreeMap<String, ResolvedSource>,
+        shadowed: &mut Vec<ResolvedSource>,
+        source: ResolvedSource,
+    ) {
+        let key = logical_key(&source.logical_path);
+        match winners.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(source);
+            }
+            Entry::Occupied(_) => {
+                shadowed.push(source);
+            }
+        }
+    }
+}
+
+/// Editor policy: mirrors the reference's ZIP-before-folder lookup shape and
+/// `dlc`-before-`integrated_dlc` grouping, but sorts container names for
+/// cross-platform determinism. HOI4 package collision semantics remain
+/// `NEEDS HOI4 ENGINE TEST`.
+#[derive(Debug, Clone, Default)]
+struct LowerSourceCache {
+    base_game_root: Option<PathBuf>,
+    containers: Vec<LowerSourceContainer>,
+}
+
+impl LowerSourceCache {
+    fn ensure_discovered(&mut self, base_game_root: &Path) -> Result<(), SourceResolutionError> {
+        if self.base_game_root.as_deref() == Some(base_game_root) {
+            return Ok(());
+        }
+        self.base_game_root = Some(base_game_root.to_owned());
+        self.containers = discover_lower_source_containers(base_game_root)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LowerSourceContainer {
+    source_kind: SourceKind,
+    storage: LowerSourceStorage,
+}
+
+#[derive(Debug, Clone)]
+enum LowerSourceStorage {
+    Folder {
+        root: PathBuf,
+    },
+    Archive {
+        path: PathBuf,
+        index: Option<ArchiveIndex>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ArchiveIndex {
+    identity: ArchiveIdentity,
+    entries: BTreeMap<String, PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArchiveIdentity {
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl LowerSourceContainer {
+    fn resolve(
+        &mut self,
+        logical_path: &Path,
+    ) -> Result<Option<ResolvedLocation>, SourceResolutionError> {
+        match &mut self.storage {
+            LowerSourceStorage::Folder { root } => {
+                let physical_path = root.join(logical_path);
+                Ok(physical_path
+                    .is_file()
+                    .then_some(ResolvedLocation::Filesystem(physical_path)))
+            }
+            LowerSourceStorage::Archive { path, index } => {
+                let entries = archive_index(path, index)?;
+                Ok(entries
+                    .entries
+                    .get(&logical_key(logical_path))
+                    .map(|entry_path| ResolvedLocation::ArchiveEntry {
+                        archive_path: path.clone(),
+                        entry_path: entry_path.clone(),
+                    }))
+            }
+        }
+    }
+
+    fn list(
+        &mut self,
+        logical_directory: &Path,
+    ) -> Result<Vec<(PathBuf, ResolvedLocation)>, SourceResolutionError> {
+        match &mut self.storage {
+            LowerSourceStorage::Folder { root } => Ok(filesystem_files(
+                logical_directory,
+                &root.join(logical_directory),
+            )?
+            .into_iter()
+            .map(|(logical_path, physical_path)| {
+                (logical_path, ResolvedLocation::Filesystem(physical_path))
+            })
+            .collect()),
+            LowerSourceStorage::Archive { path, index } => {
+                let entries = archive_index(path, index)?;
+                let prefix = format!("{}/", logical_key(logical_directory));
+                Ok(entries
+                    .entries
+                    .iter()
+                    .filter(|(key, _)| key.starts_with(&prefix))
+                    .map(|(_, entry_path)| {
+                        (
+                            entry_path.clone(),
+                            ResolvedLocation::ArchiveEntry {
+                                archive_path: path.clone(),
+                                entry_path: entry_path.clone(),
+                            },
+                        )
+                    })
+                    .collect())
+            }
+        }
+    }
+}
+
+fn discover_lower_source_containers(
+    base_game_root: &Path,
+) -> Result<Vec<LowerSourceContainer>, SourceResolutionError> {
+    let mut archives = Vec::new();
+    let mut folders = Vec::new();
+    for (source_kind, directory) in [
+        (SourceKind::Dlc, "dlc"),
+        (SourceKind::IntegratedDlc, "integrated_dlc"),
+    ] {
+        let source_root = base_game_root.join(directory);
+        let Ok(entries) = fs::read_dir(&source_root) else {
+            continue;
+        };
+        let mut package_roots = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|type_| type_.is_dir()))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .starts_with("dlc")
+            })
+            .collect::<Vec<_>>();
+        package_roots.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
+        for package_root in package_roots {
+            let package_root = package_root.path();
+            let mut zip_paths = fs::read_dir(&package_root)
+                .map_err(|source| SourceResolutionError::Io {
+                    path: package_root.clone(),
+                    source,
+                })?
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry.file_type().is_ok_and(|type_| type_.is_file())
+                        && entry
+                            .path()
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+                })
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>();
+            zip_paths.sort_by_key(|path| {
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+            });
+            archives.extend(zip_paths.into_iter().map(|path| LowerSourceContainer {
+                source_kind,
+                storage: LowerSourceStorage::Archive { path, index: None },
+            }));
+            folders.push(LowerSourceContainer {
+                source_kind,
+                storage: LowerSourceStorage::Folder { root: package_root },
+            });
+        }
+    }
+    archives.extend(folders);
+    Ok(archives)
+}
+
+fn archive_index<'a>(
+    path: &Path,
+    cached: &'a mut Option<ArchiveIndex>,
+) -> Result<&'a ArchiveIndex, SourceResolutionError> {
+    let identity = archive_identity(path)?;
+    if cached
+        .as_ref()
+        .is_some_and(|index| index.identity == identity)
+    {
+        return Ok(cached.as_ref().expect("checked above"));
+    }
+    let file =
+        fs::File::open(path).map_err(|source| SourceResolutionError::ArchiveUnavailable {
+            archive_path: path.to_owned(),
+            detail: source.to_string(),
+        })?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|source| SourceResolutionError::ArchiveUnavailable {
+            archive_path: path.to_owned(),
+            detail: source.to_string(),
+        })?;
+    let mut entries = BTreeMap::new();
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|source| {
+            SourceResolutionError::ArchiveUnavailable {
+                archive_path: path.to_owned(),
+                detail: source.to_string(),
+            }
+        })?;
+        if entry.is_dir() {
+            continue;
+        }
+        let Ok(logical_path) = normalize_logical_str(entry.name()) else {
+            continue;
+        };
+        let key = logical_key(&logical_path);
+        match entries.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(logical_path);
+            }
+            Entry::Occupied(mut entry)
+                if archive_entry_name(&logical_path) < archive_entry_name(entry.get()) =>
+            {
+                entry.insert(logical_path);
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
+    *cached = Some(ArchiveIndex { identity, entries });
+    Ok(cached.as_ref().expect("index was just assigned"))
+}
+
+fn archive_identity(path: &Path) -> Result<ArchiveIdentity, SourceResolutionError> {
+    let metadata =
+        fs::metadata(path).map_err(|source| SourceResolutionError::ArchiveUnavailable {
+            archive_path: path.to_owned(),
+            detail: source.to_string(),
+        })?;
+    Ok(ArchiveIdentity {
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+fn archive_entry_name(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn filesystem_files(
+    logical_directory: &Path,
+    physical_directory: &Path,
+) -> Result<Vec<(PathBuf, PathBuf)>, SourceResolutionError> {
+    let Ok(entries) = fs::read_dir(physical_directory) else {
+        return Ok(Vec::new());
+    };
+    let mut files = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let file_type = entry
+            .file_type()
+            .map_err(|source| SourceResolutionError::Io {
+                path: entry.path(),
+                source,
+            })?;
+        let name = entry.file_name();
+        let logical_path = logical_directory.join(&name);
+        if file_type.is_dir() {
+            files.extend(filesystem_files(&logical_path, &entry.path())?);
+        } else if file_type.is_file() {
+            files.push((logical_path, entry.path()));
+        }
+    }
+    files.sort_by_key(|(logical_path, _)| logical_key(logical_path));
+    Ok(files)
 }
 
 #[derive(Debug)]
@@ -558,6 +1137,22 @@ pub enum SourceResolutionError {
     Io {
         path: PathBuf,
         source: io::Error,
+    },
+    InvalidUtf8 {
+        logical_path: PathBuf,
+        source: std::string::FromUtf8Error,
+    },
+    ArchiveUnavailable {
+        archive_path: PathBuf,
+        detail: String,
+    },
+    ArchiveEntryMissing {
+        archive_path: PathBuf,
+        entry_path: PathBuf,
+    },
+    StaleGeneration {
+        source_generation: SourceGeneration,
+        resolver_generation: SourceGeneration,
     },
 }
 
@@ -595,6 +1190,38 @@ impl fmt::Display for SourceResolutionError {
             Self::Io { path, source } => {
                 write!(f, "failed to read {}: {source}", path.display())
             }
+            Self::InvalidUtf8 {
+                logical_path,
+                source,
+            } => {
+                write!(f, "{} is not valid UTF-8: {source}", logical_path.display())
+            }
+            Self::ArchiveUnavailable {
+                archive_path,
+                detail,
+            } => write!(
+                f,
+                "archive {} is unavailable: {detail}",
+                archive_path.display()
+            ),
+            Self::ArchiveEntryMissing {
+                archive_path,
+                entry_path,
+            } => write!(
+                f,
+                "archive {} no longer contains {}",
+                archive_path.display(),
+                entry_path.display()
+            ),
+            Self::StaleGeneration {
+                source_generation,
+                resolver_generation,
+            } => write!(
+                f,
+                "source generation {} cannot be read by generation {}",
+                source_generation.value(),
+                resolver_generation.value()
+            ),
         }
     }
 }
@@ -607,6 +1234,10 @@ impl std::error::Error for SourceResolutionError {
             Self::MissingCurrentProjectFile { .. } => None,
             Self::Parse { source, .. } => Some(source),
             Self::Io { source, .. } => Some(source),
+            Self::InvalidUtf8 { source, .. } => Some(source),
+            Self::ArchiveUnavailable { .. }
+            | Self::ArchiveEntryMissing { .. }
+            | Self::StaleGeneration { .. } => None,
         }
     }
 }
@@ -738,7 +1369,7 @@ fn required_current_project_file(
     if physical_path.is_file() {
         return Ok(ResolvedSource {
             logical_path,
-            physical_path,
+            location: ResolvedLocation::Filesystem(physical_path),
             source_kind: SourceKind::CurrentProject,
             project_generation,
         });
@@ -758,7 +1389,7 @@ fn current_project_file(
     let physical_path = root.join(&logical_path);
     physical_path.is_file().then_some(ResolvedSource {
         logical_path,
-        physical_path,
+        location: ResolvedLocation::Filesystem(physical_path),
         source_kind: SourceKind::CurrentProject,
         project_generation,
     })
@@ -943,11 +1574,15 @@ fn parse_scalar_value(raw_value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MapFileLayout, ProjectSources, ReplacePathSet, SourceGeneration, SourceKind,
-        SourcePathErrorKind, SourceResolutionError, SourceResolver,
+        MapFileLayout, ProjectSources, ReplacePathSet, ResolvedLocation, ResolvedSource,
+        SourceGeneration, SourceKind, SourceLookup, SourcePathErrorKind, SourceResolutionError,
+        SourceResolver,
     };
     use std::fs;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
+    use std::time::Instant;
+    use zip::write::FileOptions;
 
     struct TempRoot(PathBuf);
 
@@ -970,6 +1605,18 @@ mod tests {
             let path = self.path().join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
+        }
+
+        fn write_zip(&self, relative: &str, entries: &[(&str, &str)]) {
+            let path = self.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let file = fs::File::create(path).unwrap();
+            let mut archive = zip::ZipWriter::new(file);
+            for (name, contents) in entries {
+                archive.start_file(*name, FileOptions::default()).unwrap();
+                archive.write_all(contents.as_bytes()).unwrap();
+            }
+            archive.finish().unwrap();
         }
     }
 
@@ -1105,10 +1752,7 @@ mod tests {
             .unwrap()
             .expect("current project file should resolve");
         assert_eq!(source.source_kind, SourceKind::CurrentProject);
-        assert_eq!(
-            fs::read_to_string(source.physical_path).unwrap(),
-            "state={id=1}"
-        );
+        assert_eq!(resolver.read_resolved(&source).unwrap(), b"state={id=1}");
     }
 
     #[test]
@@ -1206,7 +1850,8 @@ mod tests {
                 .manifest()
                 .map_files
                 .provinces_bmp
-                .physical_path,
+                .filesystem_path()
+                .expect("core project map source is a filesystem path"),
             second.path().join("map/b-provinces.bmp")
         );
         assert!(
@@ -1214,7 +1859,8 @@ mod tests {
                 .manifest()
                 .map_files
                 .provinces_bmp
-                .physical_path
+                .filesystem_path()
+                .expect("core project map source is a filesystem path")
                 .starts_with(first.path())
         );
     }
@@ -1238,10 +1884,7 @@ mod tests {
             .unwrap()
             .expect("map logical path should resolve through map_dir");
         assert_eq!(source.source_kind, SourceKind::CurrentProject);
-        assert_eq!(
-            fs::read_to_string(source.physical_path).unwrap(),
-            "definition"
-        );
+        assert_eq!(resolver.read_resolved(&source).unwrap(), b"definition");
     }
 
     #[test]
@@ -1412,5 +2055,299 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn resolves_dlc_and_integrated_dlc_folder_sources_with_explicit_precedence() {
+        let project = TempRoot::new("lower-current");
+        let base = TempRoot::new("lower-base");
+        base.write("common/test_domain/a.txt", "base");
+        base.write("dlc/dlc010/common/test_domain/a.txt", "dlc");
+        base.write(
+            "integrated_dlc/dlc020/common/test_domain/a.txt",
+            "integrated",
+        );
+        base.write(
+            "integrated_dlc/dlc020/common/test_domain/b.txt",
+            "integrated-only",
+        );
+        project.write("common/test_domain/a.txt", "current");
+
+        let resolver = SourceResolver::new(SourceGeneration::new(21))
+            .with_current_project_root(project.path())
+            .with_base_game_root(base.path());
+        let current = resolver
+            .resolve_existing("common/test_domain/a.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.source_kind, SourceKind::CurrentProject);
+        assert_eq!(resolver.read_resolved(&current).unwrap(), b"current");
+
+        let integrated = resolver
+            .resolve_existing("common/test_domain/b.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(integrated.source_kind, SourceKind::IntegratedDlc);
+        assert_eq!(
+            resolver.read_resolved(&integrated).unwrap(),
+            b"integrated-only"
+        );
+    }
+
+    #[test]
+    fn resolves_zip_entries_reads_them_and_reindexes_when_archive_changes() {
+        let project = TempRoot::new("zip-current");
+        let base = TempRoot::new("zip-base");
+        base.write_zip(
+            "dlc/dlc010/content.zip",
+            &[("common/test_domain/a.txt", "first")],
+        );
+        let resolver = SourceResolver::new(SourceGeneration::new(22))
+            .with_current_project_root(project.path())
+            .with_base_game_root(base.path());
+        let first = resolver
+            .resolve_existing("common/test_domain/a.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.source_kind, SourceKind::Dlc);
+        assert!(matches!(
+            first.location,
+            ResolvedLocation::ArchiveEntry { .. }
+        ));
+        assert_eq!(resolver.read_resolved(&first).unwrap(), b"first");
+        assert!(
+            resolver
+                .resolve_existing("common/test_domain/b.txt")
+                .unwrap()
+                .is_none()
+        );
+
+        base.write_zip(
+            "dlc/dlc010/content.zip",
+            &[
+                ("common/test_domain/a.txt", "second-and-larger"),
+                ("common/test_domain/b.txt", "new"),
+            ],
+        );
+        let second = resolver
+            .resolve_existing("common/test_domain/b.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolver.read_resolved(&second).unwrap(), b"new");
+        assert_eq!(
+            resolver.read_resolved(&first).unwrap(),
+            b"second-and-larger"
+        );
+    }
+
+    #[test]
+    fn resolves_integrated_dlc_zip_entries() {
+        let project = TempRoot::new("integrated-zip-current");
+        let base = TempRoot::new("integrated-zip-base");
+        base.write_zip(
+            "integrated_dlc/dlc020/content.zip",
+            &[("common/test_domain/integrated.txt", "integrated-zip")],
+        );
+        let resolver = SourceResolver::new(SourceGeneration::new(221))
+            .with_current_project_root(project.path())
+            .with_base_game_root(base.path());
+        let source = resolver
+            .resolve_existing("common/test_domain/integrated.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.source_kind, SourceKind::IntegratedDlc);
+        assert!(matches!(
+            source.location,
+            ResolvedLocation::ArchiveEntry { .. }
+        ));
+        assert_eq!(resolver.read_resolved(&source).unwrap(), b"integrated-zip");
+    }
+
+    #[test]
+    fn project_discovery_does_not_open_dlc_archives_before_a_lower_source_lookup() {
+        let project = TempRoot::new("lazy-current");
+        let base = TempRoot::new("lazy-base");
+        project.write("map/provinces.bmp", "bmp");
+        project.write("map/definition.csv", "definition");
+        base.write("dlc/dlc010/content.zip", "not a zip archive");
+
+        let sources = ProjectSources::discover(
+            project.path(),
+            Some(base.path().to_owned()),
+            SourceGeneration::new(222),
+        )
+        .expect("core current-project discovery must not index DLC archives");
+        assert!(matches!(
+            sources.resolve("common/test_domain/a.txt"),
+            Err(SourceResolutionError::ArchiveUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn profiles_lazy_dlc_fixture_lookup() {
+        let project = TempRoot::new("profile-current");
+        let base = TempRoot::new("profile-base");
+        project.write("map/provinces.bmp", "bmp");
+        project.write("map/definition.csv", "definition");
+        base.write_zip(
+            "dlc/dlc010/content.zip",
+            &[("common/test_domain/a.txt", "fixture")],
+        );
+
+        let opened = Instant::now();
+        let sources = ProjectSources::discover(
+            project.path(),
+            Some(base.path().to_owned()),
+            SourceGeneration::new(223),
+        )
+        .unwrap();
+        let open_in = opened.elapsed();
+        let cold = Instant::now();
+        assert!(matches!(
+            sources.resolve("common/test_domain/a.txt").unwrap(),
+            SourceLookup::Found(ResolvedSource {
+                source_kind: SourceKind::Dlc,
+                ..
+            })
+        ));
+        let cold_in = cold.elapsed();
+        let warm = Instant::now();
+        assert!(matches!(
+            sources.resolve("common/test_domain/a.txt").unwrap(),
+            SourceLookup::Found(ResolvedSource {
+                source_kind: SourceKind::Dlc,
+                ..
+            })
+        ));
+        println!(
+            "synthetic source timings: open={}us cold_dlc={}us warm_dlc={}us",
+            open_in.as_micros(),
+            cold_in.as_micros(),
+            warm.elapsed().as_micros()
+        );
+    }
+
+    #[test]
+    fn listing_collapses_lower_duplicates_and_replace_path_blocks_every_lower_layer() {
+        let project = TempRoot::new("list-current");
+        let base = TempRoot::new("list-base");
+        project.write("common/test_domain/current.txt", "current");
+        base.write("dlc/dlc010/common/test_domain/a.txt", "dlc");
+        base.write(
+            "integrated_dlc/dlc020/common/test_domain/a.txt",
+            "integrated",
+        );
+        base.write("common/test_domain/a.txt", "base");
+        base.write("common/test_domain/base.txt", "base-only");
+        let resolver = SourceResolver::new(SourceGeneration::new(23))
+            .with_current_project_root(project.path())
+            .with_base_game_root(base.path());
+        let listing = resolver.list_files("common/test_domain").unwrap();
+        assert_eq!(
+            listing
+                .files
+                .iter()
+                .map(|source| source.logical_path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("common/test_domain/a.txt"),
+                PathBuf::from("common/test_domain/base.txt"),
+                PathBuf::from("common/test_domain/current.txt"),
+            ]
+        );
+        assert_eq!(listing.files[0].source_kind, SourceKind::Dlc);
+        assert_eq!(listing.shadowed.len(), 2);
+
+        let blocked = SourceResolver::new(SourceGeneration::new(24))
+            .with_current_project_root(project.path())
+            .with_base_game_root(base.path())
+            .with_replace_paths(
+                ReplacePathSet::from_descriptor_text("replace_path = \"common/test_domain\"")
+                    .unwrap(),
+            );
+        assert!(matches!(
+            blocked.resolve("common/test_domain/a.txt").unwrap(),
+            SourceLookup::BlockedByReplacePath { .. }
+        ));
+        let blocked_listing = blocked.list_files("common/test_domain").unwrap();
+        assert_eq!(blocked_listing.files.len(), 1);
+        assert_eq!(
+            blocked_listing.files[0].source_kind,
+            SourceKind::CurrentProject
+        );
+    }
+
+    #[test]
+    fn ignores_unsafe_zip_entry_paths_and_keeps_project_generations_isolated() {
+        let project_a = TempRoot::new("generation-a");
+        let project_b = TempRoot::new("generation-b");
+        let base_a = TempRoot::new("generation-base-a");
+        let base_b = TempRoot::new("generation-base-b");
+        base_a.write_zip(
+            "dlc/dlc010/content.zip",
+            &[
+                ("../common/test_domain/unsafe.txt", "unsafe"),
+                ("/common/test_domain/absolute.txt", "unsafe"),
+                ("common/test_domain/safe.txt", "a"),
+            ],
+        );
+        base_b.write("dlc/dlc010/common/test_domain/safe.txt", "b");
+        let resolver_a = SourceResolver::new(SourceGeneration::new(31))
+            .with_current_project_root(project_a.path())
+            .with_base_game_root(base_a.path());
+        assert!(
+            resolver_a
+                .resolve_existing("common/test_domain/unsafe.txt")
+                .unwrap()
+                .is_none()
+        );
+        let source_a = resolver_a
+            .resolve_existing("common/test_domain/safe.txt")
+            .unwrap()
+            .unwrap();
+        let resolver_b = SourceResolver::new(SourceGeneration::new(32))
+            .with_current_project_root(project_b.path())
+            .with_base_game_root(base_b.path());
+        let source_b = resolver_b
+            .resolve_existing("common/test_domain/safe.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(source_a.project_generation, SourceGeneration::new(31));
+        assert_eq!(source_b.project_generation, SourceGeneration::new(32));
+        assert_eq!(resolver_b.read_resolved(&source_b).unwrap(), b"b");
+        assert!(matches!(
+            resolver_b.read_resolved(&source_a),
+            Err(SourceResolutionError::StaleGeneration { .. })
+        ));
+    }
+
+    #[test]
+    fn project_switch_with_same_base_rebinds_sources_and_applies_new_replace_paths() {
+        let project_a = TempRoot::new("same-base-a");
+        let project_b = TempRoot::new("same-base-b");
+        let base = TempRoot::new("same-base");
+        base.write("dlc/dlc010/common/test_domain/a.txt", "dlc");
+        let resolver_a = SourceResolver::new(SourceGeneration::new(41))
+            .with_current_project_root(project_a.path())
+            .with_base_game_root(base.path());
+        let source_a = resolver_a
+            .resolve_existing("common/test_domain/a.txt")
+            .unwrap()
+            .unwrap();
+        let resolver_b = SourceResolver::new(SourceGeneration::new(42))
+            .with_current_project_root(project_b.path())
+            .with_base_game_root(base.path())
+            .with_replace_paths(
+                ReplacePathSet::from_descriptor_text("replace_path = \"common/test_domain\"")
+                    .unwrap(),
+            );
+        assert!(matches!(
+            resolver_b.resolve("common/test_domain/a.txt").unwrap(),
+            SourceLookup::BlockedByReplacePath { .. }
+        ));
+        assert!(matches!(
+            resolver_b.read_resolved(&source_a),
+            Err(SourceResolutionError::StaleGeneration { .. })
+        ));
     }
 }

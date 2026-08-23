@@ -2,6 +2,7 @@
 /dist/
 .rcs/
 .hoi4-state-editor/
+hoi4modutilities-master/
 backups/
 logs/
 *.log
