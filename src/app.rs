@@ -10,6 +10,7 @@ pub mod political;
 pub(crate) mod presentation;
 pub(crate) mod problems_ui;
 pub mod project;
+pub(crate) mod project_lifecycle;
 pub mod resources;
 pub(crate) mod save_ui;
 pub mod state;
@@ -27,9 +28,11 @@ use self::interface::{ButtonId, Interface, StateActionAvailability, get_interfac
 use self::map::ProvinceSaveMode;
 use self::map_layers::WorkspaceMode;
 use self::project::{
-    CompatibilityCode, CompatibilityFinding, Hoi4Project, LassoSelectionMode, MapViewMode,
-    ProjectGeneration, ProjectPathError, ProjectPaths, ProvinceInclusionMode, StateBrushMode,
-    StateFillMode, scan_project,
+    LassoSelectionMode, MapViewMode, ProjectGeneration, ProvinceInclusionMode, StateBrushMode,
+    StateFillMode,
+};
+use self::project_lifecycle::{
+    ProjectLifecycleController, ProjectLifecycleEffect, ProjectOpenCandidate, ProjectStartupEffect,
 };
 use crate::config::{ConfigIssue, FileFingerprint, GlobalConfig, ProjectConfig, SaveConfigError};
 use crate::error::Error;
@@ -110,6 +113,7 @@ pub struct App {
     preferences_dialog: Option<PreferencesDialog>,
     viewport: Option<Viewport>,
     project_generation: ProjectGeneration,
+    project_lifecycle: ProjectLifecycleController,
 }
 
 impl EventHandler for App {
@@ -139,6 +143,7 @@ impl EventHandler for App {
             preferences_dialog: None,
             viewport: None,
             project_generation: ProjectGeneration::default(),
+            project_lifecycle: ProjectLifecycleController::default(),
         }
     }
 
@@ -148,23 +153,17 @@ impl EventHandler for App {
                 "Global configuration could not be loaded. Defaults are being used for this session. The original file was not modified.\n{issue}"
             )));
         }
-        if let Some(path) = std::env::args().nth(1) {
-            self.raw_open_map_at(path);
-        } else if self.global_config.open_last_project
-            && let Some(path) = self.global_config.last_project.clone()
-        {
-            if path.exists() {
-                self.raw_open_map_at(path);
-            } else {
-                self.alerts.push(Err(
-                    "The last project no longer exists. Open another HOI4 mod to replace it.",
-                ));
-            }
-        } else {
-            self.alerts.push(Ok(
+        match ProjectLifecycleController::startup_effect(
+            std::env::args().nth(1).map(PathBuf::from),
+            self.global_config.open_last_project,
+            self.global_config.last_project.clone(),
+        ) {
+            ProjectStartupEffect::OpenPath(path) => self.open_project_path(path),
+            ProjectStartupEffect::ShowError(message) => self.alerts.push(Err(message)),
+            ProjectStartupEffect::ShowWelcome => self.alerts.push(Ok(
                 "HOI4 Map Editor is a standalone tool; no HOI4 playset is required. Open or drag a mod root. Use Help > User Guide for setup help and Help > Open Logs Folder for diagnostics.",
-            ));
-        };
+            )),
+        }
     }
 
     fn on_render(&mut self, ctx: Context, cursor_pos: Option<Vector2<f64>>, gl: &mut GlGraphics) {
@@ -675,35 +674,12 @@ impl EventHandler for App {
     }
 
     fn on_file_drop(&mut self, path: PathBuf) {
-        if self
-            .canvas
-            .as_ref()
-            .is_some_and(Canvas::save_blocks_editing)
-        {
-            self.alerts
-                .push(Err("Finish the active save before opening another project"));
-            return;
-        }
-        if !self.resolve_property_draft() {
-            return;
-        }
-        if self
-            .canvas
-            .as_ref()
-            .is_some_and(Canvas::has_unsaved_province_edits)
-            && !msg_dialog_discard_province_edits()
+        if !self
+            .prepare_project_replacement("Finish the active save before opening another project")
         {
             return;
         }
-        if self
-            .canvas
-            .as_ref()
-            .is_some_and(Canvas::has_unsaved_state_edits)
-            && !msg_dialog_discard_state_edits()
-        {
-            return;
-        }
-        self.raw_open_map_at(path);
+        self.open_project_path(path);
     }
 
     fn on_resize(&mut self, viewport: Viewport) {
@@ -1336,14 +1312,8 @@ impl App {
             return;
         }
         if id == ToolbarViewChooseBaseGameDefinitions {
-            if let Some(root) = file_dialog_base_game_definitions() {
-                let applied = self.canvas.as_mut().is_some_and(|canvas| {
-                    canvas.set_base_game_definition_root(Some(root.clone()), &mut self.alerts)
-                });
-                if applied {
-                    self.remember_base_game_root(Some(root));
-                }
-            }
+            let effect = self.project_lifecycle.request_base_game_dialog();
+            self.apply_project_lifecycle_effect(effect);
             return;
         }
         if matches!(
@@ -1837,31 +1807,13 @@ impl App {
     }
 
     fn action_open_map(&mut self, archive: bool) {
-        if self
-            .canvas
-            .as_ref()
-            .is_some_and(Canvas::save_blocks_editing)
-        {
-            self.alerts.push(Err(
-                "Finish or recover the active save before opening another project",
-            ));
+        if !self.prepare_project_replacement(
+            "Finish or recover the active save before opening another project",
+        ) {
             return;
         }
-        if !self.resolve_property_draft() {
-            return;
-        }
-        if let Some(canvas) = &mut self.canvas {
-            if canvas.has_unsaved_province_edits() && !msg_dialog_discard_province_edits() {
-                return;
-            }
-            if canvas.has_unsaved_state_edits() && !msg_dialog_discard_state_edits() {
-                return;
-            }
-        };
-
-        if let Some(location) = file_dialog_open(archive) {
-            self.raw_open_map_at(location);
-        };
+        let effect = self.project_lifecycle.request_project_dialog(archive);
+        self.apply_project_lifecycle_effect(effect);
     }
 
     fn action_save_map(&mut self) {
@@ -1950,79 +1902,126 @@ impl App {
         }
     }
 
-    fn raw_open_map_at(&mut self, location: impl IntoLocation) {
-        let remembered_base_game_root = self.global_config.base_game_root.clone();
-        let result: Result<String, Error> = crate::try_block! {
-          let location = location.into_location()?;
-          let (canvas, success_message) = match location {
-            Location::Directory(root) => match ProjectPaths::discover(&root) {
-              Ok(paths) => {
-                let root = paths.root.clone();
-                let project_config_issue = ProjectConfig::load(&root)
-                    .ok()
-                    .and_then(|loaded| loaded.issue);
-                let project = Hoi4Project::new(paths);
-                let canvas = Canvas::load_project(project, remembered_base_game_root.clone())
-                  .map_err(|error| compatibility_open_error(&root, error))?;
-                let mut success_message = format!(
-                  "Loaded HOI4 mod from {}\n{}",
-                  root.display(),
-                  canvas.detected_capabilities_message()
-                );
-                if let Some(issue) = project_config_issue {
-                    success_message.push_str(&format!(
-                        "\n{}\n{issue}",
-                        crate::localization::tr("config.invalid_project")
-                    ));
-                }
-                (canvas, success_message)
-              },
-              Err(ProjectPathError::MissingHistoryDirectory(_)
-                | ProjectPathError::MissingStatesDirectory(_))
-                if root.join("map/provinces.bmp").is_file()
-                  && root.join("map/definition.csv").is_file() => {
-                  // A province-only project still has the same project-root
-                  // layout.  Canvas::load expects a map directory, not its
-                  // parent root; loading the parent silently made this valid
-                  // degradation path fail before it could replace a project.
-                  let location = Location::Directory(root.join("map"));
-                  let success_message = format!(
-                    "Loaded Province-only project from {}. State editing is unavailable because history/states is missing.",
-                    root.display()
-                  );
-                  (
-                    Canvas::load(location)
-                      .map_err(|error| compatibility_open_error(&root, error))?,
-                    success_message,
-                  )
-                },
-              Err(err) if ProjectPaths::is_project_root_candidate(&root) => {
-                return Err(compatibility_open_error(&root, err.into()));
-              },
-              Err(_) => {
-                let location = Location::Directory(root);
-                let success_message = format!("Loaded legacy editable map from {}", location);
-                (Canvas::load(location)?, success_message)
-              }
-            },
-            location => {
-              let success_message = format!("Loaded legacy editable map from {}", location);
-              (Canvas::load(location)?, success_message)
+    fn prepare_project_replacement(&mut self, save_blocked_message: &str) -> bool {
+        if self
+            .canvas
+            .as_ref()
+            .is_some_and(Canvas::save_blocks_editing)
+        {
+            self.alerts.push(Err(save_blocked_message));
+            return false;
+        }
+        if !self.resolve_property_draft() {
+            return false;
+        }
+        if let Some(canvas) = &mut self.canvas {
+            if canvas.has_unsaved_province_edits() && !msg_dialog_discard_province_edits() {
+                return false;
             }
-          };
-          self.replace_project_canvas(canvas);
-          self.apply_remembered_ui_preferences();
-          if let Some(project) = self.canvas.as_ref().and_then(Canvas::project) {
-              self.global_config.last_project = Some(project.paths.root.clone());
-          }
-          Ok(success_message)
-        };
-
-        self.handle_result(result);
+            if canvas.has_unsaved_state_edits() && !msg_dialog_discard_state_edits() {
+                return false;
+            }
+        }
+        true
     }
 
-    /// Install only a fully loaded replacement. `raw_open_map_at` constructs
-    /// the candidate Canvas first, so a failed load leaves the old context
+    fn open_project_path(&mut self, path: impl IntoLocation) {
+        match path.into_location() {
+            Ok(location) => self.open_project_location(location),
+            Err(error) => self.handle_result::<String>(Err(error.into())),
+        }
+    }
+
+    fn open_project_location(&mut self, location: Location) {
+        let effect = self.project_lifecycle.request_open_location(location);
+        self.apply_project_lifecycle_effect(effect);
+    }
+
+    fn apply_project_lifecycle_effect(&mut self, effect: ProjectLifecycleEffect) {
+        match effect {
+            ProjectLifecycleEffect::RequestProjectDialog { archive } => {
+                let effect = self
+                    .project_lifecycle
+                    .project_dialog_result(file_dialog_open(archive));
+                self.apply_project_lifecycle_effect(effect);
+            }
+            ProjectLifecycleEffect::RequestBaseGameDialog => {
+                let effect = self
+                    .project_lifecycle
+                    .base_game_dialog_result(file_dialog_base_game_definitions());
+                self.apply_project_lifecycle_effect(effect);
+            }
+            ProjectLifecycleEffect::PrepareCandidate(location) => {
+                self.load_project_candidate(location);
+            }
+            ProjectLifecycleEffect::ApplyBaseGameRoot(root) => {
+                let applied = self.canvas.as_mut().is_some_and(|canvas| {
+                    canvas.set_base_game_definition_root(Some(root.clone()), &mut self.alerts)
+                });
+                if applied {
+                    self.remember_base_game_root(Some(root));
+                }
+            }
+            ProjectLifecycleEffect::None => {}
+        }
+    }
+
+    fn load_project_candidate(&mut self, location: Location) {
+        let candidate = match ProjectOpenCandidate::discover(location) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.project_lifecycle.candidate_open_failed();
+                self.handle_result::<String>(Err(error));
+                return;
+            }
+        };
+        let remembered_base_game_root = self.global_config.base_game_root.clone();
+        let result: Result<(Canvas, String), Error> = match candidate {
+            ProjectOpenCandidate::Project {
+                root,
+                project,
+                project_config_issue,
+            } => Canvas::load_project(*project, remembered_base_game_root)
+                .map(|canvas| {
+                    let message = ProjectOpenCandidate::project_success_message(
+                        &root,
+                        &canvas.detected_capabilities_message(),
+                        project_config_issue,
+                    );
+                    (canvas, message)
+                })
+                .map_err(|error| ProjectOpenCandidate::load_error(&root, error)),
+            ProjectOpenCandidate::ProvinceOnly { root, location } => Canvas::load(location)
+                .map(|canvas| {
+                    let message = ProjectOpenCandidate::province_only_success_message(&root);
+                    (canvas, message)
+                })
+                .map_err(|error| ProjectOpenCandidate::load_error(&root, error)),
+            ProjectOpenCandidate::Legacy { location } => {
+                Canvas::load(location.clone()).map(|canvas| {
+                    let message = ProjectOpenCandidate::legacy_success_message(&location);
+                    (canvas, message)
+                })
+            }
+        };
+        match result {
+            Ok((canvas, success_message)) => {
+                self.replace_project_canvas(canvas);
+                self.apply_remembered_ui_preferences();
+                if let Some(project) = self.canvas.as_ref().and_then(Canvas::project) {
+                    self.global_config.last_project = Some(project.paths.root.clone());
+                }
+                self.handle_result(Ok(success_message));
+            }
+            Err(error) => {
+                self.project_lifecycle.candidate_open_failed();
+                self.handle_result::<String>(Err(error));
+            }
+        }
+    }
+
+    /// Install only a fully loaded replacement. The lifecycle candidate loader
+    /// constructs the Canvas first, so a failed load leaves the old context
     /// untouched. A Canvas owns all map-sized textures, sessions, diagnostics,
     /// lazy Political/Resources caches, and save state; replacing it drops all
     /// of those objects together rather than allowing a hybrid project.
@@ -2034,6 +2033,8 @@ impl App {
         }
         let previous = self.canvas.replace(canvas);
         drop(previous);
+        self.project_lifecycle
+            .candidate_activated(self.project_generation);
 
         // These are App-level interaction transients, not global preferences.
         self.painting = false;
@@ -2149,59 +2150,6 @@ impl fmt::Debug for App {
             .field("interface", &self.interface)
             .field("painting", &self.painting)
             .finish()
-    }
-}
-
-fn compatibility_open_error(root: &Path, error: Error) -> Error {
-    let report = scan_project(root.to_owned());
-    let Some(finding) = report.primary_blocker() else {
-        return error;
-    };
-    let dimensions = report
-        .bitmap
-        .as_ref()
-        .map(|bitmap| {
-            format!(
-                "; map dimensions: {}x{}",
-                bitmap.dimensions[0], bitmap.dimensions[1]
-            )
-        })
-        .unwrap_or_default();
-    Error::from(format!(
-        "{error}\nCompatibility scan: {}{dimensions} [code: {}]",
-        compatibility_finding_summary(finding),
-        finding.code.identifier(),
-    ))
-}
-
-fn compatibility_finding_summary(finding: &CompatibilityFinding) -> &'static str {
-    match finding.code {
-        CompatibilityCode::SparseProvinceIds => {
-            "sparse Province IDs are supported and will be preserved"
-        }
-        CompatibilityCode::ProvinceBitmapUnreadable => "provinces.bmp could not be read as a BMP",
-        CompatibilityCode::DefinitionMalformed => "definition.csv could not be interpreted",
-        CompatibilityCode::DefinitionEmpty => "definition.csv contains no province records",
-        CompatibilityCode::DuplicateProvinceId => "definition.csv contains duplicate Province IDs",
-        CompatibilityCode::DuplicateProvinceColor => {
-            "definition.csv contains duplicate Province colors"
-        }
-        CompatibilityCode::BitmapColorMissingDefinition => {
-            "provinces.bmp uses colors missing from definition.csv"
-        }
-        CompatibilityCode::StateReferencesMissingProvince => {
-            "State files reference Province IDs missing from definition.csv"
-        }
-        CompatibilityCode::MapDirectoryMissing => "the map directory is missing",
-        CompatibilityCode::ProvinceBitmapMissing => "map/provinces.bmp is missing",
-        CompatibilityCode::DefinitionMissing => "map/definition.csv is missing",
-        CompatibilityCode::InvalidProvinceIdRange => {
-            "definition.csv contains Province ID zero, which the editor cannot interpret"
-        }
-        CompatibilityCode::DefinitionColorUnused
-        | CompatibilityCode::StatesDirectoryMissing
-        | CompatibilityCode::RelatedBitmapUnreadable
-        | CompatibilityCode::RelatedBitmapDimensionsMismatch => "a compatibility issue was found",
     }
 }
 

@@ -27,6 +27,20 @@ Canvas/App execute the UI requests and retain task lifecycle ownership. Save UI
 state is reset on project generation replacement and its commit request is
 one-shot until the save engine either starts or rejects it.
 
+`project_lifecycle` owns the synchronous project/base-game picker state and
+the request/effect transition from a selected location to isolated candidate
+discovery. `ProjectOpenCandidate` identifies a normal mod, the existing
+province-only degradation path, or a legacy map; it does not load or activate
+live Canvas state. App executes native dialogs and candidate loading, while
+`Canvas` remains the accepted, fully loaded candidate and owns the coherent
+live-state replacement. All fallible discovery and loading completes before
+`replace_project_canvas` advances the generation. That hook binds the new
+Canvas generation, then resets its PresentationRuntime, Problems controller,
+Save UI controller, round-trip snapshot, and navigation marker through their
+existing public lifecycle APIs before the old Canvas is dropped. A failed or
+canceled candidate restores the prior lifecycle generation without touching
+the live Canvas, its source graph, or its caches.
+
 Political and Resources retain their focused domain parsers and existing Canvas
 draw paths. Their source-aware catalog/icon caches are owned by the runtime and
 remain generation-bound; a State revision does not parse either source again.
@@ -47,4 +61,5 @@ replacement. PNG composition uses the same immutable model and overlay order
 
 Map presentation direction is `map/project/state -> presentation/problems_ui -> Canvas -> App/UI`.
 Project Save review direction is `project save engine -> SaveReviewModel -> SaveUiController -> Canvas/App`.
-Neither presentation resource, Problems UI, nor Save UI imports `Canvas` or `App`.
+Project opening direction is `project discovery -> ProjectOpenCandidate -> ProjectLifecycleController -> App dialogs/loading -> Canvas activation`.
+Neither presentation resource, Problems UI, Save UI, nor project lifecycle imports `Canvas` or `App`.
