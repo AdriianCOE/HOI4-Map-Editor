@@ -65,6 +65,7 @@ Switch between:
 - Coastal Provinces
 - States
 - Political
+- Strategic Regions (read-only)
 
 Political View resolves country colors, localized country names, and available
 normal flags from the user's mod/base-game installation. It remains read-only:
@@ -299,7 +300,10 @@ The project does not distribute proprietary Hearts of Iron IV assets.
 
 ### Strategic Regions
 
-- Display region boundaries and membership.
+Strategic Regions can be inspected as a read-only Map View with deterministic
+region colors, membership boundaries, selection, and State-split decoration.
+The existing inspector remains available for source details and provenance.
+
 - Create and edit strategic regions.
 - Assign and remove states.
 - Edit weather and related region data.

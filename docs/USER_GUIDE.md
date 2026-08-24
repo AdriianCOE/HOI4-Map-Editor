@@ -21,6 +21,12 @@ map, so inspector edits appear before Save Project. Resource icons are loaded
 from the local mod/base-game installation; unresolved or custom icons use a
 textual fallback.
 
+**Strategic Regions** is a read-only Map View. It colors loaded memberships,
+draws boundaries between regions, and opens the selected region in the existing
+Strategic Regions panel. Ambiguous memberships retain the current selection;
+unassigned or unavailable source coverage clears it. It does not edit or save
+Strategic Region files.
+
 ## Province workspace
 
 - **Save Project** reviews and saves pending province-map and state changes

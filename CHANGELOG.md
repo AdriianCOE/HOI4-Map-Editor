@@ -4,6 +4,8 @@
 
 ### Added
 
+- Read-only Strategic Regions Map View with deterministic colors, boundaries,
+  Canvas-owned selection, and current-State split decoration.
 - Political View with country colors, localized country names, runtime flags,
   mod-over-base color resolution, and deterministic fallbacks when metadata is
   incomplete.

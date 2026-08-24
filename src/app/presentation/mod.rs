@@ -19,7 +19,11 @@ use super::map_layers::MapBaseView;
 use super::political::{PoliticalCountryCatalog, PoliticalLabel, TerritoryAnchorIndex};
 use super::project::{
     MapPresentationModel, ProblemsOverlayModel, ProjectGeneration, ProjectValidationDiagnostic,
-    SourceGeneration, StateEditSession, build_map_presentation, build_overlay,
+    SourceGeneration, StateEditSession, StrategicRegionLoadResult, StrategicRegionStateSplitModel,
+    StrategicRegionsMapModel, build_map_presentation, build_overlay, build_state_split_model,
+    build_strategic_regions_map_model, collect_strategic_region_boundaries,
+    strategic_region_selection_overlay, strategic_region_state_split_overlay,
+    strategic_region_texture,
 };
 use super::resources::{ResourceIconResolver, ResourceMapLabel};
 
@@ -44,6 +48,21 @@ pub(crate) struct ResourcesPresentationCache {
     pub(crate) cache_generation: Option<ProjectGeneration>,
 }
 
+/// Derived, read-only assets for the Strategic Regions base view. The base
+/// model is map-generation scoped; the split decoration is State-revision
+/// scoped; and selection is intentionally independent from both.
+#[derive(Default)]
+pub(crate) struct StrategicRegionsPresentationCache {
+    pub(crate) model: Option<StrategicRegionsMapModel>,
+    pub(crate) texture: Option<Texture>,
+    pub(crate) boundaries: Vec<uord::UOrd2<vecmath::Vector2<u32>>>,
+    pub(crate) split: Option<StrategicRegionStateSplitModel>,
+    pub(crate) split_texture: Option<Texture>,
+    pub(crate) split_revision: Option<u64>,
+    pub(crate) selection_texture: Option<Texture>,
+    pub(crate) selected_id: Option<u32>,
+}
+
 /// Generation- and revision-bound resources needed to present State data.
 ///
 /// Invalidation matrix:
@@ -59,6 +78,7 @@ pub(crate) struct PresentationRuntime {
     generation: Option<ProjectGeneration>,
     pub(crate) political: PoliticalPresentationCache,
     pub(crate) resources: ResourcesPresentationCache,
+    pub(crate) strategic_regions: StrategicRegionsPresentationCache,
     pub(crate) territory_anchor_index: Option<TerritoryAnchorIndex>,
     pub(crate) territory_anchor_generation: Option<ProjectGeneration>,
     map_presentation: Option<MapPresentationModel>,
@@ -91,6 +111,7 @@ impl PresentationRuntime {
             ..Default::default()
         };
         self.resources = ResourcesPresentationCache::default();
+        self.strategic_regions = StrategicRegionsPresentationCache::default();
         self.territory_anchor_index = None;
         self.territory_anchor_generation = None;
         self.invalidate_state_revision();
@@ -109,6 +130,9 @@ impl PresentationRuntime {
         self.state_category_texture = None;
         self.manpower_texture = None;
         self.dmz_texture = None;
+        self.strategic_regions.split = None;
+        self.strategic_regions.split_texture = None;
+        self.strategic_regions.split_revision = None;
     }
 
     pub(crate) fn ensure_state_presentation(
@@ -192,8 +216,62 @@ impl PresentationRuntime {
         match view {
             MapBaseView::StateCategory => self.state_category_texture.as_ref(),
             MapBaseView::Manpower => self.manpower_texture.as_ref(),
+            MapBaseView::StrategicRegions => self.strategic_regions.texture.as_ref(),
             _ => None,
         }
+    }
+
+    pub(crate) fn ensure_strategic_regions_presentation(
+        &mut self,
+        generation: ProjectGeneration,
+        map: &Map,
+        loaded: &StrategicRegionLoadResult,
+        state_by_province: Option<&HashMap<u32, u32>>,
+        state_revision: Option<u64>,
+    ) {
+        if self.generation != Some(generation) {
+            self.on_project_replaced(generation);
+        }
+        if self.strategic_regions.model.is_none() {
+            let mut model = build_strategic_regions_map_model(loaded, map.province_ids());
+            model.boundaries = collect_strategic_region_boundaries(map, &model.membership);
+            let settings = TextureSettings::new().mag(Filter::Nearest);
+            self.strategic_regions.texture = Some(Texture::from_image(
+                &strategic_region_texture(map, &model),
+                &settings,
+            ));
+            self.strategic_regions.boundaries = model.boundaries.clone();
+            self.strategic_regions.model = Some(model);
+        }
+        let Some(model) = self.strategic_regions.model.as_ref() else {
+            return;
+        };
+        if self.strategic_regions.split_revision != state_revision {
+            self.strategic_regions.split =
+                state_by_province.map(|states| build_state_split_model(model, states));
+            self.strategic_regions.split_texture =
+                self.strategic_regions.split.as_ref().map(|split| {
+                    Texture::from_image(
+                        &strategic_region_state_split_overlay(map, model, split),
+                        &TextureSettings::new().mag(Filter::Nearest),
+                    )
+                });
+            self.strategic_regions.split_revision = state_revision;
+        }
+    }
+
+    pub(crate) fn set_strategic_region_selection(&mut self, map: &Map, selected_id: Option<u32>) {
+        if self.strategic_regions.selected_id == selected_id {
+            return;
+        }
+        self.strategic_regions.selection_texture =
+            self.strategic_regions.model.as_ref().map(|model| {
+                Texture::from_image(
+                    &strategic_region_selection_overlay(map, model, selected_id),
+                    &TextureSettings::new().mag(Filter::Nearest),
+                )
+            });
+        self.strategic_regions.selected_id = selected_id;
     }
 
     pub(crate) fn dmz_texture(&self) -> Option<&Texture> {

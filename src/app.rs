@@ -1685,6 +1685,9 @@ impl App {
             (Some(_), ToolbarViewManpowerMap) => {
                 self.action_change_map_view_mode(MapViewMode::Manpower)
             }
+            (Some(_), ToolbarViewStrategicRegionsMap) => {
+                self.action_change_map_view_mode(MapViewMode::StrategicRegions)
+            }
             (Some(canvas), ToolbarViewResourcesMap | ToolbarViewToggleResourcesOverlay) => {
                 canvas.toggle_resources_overlay(&mut self.alerts)
             }
@@ -2264,6 +2267,7 @@ fn map_view_preference(mode: MapViewMode) -> &'static str {
         MapViewMode::Political => "political",
         MapViewMode::StateCategory => "state-category",
         MapViewMode::Manpower => "manpower",
+        MapViewMode::StrategicRegions => "strategic-regions",
         MapViewMode::Resources => "resources",
     }
 }
@@ -2279,6 +2283,7 @@ fn map_view_from_preference(value: &str) -> Option<MapViewMode> {
         "political" => Some(MapViewMode::Political),
         "state-category" => Some(MapViewMode::StateCategory),
         "manpower" => Some(MapViewMode::Manpower),
+        "strategic-regions" => Some(MapViewMode::StrategicRegions),
         "resources" => Some(MapViewMode::Resources),
         _ => None,
     }

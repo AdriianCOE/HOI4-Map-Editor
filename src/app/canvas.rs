@@ -219,6 +219,8 @@ pub struct Canvas {
     inspector_search_index: usize,
     inspector_picker: Option<InspectorPickerState>,
     strategic_regions_ui: StrategicRegionsController,
+    selected_strategic_region_id: Option<u32>,
+    pending_strategic_region_focus: Option<u32>,
     strategic_regions_search_focused: bool,
     map_tag_picker: MapTagPicker,
     state_double_click: DoubleClickTracker,
@@ -506,6 +508,8 @@ impl Canvas {
         self.problems_ui.reset();
         self.strategic_regions_ui
             .reset_for_generation(SourceGeneration::new(generation.0));
+        self.selected_strategic_region_id = None;
+        self.pending_strategic_region_focus = None;
         self.strategic_regions_search_focused = false;
         self.save_ui.reset_for_generation(generation);
     }
@@ -797,6 +801,8 @@ impl Canvas {
             inspector_search_index: 0,
             inspector_picker: None,
             strategic_regions_ui: StrategicRegionsController::default(),
+            selected_strategic_region_id: None,
+            pending_strategic_region_focus: None,
             strategic_regions_search_focused: false,
             map_tag_picker: MapTagPicker::default(),
             state_double_click: DoubleClickTracker::default(),
@@ -980,8 +986,13 @@ impl Canvas {
             )));
             return;
         }
+        self.set_map_view_mode(alerts, MapViewMode::StrategicRegions);
         self.strategic_regions_ui
-            .focus(SourceGeneration::new(self.project_generation.0), id);
+            .focus(SourceGeneration::new(self.project_generation.0));
+        self.selected_strategic_region_id = Some(id);
+        self.pending_strategic_region_focus = Some(id);
+        self.presentation
+            .set_strategic_region_selection(&self.bundle.map, Some(id));
         self.strategic_regions_search_focused = false;
     }
 
@@ -999,14 +1010,14 @@ impl Canvas {
             let presentation = self.strategic_regions_ui.presentation(
                 SourceGeneration::new(self.project_generation.0),
                 &project.strategic_regions,
+                self.selected_strategic_region_id,
                 |id| self.bundle.map.contains_province_id(id),
             );
             if presentation.rows.is_empty() {
                 return;
             }
             let current = self
-                .strategic_regions_ui
-                .selected_id
+                .selected_strategic_region_id
                 .and_then(|id| presentation.rows.iter().position(|row| row.id == id))
                 .unwrap_or(0);
             let index = if next {
@@ -1016,8 +1027,7 @@ impl Canvas {
                     .checked_sub(1)
                     .unwrap_or(presentation.rows.len() - 1)
             };
-            self.strategic_regions_ui
-                .select(presentation.rows[index].id);
+            self.select_strategic_region(presentation.rows[index].id);
             return;
         }
         let count = self.inspector_search_results().len();
@@ -3261,6 +3271,12 @@ impl Canvas {
         {
             self.ensure_map_presentation();
         }
+        if self.map_layers.base_view == MapBaseView::StrategicRegions {
+            self.ensure_strategic_regions_presentation();
+            if let Some(id) = self.pending_strategic_region_focus.take() {
+                self.focus_strategic_region_bounds(interface, id);
+            }
+        }
         debug_assert!(
             self.presentation
                 .territory_anchor_generation
@@ -3289,8 +3305,28 @@ impl Canvas {
                 .presentation
                 .texture_for_view(self.map_layers.base_view)
                 .unwrap_or(&self.texture),
+            MapBaseView::StrategicRegions => self
+                .presentation
+                .texture_for_view(MapBaseView::StrategicRegions)
+                .unwrap_or(&self.texture),
         };
         graphics::image(texture, transform, gl);
+        if self.map_layers.base_view == MapBaseView::StrategicRegions {
+            if let Some(texture) = &self.presentation.strategic_regions.split_texture {
+                graphics::image(texture, transform, gl);
+            }
+            if let Some(texture) = &self.presentation.strategic_regions.selection_texture {
+                graphics::image(texture, transform, gl);
+            }
+            self.draw_boundary_set(
+                ctx,
+                interface,
+                &self.presentation.strategic_regions.boundaries,
+                [0.04, 0.04, 0.04, 0.95],
+                1.5,
+                gl,
+            );
+        }
         if self.map_layers.image_overlay.enabled
             && let Some(image_overlay) = &self.image_overlay_texture
         {
@@ -3922,6 +3958,7 @@ impl Canvas {
                 | MapBaseView::Political
                 | MapBaseView::StateCategory
                 | MapBaseView::Manpower
+                | MapBaseView::StrategicRegions
                 | MapBaseView::Resources => colors::BLACK,
                 MapBaseView::ProvinceColors => match province_data.kind {
                     ProvinceKind::Land | ProvinceKind::Lake => colors::BLACK,
@@ -4053,6 +4090,7 @@ impl Canvas {
                     | MapBaseView::Political
                     | MapBaseView::StateCategory
                     | MapBaseView::Manpower
+                    | MapBaseView::StrategicRegions
                     | MapBaseView::Resources => colors::BLACK,
                     MapBaseView::Continents => colors::WHITE,
                     MapBaseView::Coastal => colors::NEUTRAL,
@@ -4745,6 +4783,7 @@ impl Canvas {
         let presentation = self.strategic_regions_ui.presentation(
             SourceGeneration::new(self.project_generation.0),
             &project.strategic_regions,
+            self.selected_strategic_region_id,
             |id| self.bundle.map.contains_province_id(id),
         );
         let layout = StrategicRegionsCanvasLayout::new(interface);
@@ -4860,7 +4899,7 @@ impl Canvas {
                     &format!("#{} — {} — {}", row.id, row.name, row.province_count),
                     rect[2] - 8.0,
                 ),
-                self.strategic_regions_ui.selected_id == Some(row.id),
+                self.selected_strategic_region_id == Some(row.id),
             );
         }
         let Some(detail) = presentation.detail else {
@@ -4933,6 +4972,7 @@ impl Canvas {
                 StrategicRegionsRequest::RevealSource(_) => tr("project_validation.reveal_source"),
                 StrategicRegionsRequest::CopySource(_) => tr("project_validation.copy_source_path"),
                 StrategicRegionsRequest::NavigateProvince(_) => unreachable!(),
+                StrategicRegionsRequest::SelectStrategicRegion(_) => unreachable!(),
             };
             draw_editor_button(
                 ctx,
@@ -4996,6 +5036,7 @@ impl Canvas {
         let presentation = self.strategic_regions_ui.presentation(
             SourceGeneration::new(self.project_generation.0),
             &project.strategic_regions,
+            self.selected_strategic_region_id,
             |id| self.bundle.map.contains_province_id(id),
         );
         let row_height = 23.0;
@@ -5010,7 +5051,11 @@ impl Canvas {
                 break;
             }
             if point_in_rect(pos, rect) {
-                self.strategic_regions_ui.select(row.id);
+                if let StrategicRegionsRequest::SelectStrategicRegion(id) =
+                    StrategicRegionsController::selection_request(row.id)
+                {
+                    self.select_strategic_region(id);
+                }
                 self.strategic_regions_search_focused = false;
                 return (true, None);
             }
@@ -5066,6 +5111,7 @@ impl Canvas {
             .presentation(
                 SourceGeneration::new(self.project_generation.0),
                 &project.strategic_regions,
+                self.selected_strategic_region_id,
                 |id| self.bundle.map.contains_province_id(id),
             )
             .rows
@@ -6359,6 +6405,115 @@ impl Canvas {
         );
     }
 
+    fn ensure_strategic_regions_presentation(&mut self) {
+        let Some(project) = self.project.as_ref() else {
+            return;
+        };
+        let (state_by_province, revision) = self
+            .state_edit_session
+            .as_ref()
+            .map(|edit| (Some(edit.state_by_province()), Some(edit.revision())))
+            .unwrap_or((None, None));
+        self.presentation.ensure_strategic_regions_presentation(
+            self.project_generation,
+            &self.bundle.map,
+            &project.strategic_regions,
+            state_by_province,
+            revision,
+        );
+        self.presentation
+            .set_strategic_region_selection(&self.bundle.map, self.selected_strategic_region_id);
+    }
+
+    fn select_strategic_region(&mut self, id: u32) {
+        self.selected_strategic_region_id = Some(id);
+        self.strategic_regions_ui
+            .open(SourceGeneration::new(self.project_generation.0));
+        self.strategic_regions_search_focused = false;
+        self.presentation
+            .set_strategic_region_selection(&self.bundle.map, Some(id));
+    }
+
+    fn select_strategic_region_at(
+        &mut self,
+        interface: &Interface,
+        screen_position: Vector2<f64>,
+        alerts: &mut Alerts,
+    ) {
+        self.ensure_strategic_regions_presentation();
+        let Some(position) = self
+            .camera
+            .relative_position_int(interface, screen_position)
+        else {
+            self.selected_strategic_region_id = None;
+            self.presentation
+                .set_strategic_region_selection(&self.bundle.map, None);
+            return;
+        };
+        let membership = self
+            .bundle
+            .map
+            .get_province_at(position)
+            .preserved_id
+            .and_then(|id| {
+                self.presentation
+                    .strategic_regions
+                    .model
+                    .as_ref()
+                    .and_then(|model| model.membership.get(&id).copied())
+            });
+        match membership {
+            Some(super::project::StrategicRegionMembership::Assigned(id)) => {
+                self.select_strategic_region(id)
+            }
+            Some(super::project::StrategicRegionMembership::Ambiguous) => {
+                // Preserve the last valid selection: an overlapping source must
+                // never manufacture a plausible but arbitrary region choice.
+                alerts.push(Err(
+                    "Strategic Region membership is ambiguous; selection preserved",
+                ));
+            }
+            Some(super::project::StrategicRegionMembership::Unassigned)
+            | Some(super::project::StrategicRegionMembership::Unknown)
+            | None => {
+                self.selected_strategic_region_id = None;
+                self.presentation
+                    .set_strategic_region_selection(&self.bundle.map, None);
+            }
+        }
+    }
+
+    fn focus_strategic_region_bounds(&mut self, interface: &Interface, id: u32) {
+        let Some(region) = self.project.as_ref().and_then(|project| {
+            project
+                .strategic_regions
+                .regions
+                .iter()
+                .find(|region| region.id == id)
+        }) else {
+            return;
+        };
+        let extents = self.bundle.map.province_extents_by_id();
+        let mut bounds = region
+            .provinces
+            .iter()
+            .filter_map(|province| extents.get(province).copied());
+        let Some(mut combined) = bounds.next() else {
+            return;
+        };
+        for bounds in bounds {
+            combined = combined.join(bounds);
+        }
+        // A conventional min/max box across the horizontal seam would zoom to
+        // the empty world. When it spans more than half the map, use the full
+        // wrapped width, which keeps every disconnected member reachable.
+        if combined.upper[0] - combined.lower[0] > self.bundle.map.width() / 2 {
+            combined.lower[0] = 0;
+            combined.upper[0] = self.bundle.map.width().saturating_sub(1);
+        }
+        self.camera.focus_extents(interface, combined, 2.5);
+    }
+
     fn draw_dmz_overlay(&self, ctx: Context, interface: &Interface, gl: &mut GlGraphics) {
         if !self.map_layers.show_dmz {
             return;
@@ -6861,7 +7016,7 @@ impl Canvas {
     fn current_map_export_image(&mut self) -> Result<RgbaImage, String> {
         if matches!(
             self.map_layers.base_view,
-            MapBaseView::StateCategory | MapBaseView::Manpower
+            MapBaseView::StateCategory | MapBaseView::Manpower | MapBaseView::StrategicRegions
         ) || self.map_layers.show_victory_points
             || self.map_layers.show_dmz
         {
@@ -6941,6 +7096,16 @@ impl Canvas {
                             },
                         )
                 })
+            }
+            MapBaseView::StrategicRegions => {
+                self.ensure_strategic_regions_presentation();
+                let model = self
+                    .presentation
+                    .strategic_regions
+                    .model
+                    .as_ref()
+                    .ok_or_else(|| "Strategic Regions presentation is unavailable".to_owned())?;
+                super::project::strategic_region_texture(&self.bundle.map, model)
             }
         };
         compose_export_overlays(
@@ -7194,6 +7359,12 @@ impl Canvas {
                 MapViewMode::Political => self.refresh_political_texture(),
                 MapViewMode::StateCategory | MapViewMode::Manpower => {
                     self.ensure_map_presentation();
+                }
+                MapViewMode::StrategicRegions => {
+                    // This is a read-only base view; retain a non-editing
+                    // province interaction mode so no ToolMode gains authority.
+                    self.view_mode = ViewMode::Coastal;
+                    self.ensure_strategic_regions_presentation();
                 }
                 MapViewMode::Resources => unreachable!("Resources is an overlay"),
             }
@@ -9879,6 +10050,14 @@ impl Canvas {
         {
             return MapGestureExecution::needs_property_draft_resolution();
         }
+        if self.map_layers.base_view == MapBaseView::StrategicRegions {
+            let execution = self.apply_selection_navigation(
+                interface,
+                SelectionNavigationRequest::SelectStrategicRegionAt { screen_position },
+                alerts,
+            );
+            return MapGestureExecution::with_inspector_request(false, execution.inspector_request);
+        }
         if self.state_pan_is_active() && self.is_state_workspace() {
             self.camera.set_panning(true);
             return MapGestureExecution::handled(true);
@@ -9954,6 +10133,13 @@ impl Canvas {
                 handled: self.clear_state_selection(),
                 inspector_request: None,
             },
+            SelectionNavigationRequest::SelectStrategicRegionAt { screen_position } => {
+                self.select_strategic_region_at(interface, screen_position, alerts);
+                SelectionNavigationExecution {
+                    handled: true,
+                    inspector_request: None,
+                }
+            }
             SelectionNavigationRequest::PanBegin => {
                 self.camera.set_panning(true);
                 SelectionNavigationExecution {
@@ -11932,6 +12118,7 @@ fn strategic_request_external(
         }
         StrategicRegionsRequest::CopySource(path) => Some(InspectorExternalRequest::CopyPath(path)),
         StrategicRegionsRequest::NavigateProvince(_) => None,
+        StrategicRegionsRequest::SelectStrategicRegion(_) => None,
     }
 }
 

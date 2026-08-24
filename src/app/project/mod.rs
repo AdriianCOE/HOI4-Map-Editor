@@ -21,6 +21,7 @@ mod save_plan;
 mod sources;
 mod state_fill;
 mod strategic_regions;
+mod strategic_regions_presentation;
 mod validation;
 mod validation_core;
 mod view;
@@ -104,6 +105,13 @@ pub use strategic_regions::{
     STRATEGIC_REGIONS_DIRECTORY, StrategicRegion, StrategicRegionCoverage,
     StrategicRegionLoadIssue, StrategicRegionLoadIssueKind, StrategicRegionLoadResult,
     load_strategic_regions,
+};
+pub use strategic_regions_presentation::{
+    STRATEGIC_REGION_AMBIGUOUS_COLOR, STRATEGIC_REGION_UNASSIGNED_COLOR,
+    STRATEGIC_REGION_UNKNOWN_COLOR, StrategicRegionMembership, StrategicRegionStateSplitModel,
+    StrategicRegionsMapModel, build_state_split_model, build_strategic_regions_map_model,
+    collect_strategic_region_boundaries, strategic_region_selection_overlay,
+    strategic_region_state_split_overlay, strategic_region_texture,
 };
 pub use validation::{
     ByteComparisonResult, ByteDifference, CandidateApplicationResult,

@@ -15,7 +15,6 @@ use crate::app::project::{
 pub(crate) struct StrategicRegionsController {
     pub(crate) visible: bool,
     pub(crate) search: String,
-    pub(crate) selected_id: Option<u32>,
     generation: Option<SourceGeneration>,
     pub(crate) list_offset: usize,
     cached_rows: Vec<StrategicRegionRowModel>,
@@ -70,6 +69,7 @@ pub(crate) struct StrategicRegionsPresentation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StrategicRegionsRequest {
+    SelectStrategicRegion(u32),
     NavigateProvince(u32),
     OpenSource(PathBuf),
     RevealSource(PathBuf),
@@ -86,10 +86,9 @@ impl StrategicRegionsController {
         self.visible = false;
     }
 
-    pub(crate) fn focus(&mut self, generation: SourceGeneration, id: u32) -> bool {
+    pub(crate) fn focus(&mut self, generation: SourceGeneration) -> bool {
         self.ensure_generation(generation);
         self.visible = true;
-        self.selected_id = Some(id);
         self.list_offset = 0;
         true
     }
@@ -97,7 +96,6 @@ impl StrategicRegionsController {
     pub(crate) fn reset_for_generation(&mut self, generation: SourceGeneration) {
         if self.generation != Some(generation) {
             self.search.clear();
-            self.selected_id = None;
             self.list_offset = 0;
             self.generation = Some(generation);
             self.cached_rows.clear();
@@ -122,14 +120,11 @@ impl StrategicRegionsController {
         self.list_offset = 0;
     }
 
-    pub(crate) fn select(&mut self, id: u32) {
-        self.selected_id = Some(id);
-    }
-
     pub(crate) fn presentation(
         &mut self,
         generation: SourceGeneration,
         loaded: &StrategicRegionLoadResult,
+        selected_id: Option<u32>,
         province_exists: impl Fn(u32) -> bool,
     ) -> StrategicRegionsPresentation {
         self.reset_for_generation(generation);
@@ -138,13 +133,7 @@ impl StrategicRegionsController {
             self.cached_rows = filtered_rows(loaded, &self.search);
             self.cached_rows_key = Some(key);
         }
-        if self
-            .selected_id
-            .is_some_and(|id| !loaded.regions.iter().any(|region| region.id == id))
-        {
-            self.selected_id = None;
-        }
-        let detail = self.selected_id.and_then(|id| {
+        let detail = selected_id.and_then(|id| {
             loaded
                 .regions
                 .iter()
@@ -160,11 +149,14 @@ impl StrategicRegionsController {
 
     pub(crate) fn member_request(
         &self,
-        detail: &StrategicRegionDetailModel,
+        _detail: &StrategicRegionDetailModel,
         member: &StrategicRegionMemberModel,
     ) -> Option<StrategicRegionsRequest> {
-        (detail.id == self.selected_id? && member.navigable)
-            .then_some(StrategicRegionsRequest::NavigateProvince(member.id))
+        (member.navigable).then_some(StrategicRegionsRequest::NavigateProvince(member.id))
+    }
+
+    pub(crate) const fn selection_request(id: u32) -> StrategicRegionsRequest {
+        StrategicRegionsRequest::SelectStrategicRegion(id)
     }
 
     pub(crate) fn source_requests(&self, region: &StrategicRegion) -> Vec<StrategicRegionsRequest> {
@@ -347,7 +339,8 @@ mod tests {
         let valid = BTreeSet::from([1, 3, 9, 42]);
         assert_eq!(
             controller
-                .presentation(SourceGeneration::new(1), &data, |id| valid.contains(&id))
+                .presentation(SourceGeneration::new(1), &data, None, |id| valid
+                    .contains(&id))
                 .rows
                 .iter()
                 .map(|row| row.id)
@@ -357,7 +350,8 @@ mod tests {
         controller.set_search("500".to_owned());
         assert_eq!(
             controller
-                .presentation(SourceGeneration::new(1), &data, |id| valid.contains(&id))
+                .presentation(SourceGeneration::new(1), &data, None, |id| valid
+                    .contains(&id))
                 .rows[0]
                 .id,
             500
@@ -365,7 +359,8 @@ mod tests {
         controller.set_search("mediterranean".to_owned());
         assert_eq!(
             controller
-                .presentation(SourceGeneration::new(1), &data, |id| valid.contains(&id))
+                .presentation(SourceGeneration::new(1), &data, None, |id| valid
+                    .contains(&id))
                 .rows[0]
                 .id,
             500
@@ -373,7 +368,8 @@ mod tests {
         controller.set_search("strategicregion_500".to_owned());
         assert_eq!(
             controller
-                .presentation(SourceGeneration::new(1), &data, |id| valid.contains(&id))
+                .presentation(SourceGeneration::new(1), &data, None, |id| valid
+                    .contains(&id))
                 .rows[0]
                 .id,
             500
@@ -381,7 +377,8 @@ mod tests {
         controller.set_search("42".to_owned());
         assert_eq!(
             controller
-                .presentation(SourceGeneration::new(1), &data, |id| valid.contains(&id))
+                .presentation(SourceGeneration::new(1), &data, None, |id| valid
+                    .contains(&id))
                 .rows
                 .len(),
             2
@@ -392,8 +389,8 @@ mod tests {
     fn detail_keeps_raw_key_missing_members_and_navigation_is_typed() {
         let data = loaded(vec![region(7, "RAW_SEVEN", Some("Baltic"), vec![42, 9999])]);
         let mut controller = StrategicRegionsController::default();
-        controller.focus(SourceGeneration::new(1), 7);
-        let view = controller.presentation(SourceGeneration::new(1), &data, |id| id == 42);
+        controller.focus(SourceGeneration::new(1));
+        let view = controller.presentation(SourceGeneration::new(1), &data, Some(7), |id| id == 42);
         let detail = view.detail.unwrap();
         assert_eq!(detail.display_name, "Baltic");
         assert_eq!(detail.name_key.as_deref(), Some("RAW_SEVEN"));
@@ -413,19 +410,19 @@ mod tests {
     fn missing_localization_falls_back_and_generation_reset_drops_selection() {
         let data = loaded(vec![region(50000, "MY_CUSTOM_REGION", None, vec![])]);
         let mut controller = StrategicRegionsController::default();
-        controller.focus(SourceGeneration::new(1), 50000);
-        let view = controller.presentation(SourceGeneration::new(1), &data, |_| false);
+        controller.focus(SourceGeneration::new(1));
+        let view = controller.presentation(SourceGeneration::new(1), &data, Some(50000), |_| false);
         assert_eq!(view.rows[0].name, "MY_CUSTOM_REGION");
         controller.set_search("custom".to_owned());
         assert_eq!(
             controller
-                .presentation(SourceGeneration::new(1), &data, |_| false)
+                .presentation(SourceGeneration::new(1), &data, Some(50000), |_| false)
                 .rows
                 .len(),
             1
         );
         let empty = StrategicRegionLoadResult::default();
-        let switched = controller.presentation(SourceGeneration::new(2), &empty, |_| false);
+        let switched = controller.presentation(SourceGeneration::new(2), &empty, None, |_| false);
         assert!(switched.detail.is_none());
         assert!(controller.search.is_empty());
         assert_eq!(

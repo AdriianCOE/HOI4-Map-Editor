@@ -19,6 +19,7 @@ pub enum MapBaseView {
     Political,
     StateCategory,
     Manpower,
+    StrategicRegions,
     Resources,
 }
 
@@ -47,6 +48,7 @@ impl MapBaseView {
             Self::Political => "Political",
             Self::StateCategory => "State Category",
             Self::Manpower => "Manpower",
+            Self::StrategicRegions => "Strategic Regions",
             Self::Resources => "Resources",
         }
     }

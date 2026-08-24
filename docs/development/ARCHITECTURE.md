@@ -121,7 +121,7 @@ ordem declarada, `naval_terrain`, fonte e span; falhas de arquivo tornam a
 cobertura parcial sem descartar arquivos validos.
 
 Strategic Regions sao **validados e indexados**, mas ainda **nao sao
-apresentados, selecionaveis, editaveis nem Save-owned**. A validacao e o
+editaveis nem Save-owned**. A validacao e o
 `ProvinceReferenceIndex` consomem o mesmo resultado carregado; nao ha reparse.
 Diagnosticos de ausencia global so ocorrem com cobertura completa, enquanto
 contradicoes positivas (duplicidade, referencia inexistente, associacao
@@ -139,12 +139,21 @@ resolvido, preserva a ordem das Provincias e permite navegar somente membros
 existentes. Trocar a geracao limpa identidade, busca e selecao do projeto
 anterior.
 
+### Strategic Regions map view (Step 9B2)
+
+`MapBaseView::StrategicRegions` e uma camada-base somente leitura, composta a
+partir do `StrategicRegionLoadResult` ja carregado. O cache base e ligado a
+geracao do projeto/mapa; a decoracao de State-split depende apenas da revisao
+efetiva de Estados; e a selecao e uma camada leve de `Canvas`. A classificacao
+e explicita (`Assigned`, `Ambiguous`, `Unassigned`, `Unknown`), usa mapas
+esparsos e trata fontes ausentes/parciais como desconhecidas. Nenhuma fonte e
+relida por frame e a funcionalidade nao adquire permissao de edicao ou Save.
+
 Maturidade atual: **DOMAIN: YES; VALIDATION: YES; REFERENCE INDEX: YES;
-INSPECTOR: YES; SOURCE NAVIGATION: YES; MAP PRESENTATION: NO; MAP SELECTION:
-NO; EDITING: NO; SAVE OWNERSHIP: NO.** O painel e Project Problems podem abrir
+INSPECTOR: YES; SOURCE NAVIGATION: YES; MAP PRESENTATION: YES; MAP SELECTION:
+YES; EDITING: NO; SAVE OWNERSHIP: NO.** O painel e Project Problems podem abrir
 fontes filesystem, revelar containers e copiar caminhos; entradas de archive
-nao recebem uma falsa acao de abrir. Nenhuma textura, overlay ou cache de
-`PresentationRuntime` e criado nesta etapa.
+nao recebem uma falsa acao de abrir.
 
 `app::project` representa a raiz de um mod. `ProjectPaths::discover` valida
 `map/provinces.bmp`, `map/definition.csv` e `history/states/`; adjacencias e

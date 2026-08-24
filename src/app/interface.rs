@@ -1635,6 +1635,7 @@ pub enum ButtonId {
     ToolbarViewPoliticalMap,
     ToolbarViewStateCategoryMap,
     ToolbarViewManpowerMap,
+    ToolbarViewStrategicRegionsMap,
     ToolbarViewResourcesMap,
     ToolbarViewToggleResourcesOverlay,
     ToolbarViewToggleVictoryPointsOverlay,
@@ -1705,6 +1706,10 @@ fn map_view_button_active(id: ButtonId, view: Option<MapViewMode>) -> bool {
             | (
                 ButtonId::ToolbarViewManpowerMap,
                 Some(MapViewMode::Manpower)
+            )
+            | (
+                ButtonId::ToolbarViewStrategicRegionsMap,
+                Some(MapViewMode::StrategicRegions)
             )
     )
 }
@@ -1982,6 +1987,11 @@ const WORKSPACE_DROPDOWNS: &[(&str, &[(&str, &str, ButtonId)], bool, bool)] = &[
             ("Political", "7", ButtonId::ToolbarViewPoliticalMap),
             ("State Category", "", ButtonId::ToolbarViewStateCategoryMap),
             ("Manpower", "", ButtonId::ToolbarViewManpowerMap),
+            (
+                "Strategic Regions",
+                "",
+                ButtonId::ToolbarViewStrategicRegionsMap,
+            ),
         ],
         true,
         false,
@@ -2428,7 +2438,7 @@ mod tests {
             .unwrap();
         let ids = entries.iter().map(|entry| entry.2).collect::<Vec<_>>();
 
-        assert_eq!(ids.len(), 9);
+        assert_eq!(ids.len(), 10);
         assert!(!ids.contains(&ButtonId::ToolbarViewProvinceMap));
         assert!(!ids.contains(&ButtonId::ToolbarViewMode6));
         assert_eq!(
@@ -2443,6 +2453,7 @@ mod tests {
                 ButtonId::ToolbarViewPoliticalMap,
                 ButtonId::ToolbarViewStateCategoryMap,
                 ButtonId::ToolbarViewManpowerMap,
+                ButtonId::ToolbarViewStrategicRegionsMap,
             ]
         );
     }

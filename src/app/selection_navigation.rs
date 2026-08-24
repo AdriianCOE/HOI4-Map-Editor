@@ -16,6 +16,9 @@ pub(crate) enum SelectionNavigationRequest {
         toggle_province: bool,
     },
     ClearStateSelection,
+    SelectStrategicRegionAt {
+        screen_position: ScreenPosition,
+    },
     PanBegin,
     PanBy {
         delta: Vector2<f64>,
@@ -128,6 +131,18 @@ mod tests {
         assert_eq!(
             clear_state_selection(),
             SelectionNavigationRequest::ClearStateSelection
+        );
+    }
+
+    #[test]
+    fn strategic_region_selection_is_not_a_map_gesture() {
+        assert_eq!(
+            SelectionNavigationRequest::SelectStrategicRegionAt {
+                screen_position: [3.0, 4.0]
+            },
+            SelectionNavigationRequest::SelectStrategicRegionAt {
+                screen_position: [3.0, 4.0]
+            },
         );
     }
 }
