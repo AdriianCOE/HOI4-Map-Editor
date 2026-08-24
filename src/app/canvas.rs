@@ -10,6 +10,7 @@ use uord::UOrd2 as UOrd;
 use vecmath::{Matrix2x3, Vector2};
 
 use super::alerts::Alerts;
+use super::edit_gesture::{GestureModifiers, MapGestureRequest};
 use super::format::DefinitionKind;
 use super::inspector::{
     ClickedState, DeveloperDiagnosticsMode, DoubleClickOutcome, DoubleClickTracker,
@@ -82,6 +83,19 @@ use std::thread;
 use std::time::Instant;
 
 const ZOOM_SENSITIVITY: f64 = 0.125;
+
+fn lasso_mode_from_gesture_modifiers(modifiers: GestureModifiers) -> Option<LassoSelectionMode> {
+    if modifiers.alt {
+        Some(LassoSelectionMode::Remove)
+    } else if modifiers.shift {
+        Some(LassoSelectionMode::Add)
+    } else if modifiers.ctrl {
+        Some(LassoSelectionMode::Replace)
+    } else {
+        None
+    }
+}
+
 const STATE_PROPERTY_LABELS: [&str; StatePropertyDraft::TEXT_FIELD_COUNT] = [
     "Name",
     "Manpower",
@@ -222,6 +236,46 @@ pub enum InspectorExternalRequest {
 pub(crate) struct SelectionNavigationExecution {
     pub(crate) handled: bool,
     pub(crate) inspector_request: Option<InspectorExternalRequest>,
+}
+
+/// Synchronous execution outcome for an edit-gesture request.
+///
+/// Canvas retains all tool, map, session, and transaction decisions. App only
+/// uses `primary_motion_active` as raw input state and services the existing
+/// native confirmation dialog when a modified property draft needs resolution.
+pub(crate) struct MapGestureExecution {
+    pub(crate) primary_motion_active: bool,
+    pub(crate) requires_property_draft_resolution: bool,
+    pub(crate) inspector_request: Option<InspectorExternalRequest>,
+}
+
+impl MapGestureExecution {
+    fn handled(primary_motion_active: bool) -> Self {
+        Self {
+            primary_motion_active,
+            requires_property_draft_resolution: false,
+            inspector_request: None,
+        }
+    }
+
+    fn with_inspector_request(
+        primary_motion_active: bool,
+        inspector_request: Option<InspectorExternalRequest>,
+    ) -> Self {
+        Self {
+            primary_motion_active,
+            requires_property_draft_resolution: false,
+            inspector_request,
+        }
+    }
+
+    fn needs_property_draft_resolution() -> Self {
+        Self {
+            primary_motion_active: false,
+            requires_property_draft_resolution: true,
+            inspector_request: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -9305,6 +9359,131 @@ impl Canvas {
         }
         self.refresh_state_information();
         had_selection
+    }
+
+    /// Executes a typed primary edit gesture while retaining ownership of the
+    /// active tool, coordinate conversion, map/session mutation, and history.
+    ///
+    /// App has already kept UI-captured presses out of this API. A modified
+    /// property draft is the one synchronous App-owned confirmation boundary;
+    /// it is reported without applying the gesture so App can resolve the
+    /// existing dialog and submit the same request again if appropriate.
+    pub(crate) fn handle_edit_gesture(
+        &mut self,
+        interface: &Interface,
+        request: MapGestureRequest,
+        alerts: &mut Alerts,
+    ) -> MapGestureExecution {
+        match request {
+            MapGestureRequest::Begin {
+                screen_position,
+                modifiers,
+            } => self.begin_edit_gesture(interface, screen_position, modifiers, alerts),
+            MapGestureRequest::Continue {
+                screen_position,
+                modifiers,
+            } => {
+                if self.state_brush_is_stroking() {
+                    self.update_state_brush(interface, screen_position);
+                } else if !self.is_state_workspace()
+                    && self.tool.mode == ToolMode::PaintArea
+                    && self.view_mode() != ViewMode::Adjacencies
+                {
+                    self.activate_tool(interface, screen_position, modifiers.shift, alerts);
+                }
+                MapGestureExecution::handled(self.edit_gesture_continues_on_motion())
+            }
+            MapGestureRequest::End => {
+                if self.state_pan_is_active() {
+                    self.camera.set_panning(false);
+                } else if self.state_brush_is_stroking() {
+                    self.finish_state_brush(alerts);
+                } else {
+                    self.deactivate_tool();
+                }
+                MapGestureExecution::handled(false)
+            }
+        }
+    }
+
+    fn begin_edit_gesture(
+        &mut self,
+        interface: &Interface,
+        screen_position: Vector2<f64>,
+        modifiers: GestureModifiers,
+        alerts: &mut Alerts,
+    ) -> MapGestureExecution {
+        if self.save_blocks_editing() {
+            alerts.push(Err(
+                "Editing is locked while Save, export, or recovery is active",
+            ));
+            return MapGestureExecution::handled(false);
+        }
+        if self.pick_tag_from_map(interface, screen_position, alerts) {
+            return MapGestureExecution::handled(false);
+        }
+        let (inspector_consumed, inspector_request) =
+            self.state_inspector_click(interface, screen_position, alerts);
+        if inspector_consumed {
+            return MapGestureExecution::with_inspector_request(false, inspector_request);
+        }
+        if self.state_property_editor_click(interface, screen_position, alerts) {
+            return MapGestureExecution::handled(false);
+        }
+        if self.is_state_workspace()
+            && !self.state_lasso_is_active()
+            && self.state_click_would_change_property_draft(interface, screen_position)
+        {
+            return MapGestureExecution::needs_property_draft_resolution();
+        }
+        if self.state_pan_is_active() && self.is_state_workspace() {
+            self.camera.set_panning(true);
+            return MapGestureExecution::handled(true);
+        }
+        if self.is_state_workspace() {
+            if self.state_fill_is_active() {
+                self.preview_state_fill(interface, screen_position, alerts);
+                return MapGestureExecution::handled(false);
+            }
+            if self.state_brush_is_active() {
+                return MapGestureExecution::handled(self.begin_state_brush(
+                    interface,
+                    screen_position,
+                    alerts,
+                ));
+            }
+            if self.state_lasso_is_active() {
+                self.state_lasso_add_point(
+                    interface,
+                    screen_position,
+                    lasso_mode_from_gesture_modifiers(modifiers),
+                    alerts,
+                );
+                return MapGestureExecution::handled(false);
+            }
+            let execution = self.apply_selection_navigation(
+                interface,
+                SelectionNavigationRequest::SelectStateAt {
+                    screen_position,
+                    toggle_province: modifiers.ctrl,
+                },
+                alerts,
+            );
+            return MapGestureExecution::with_inspector_request(false, execution.inspector_request);
+        }
+        if self.view_mode() == ViewMode::Adjacencies && self.tool.adjacency_brush.is_none() {
+            alerts.push(Err("No Adjacency brush selected"));
+            return MapGestureExecution::handled(false);
+        }
+        self.activate_tool(interface, screen_position, modifiers.shift, alerts);
+        MapGestureExecution::handled(true)
+    }
+
+    fn edit_gesture_continues_on_motion(&self) -> bool {
+        self.state_brush_is_stroking()
+            || (!self.is_state_workspace()
+                && self.tool.mode == ToolMode::PaintArea
+                && self.view_mode() != ViewMode::Adjacencies)
     }
 
     /// Executes a typed selection/navigation intent while retaining ownership

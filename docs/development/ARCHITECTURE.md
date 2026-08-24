@@ -34,11 +34,53 @@ controller, ownership de gesto ou historico novo nesta fronteira. Os requests
 de Problems (Go-to e marcador diagnostico temporario), picker, pintura, brush,
 fill e lasso continuam em suas rotas atuais.
 
+## Fronteira de gesto de edicao primario
+
+`app::edit_gesture` separa o ciclo de entrada do botao esquerdo da execucao da
+ferramenta. Depois da classificacao pura e da captura de UI, `App` encaminha
+um `MapGestureRequest::{Begin, Continue, End}` pequeno, em coordenadas de tela
+e com modificadores, para `Canvas::handle_edit_gesture`. O request nao contem
+pixels, IDs de provincia/State, geometria de brush/lasso ou resultado de
+edicao. `Canvas` interpreta a ferramenta e o workspace atuais e continua sendo
+o dono de conversao tela→mapa, hit test, mutacao, sessao e historico.
+
+`painting` continua em `App` como estado transitorio de entrada: ele so indica
+que a pressao primaria aceita deve encaminhar movimento subsequente. Ele nao
+identifica ferramenta, nem decide se o movimento pinta; Canvas revalida isso em
+cada `Continue`. `left_press_consumed` tambem continua em `App`: uma pressao
+capturada pela UI deve consumir sua release correspondente e nunca criar um
+`End` fantasma no mapa.
+
+| Estado de entrada | Evento | Resultado |
+| --- | --- | --- |
+| `Idle` | pressao esquerda adiada pela UI para o mapa | `Begin`; `painting` so fica ativo se Canvas aceitar movimento |
+| `Idle` | pressao capturada por UI | `left_press_consumed = true` |
+| gesto primario ativo | movimento | `Continue` em coordenadas de tela |
+| gesto primario ativo | release esquerda, inclusive sobre UI | `End`, depois `Idle` |
+| pressao consumida | release esquerda | limpa `left_press_consumed`, sem request de mapa |
+| qualquer estado | substituicao de projeto/unfocus | App limpa transitorios; Canvas anterior e descartado/cancela brush atual |
+
+O gesto de entrada (down → move → up) nao e uma transacao de edicao. Uma
+ferramenta de Canvas decide se inicia/finaliza transacao de `History` ou de
+`StateEditSession`; fill e lasso de State continuam sendo acoes de clique com
+suas semanticas existentes. Pan direito, picker medio e wheel permanecem fora
+de `MapGestureRequest`.
+
+| Responsabilidade | Dono |
+| --- | --- |
+| estado bruto do botao / captura da UI | `App` + `app::input` |
+| intencao de ciclo de gesto | `app::edit_gesture` |
+| `ToolMode`, conversao tela→mapa e hit test | `Canvas` |
+| mutacao de provincias / Create Province | `Canvas` e edicao existente |
+| brush, fill e lasso de State | `Canvas` / `StateEditSession` existente |
+| historico | `History` e `StateEditSession` existentes |
+| dirty, validacao e invalidacao de apresentacao | ciclo de edicao existente em `Canvas` |
+
 | Evento bruto | Classificacao | Comando | Executor | Dono da mutacao/historico |
 | --- | --- | --- | --- | --- |
 | Tecla global | `app::input` | `ApplicationCommand::{Save,OpenProject,...}` | `App` / controladores existentes | Save UI/engine ou lifecycle existente |
 | Tecla de mapa | `app::input` | `MapKeyboardCommand` | `App` para a API Canvas existente | `Canvas`, `StateEditSession`, `History` |
-| Clique/arrasto primario | `app::input` + resultado da UI | `PointerCommand::{BeginPrimaryGesture,EndPrimaryGesture}`; State sem ferramenta ativa vira `SelectStateAt` | `App::action_*` / `Canvas::apply_selection_navigation` | Canvas/ferramenta existente |
+| Clique/arrasto primario | `app::input` + resultado da UI + `app::edit_gesture` | `MapGestureRequest::{Begin,Continue,End}`; State sem ferramenta ativa vira `SelectStateAt` dentro de Canvas | `Canvas::handle_edit_gesture` / `Canvas::apply_selection_navigation` | Canvas/ferramenta existente |
 | Botao direito/meio | `app::input` | `BeginPan`, `EndPan`, `PickBrush`; apenas pan vira request | `Canvas::apply_selection_navigation` / ferramenta existente | `Canvas` |
 | Movimento/relativo | `app::input` | `RelativeMotionCommand::PanBy` vira `PanBy` | `Canvas::apply_selection_navigation` | Canvas/camera existente |
 | Roda | `app::input` apos scroll de UI | somente `WheelCommand::Zoom` vira `Zoom`; raio e captura permanecem locais | `Canvas::apply_selection_navigation` / Canvas existente | Canvas/camera existente |

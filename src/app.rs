@@ -1,5 +1,6 @@
 pub mod alerts;
 pub mod canvas;
+pub(crate) mod edit_gesture;
 pub mod format;
 pub(crate) mod input;
 pub mod inspector;
@@ -26,10 +27,11 @@ use vecmath::Vector2;
 
 use self::alerts::Alerts;
 use self::canvas::{Canvas, InspectorExternalRequest, StateApplyDialogAction, ToolMode, ViewMode};
+use self::edit_gesture::MapGestureRequest;
 use self::input::{
     ApplicationCommand, CursorCommand, CursorContext, EditingLockedKeyCommand, FileDropCommand,
     InputCommand, InputContext, InspectorPickerKeyCommand, InspectorSearchKeyCommand,
-    MapGestureCommand, MapKeyboardCommand, PointerCommand, PointerContext, PrimaryClickOutcome,
+    MapKeyboardCommand, PointerCommand, PointerContext, PrimaryClickOutcome,
     PropertyEditorKeyCommand, RawKeyEvent, RawPointerEvent, RawWheelEvent,
     StateApplyDialogKeyCommand, ToolShortcut, ViewportCommand, WheelCommand, WheelContext,
 };
@@ -282,17 +284,6 @@ impl EventHandler for App {
     }
 
     fn on_mouse_position(&mut self, pos: Vector2<f64>, mods: KeyMods) {
-        let state_brush_stroking = self.painting
-            && self
-                .canvas
-                .as_ref()
-                .is_some_and(Canvas::state_brush_is_stroking);
-        let province_paint_drag_active = self.painting
-            && self.canvas.as_ref().is_some_and(|canvas| {
-                !canvas.is_state_workspace()
-                    && canvas.tool.mode == ToolMode::PaintArea
-                    && canvas.view_mode() != ViewMode::Adjacencies
-            });
         let command = input::classify_cursor(
             pos,
             CursorContext {
@@ -300,8 +291,7 @@ impl EventHandler for App {
                     .canvas
                     .as_ref()
                     .is_some_and(Canvas::state_apply_dialog_is_open),
-                state_brush_stroking,
-                province_paint_drag_active,
+                primary_gesture_active: self.painting,
             },
         );
         self.route_cursor_input(command, mods);
@@ -369,8 +359,7 @@ impl EventHandler for App {
     }
 
     fn on_unfocus(&mut self) {
-        self.painting = false;
-        self.left_press_consumed = false;
+        self.reset_edit_gesture_transients();
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.cancel_state_brush();
             canvas.camera.set_panning(false);
@@ -762,6 +751,7 @@ impl App {
             self.apply_selection_navigation(request);
             return;
         }
+        let edit_request = edit_gesture::request_from_pointer(classification.command, mods);
         match classification.command {
             PointerCommand::PreferencesPrimaryClick { position } => {
                 self.handle_preferences_click(position)
@@ -774,15 +764,20 @@ impl App {
             PointerCommand::CaptureByStateApplyDialog | PointerCommand::CaptureByInterface => {}
             PointerCommand::InspectorPickerPrimaryGesture { position } => {
                 self.left_press_consumed = true;
-                self.action_activate_tool(position, mods);
+                self.route_edit_gesture(MapGestureRequest::Begin {
+                    screen_position: position,
+                    modifiers: mods.into(),
+                });
             }
             PointerCommand::RoutePrimaryClick { position } => {
                 self.route_primary_click(position, mods)
             }
-            PointerCommand::BeginPrimaryGesture { position } => {
-                self.action_activate_tool(position, mods)
-            }
-            PointerCommand::EndPrimaryGesture => self.action_deactivate_tool(),
+            PointerCommand::BeginPrimaryGesture { .. } => self.route_edit_gesture(
+                edit_request.expect("primary press must produce an edit gesture request"),
+            ),
+            PointerCommand::EndPrimaryGesture => self.route_edit_gesture(
+                edit_request.expect("primary release must produce an edit gesture request"),
+            ),
             PointerCommand::BeginPan | PointerCommand::EndPan => unreachable!("routed above"),
             PointerCommand::PickBrush { position } => {
                 if let (Some(interface), Some(canvas)) =
@@ -827,9 +822,37 @@ impl App {
                 }
             }
             PointerCommand::BeginPrimaryGesture { position } => {
-                self.action_activate_tool(position, mods)
+                self.route_edit_gesture(MapGestureRequest::Begin {
+                    screen_position: position,
+                    modifiers: mods.into(),
+                })
             }
             _ => unreachable!("primary click classifier returns only primary routes"),
+        }
+    }
+
+    fn route_edit_gesture(&mut self, request: MapGestureRequest) {
+        let mut execution = match (self.interface.as_ref(), self.canvas.as_mut()) {
+            (Some(interface), Some(canvas)) => {
+                canvas.handle_edit_gesture(interface, request, &mut self.alerts)
+            }
+            _ => return,
+        };
+        if execution.requires_property_draft_resolution {
+            if !self.resolve_property_draft() {
+                self.painting = false;
+                return;
+            }
+            execution = match (self.interface.as_ref(), self.canvas.as_mut()) {
+                (Some(interface), Some(canvas)) => {
+                    canvas.handle_edit_gesture(interface, request, &mut self.alerts)
+                }
+                _ => return,
+            };
+        }
+        self.painting = execution.primary_motion_active;
+        if let Some(request) = execution.inspector_request {
+            self.handle_inspector_external_request(request);
         }
     }
 
@@ -837,32 +860,21 @@ impl App {
         let InputCommand::Cursor(command) = command else {
             return;
         };
+        let edit_request = edit_gesture::request_from_cursor(command, mods);
         match command {
             CursorCommand::CaptureByStateApplyDialog => {
                 if let Some(interface) = self.interface.as_mut() {
                     interface.clear_tooltip();
                 }
             }
-            CursorCommand::UpdateInterface {
-                position,
-                map_gesture,
-            } => {
+            CursorCommand::UpdateInterface { position, .. } => {
                 let ictx = self.get_interface_draw_context();
                 let Some(interface) = self.interface.as_mut() else {
                     return;
                 };
                 interface.on_mouse_position(position, ictx);
-                let Some(canvas) = self.canvas.as_mut() else {
-                    return;
-                };
-                match map_gesture {
-                    Some(MapGestureCommand::ContinueStateBrush { position }) => {
-                        canvas.update_state_brush(interface, position)
-                    }
-                    Some(MapGestureCommand::ContinueProvincePaint { position }) => {
-                        canvas.activate_tool(interface, position, mods.shift, &mut self.alerts)
-                    }
-                    None => {}
+                if let Some(request) = edit_request {
+                    self.route_edit_gesture(request);
                 }
             }
         }
@@ -1832,104 +1844,6 @@ impl App {
         }
     }
 
-    fn action_activate_tool(&mut self, pos: Vector2<f64>, mods: KeyMods) {
-        if self
-            .canvas
-            .as_ref()
-            .is_some_and(Canvas::save_blocks_editing)
-        {
-            self.alerts.push(Err(
-                "Editing is locked while Save, export, or recovery is active",
-            ));
-            return;
-        }
-        if let (Some(interface), Some(canvas)) = (self.interface.as_ref(), self.canvas.as_mut())
-            && canvas.pick_tag_from_map(interface, pos, &mut self.alerts)
-        {
-            return;
-        }
-        let (inspector_consumed, inspector_request) =
-            match (self.interface.as_ref(), self.canvas.as_mut()) {
-                (Some(interface), Some(canvas)) => {
-                    canvas.state_inspector_click(interface, pos, &mut self.alerts)
-                }
-                _ => (false, None),
-            };
-        if let Some(request) = inspector_request {
-            self.handle_inspector_external_request(request);
-        }
-        if inspector_consumed {
-            return;
-        }
-        let editor_consumed = self.interface.as_ref().is_some_and(|interface| {
-            self.canvas.as_mut().is_some_and(|canvas| {
-                canvas.state_property_editor_click(interface, pos, &mut self.alerts)
-            })
-        });
-        if editor_consumed {
-            return;
-        }
-        let resolve_draft = self.interface.as_ref().is_some_and(|interface| {
-            self.canvas.as_ref().is_some_and(|canvas| {
-                canvas.is_state_workspace()
-                    && !canvas.state_lasso_is_active()
-                    && canvas.state_click_would_change_property_draft(interface, pos)
-            })
-        });
-        if resolve_draft && !self.resolve_property_draft() {
-            return;
-        }
-        let Some(interface) = self.interface.as_ref() else {
-            return;
-        };
-        let Some(canvas) = &mut self.canvas else {
-            return;
-        };
-        if canvas.state_pan_is_active() && canvas.is_state_workspace() {
-            canvas.apply_selection_navigation(
-                interface,
-                SelectionNavigationRequest::PanBegin,
-                &mut self.alerts,
-            );
-            self.painting = true;
-            return;
-        }
-        let mut inspector_request = None;
-        if canvas.is_state_workspace() {
-            if canvas.state_fill_is_active() {
-                canvas.preview_state_fill(interface, pos, &mut self.alerts);
-            } else if canvas.state_brush_is_active() {
-                self.painting = canvas.begin_state_brush(interface, pos, &mut self.alerts);
-            } else if canvas.state_lasso_is_active() {
-                canvas.state_lasso_add_point(
-                    interface,
-                    pos,
-                    input::lasso_mode_from_mods(mods),
-                    &mut self.alerts,
-                );
-            } else {
-                let request = selection_navigation::request_from_state_selection_gesture(
-                    PointerCommand::BeginPrimaryGesture { position: pos },
-                    mods.ctrl,
-                )
-                .expect("state selection is reached from a primary gesture");
-                inspector_request = canvas
-                    .apply_selection_navigation(interface, request, &mut self.alerts)
-                    .inspector_request;
-            }
-        } else if canvas.view_mode() == ViewMode::Adjacencies
-            && canvas.tool.adjacency_brush.is_none()
-        {
-            self.alerts.push(Err("No Adjacency brush selected"));
-        } else {
-            self.painting = true;
-            canvas.activate_tool(interface, pos, mods.shift, &mut self.alerts);
-        };
-        if let Some(request) = inspector_request {
-            self.handle_inspector_external_request(request);
-        }
-    }
-
     fn handle_inspector_external_request(&mut self, request: InspectorExternalRequest) {
         let result = match request {
             InspectorExternalRequest::OpenSource(path) => {
@@ -1942,25 +1856,6 @@ impl App {
         };
         self.alerts
             .push(result.map_err(|error| format!("Error: {error}")));
-    }
-
-    fn action_deactivate_tool(&mut self) {
-        self.painting = false;
-        if self
-            .canvas
-            .as_ref()
-            .is_some_and(Canvas::state_pan_is_active)
-        {
-            self.apply_selection_navigation(SelectionNavigationRequest::PanEnd);
-            return;
-        }
-        if let Some(canvas) = &mut self.canvas {
-            if canvas.state_brush_is_stroking() {
-                canvas.finish_state_brush(&mut self.alerts);
-            } else {
-                canvas.deactivate_tool();
-            }
-        };
     }
 
     fn action_change_map_view_mode(&mut self, map_view_mode: MapViewMode) {
@@ -2211,14 +2106,17 @@ impl App {
             .candidate_activated(self.project_generation);
 
         // These are App-level interaction transients, not global preferences.
-        self.painting = false;
-        self.left_press_consumed = false;
+        self.reset_edit_gesture_transients();
         if matches!(
             self.preferences_dialog.as_ref(),
             Some(PreferencesDialog::Project { .. })
         ) {
             self.preferences_dialog = None;
         }
+    }
+
+    fn reset_edit_gesture_transients(&mut self) {
+        clear_edit_gesture_transients(&mut self.painting, &mut self.left_press_consumed);
     }
 
     fn handle_result_none(&mut self, result: Result<(), Error>) {
@@ -2678,6 +2576,11 @@ fn saves_state_files(workspace: WorkspaceMode, has_project: bool) -> bool {
     has_project && workspace == WorkspaceMode::States
 }
 
+fn clear_edit_gesture_transients(painting: &mut bool, left_press_consumed: &mut bool) {
+    *painting = false;
+    *left_press_consumed = false;
+}
+
 #[cfg(test)]
 mod workspace_shortcut_tests {
     use super::*;
@@ -2689,6 +2592,17 @@ mod workspace_shortcut_tests {
         assert_ne!(first, second);
         assert_eq!(first.0, 1);
         assert_eq!(second.0, 2);
+    }
+
+    #[test]
+    fn project_replacement_resets_active_left_gesture_transients() {
+        let mut painting = true;
+        let mut left_press_consumed = true;
+
+        clear_edit_gesture_transients(&mut painting, &mut left_press_consumed);
+
+        assert!(!painting);
+        assert!(!left_press_consumed);
     }
 
     #[test]
