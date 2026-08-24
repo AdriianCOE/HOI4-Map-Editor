@@ -34,6 +34,19 @@ disabled for incomplete data, duplicate region IDs, unsafe comment-protected
 fields, and archive-backed sources that cannot be safely changed. `Esc`, a
 tool change, a map-view change, or a project switch discards any active draft.
 
+When Strategic Region loading is incomplete, the panel states how many
+effective files loaded and directs you to **Project Problems** for the source.
+Known memberships still keep their normal region color. Gray hatching means
+unknown coverage, amber hatching means unassigned under complete coverage, and
+magenta hatching means multiple known memberships. These are diagnostics only;
+they never change mod data.
+
+**Manpower** uses a sequential blue-to-yellow scale with a robust 90th-percentile
+upper bound, so one outlier does not flatten the rest of the map. The legend
+shows zero, medium, high, and missing values. **State Category** assigns a
+stable high-contrast categorical palette to the categories present in the
+loaded project and lists them in its map legend.
+
 ## Province workspace
 
 - **Save Project** reviews and saves pending province-map and state changes

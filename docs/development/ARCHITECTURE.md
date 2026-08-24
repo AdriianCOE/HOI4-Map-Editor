@@ -147,8 +147,24 @@ ligado a geracao do projeto/mapa e a revisao de SR; a decoracao de State-split
 depende apenas da revisao efetiva de Estados; e a selecao e uma camada leve de
 `Canvas`. A classificacao
 e explicita (`Assigned`, `Ambiguous`, `Unassigned`, `Unknown`), usa mapas
-esparsos e trata fontes ausentes/parciais como desconhecidas. Nenhuma fonte e
-relida por frame.
+esparsos. Sob cobertura parcial, membros conhecidos continuam `Assigned` ou
+`Ambiguous`; somente lacunas sem membro conhecido ficam `Unknown`. A textura de
+CPU aplica hachuras deterministicas para Unknown, Unassigned e Ambiguous antes
+do upload para GPU; nenhuma fonte e relida por frame. O painel apresenta
+`arquivos carregados / visiveis / falhos` e encaminha a fonte para Project
+Problems, que permanece a autoridade diagnostica.
+
+### Map presentation (legibility pass)
+
+`project::map_presentation` deriva cores e legendas somente do snapshot de
+States que Canvas ja possui. A escala de manpower usa transformacao logaritmica
+e teto do percentil 90 dos valores positivos, com cores sequenciais e estados
+zero/ausente distintos. Categorias sao ordenadas por identificador e recebem
+uma paleta categorica fixa de alto contraste; a identidade permanece estavel
+enquanto o conjunto de categorias permanece o mesmo. `PresentationRuntime`
+gera os rasters de categoria e manpower na CPU e Canvas mostra uma legenda
+compacta para a view ativa. Nenhuma dessas estruturas possui autoridade de
+edicao ou Save.
 
 O modo **Edit Strategic Regions** e explicitamente desligado por padrao. O
 fluxo e `input classifier → MapGestureRequest → Canvas draft →

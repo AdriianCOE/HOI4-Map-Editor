@@ -60,6 +60,7 @@ pub use logistics::{
     SupplyNode, SupplyNodeLoadResult, load_logistics,
 };
 pub use map_presentation::{
+    CategoryLegendEntry, MANPOWER_MISSING_COLOR, MANPOWER_ZERO_COLOR, ManpowerLegend,
     MapPresentationModel, StatePresentation, VictoryPointMarker, build_map_presentation,
     category_color, manpower_color, paint_victory_points,
 };
@@ -531,7 +532,7 @@ fn failure_stage(
 
 #[cfg(test)]
 mod tests {
-    use super::{Hoi4Project, ProjectPaths, StateLoadFailureStage};
+    use super::{Hoi4Project, ProjectPaths, StateLoadFailureStage, StrategicRegionCoverage};
     use crate::app::map::{Bundle, ProvinceKind};
     use crate::app::project::StateEditSession;
     use crate::config::Config;
@@ -858,6 +859,7 @@ mod tests {
         paths.set_validated_base_game_root(base_game_root.clone());
         let mut project = Hoi4Project::new(paths);
         project.load_states(&province_ids, &land_province_ids);
+        project.load_strategic_regions();
         let states_in = states_started.elapsed();
 
         let definitions_started = Instant::now();
@@ -893,6 +895,34 @@ mod tests {
                 .saturating_sub(political_in.as_millis() + resources_in.as_millis()),
             total_started.elapsed().as_millis(),
         );
+        println!(
+            "Strategic Region diagnostics: coverage={:?}; files visible={}; files loaded={}; files failed={}; parsed regions={}; issues={}",
+            project.strategic_regions.coverage,
+            project.strategic_regions.files_seen,
+            match project.strategic_regions.coverage {
+                StrategicRegionCoverage::Incomplete { files_failed, .. } => project
+                    .strategic_regions
+                    .files_seen
+                    .saturating_sub(files_failed),
+                _ => project.strategic_regions.files_seen,
+            },
+            match project.strategic_regions.coverage {
+                StrategicRegionCoverage::Incomplete { files_failed, .. } => files_failed,
+                _ => 0,
+            },
+            project.strategic_regions.regions.len(),
+            project.strategic_regions.issues.len(),
+        );
+        for issue in &project.strategic_regions.issues {
+            println!(
+                "Strategic Region issue: {:?}: {}",
+                issue
+                    .source
+                    .as_ref()
+                    .map(|source| source.logical_path.display().to_string()),
+                issue.message
+            );
+        }
         assert!(project.load_summary.report.files_seen > 0);
         assert!(project.load_summary.report.states_loaded > 0);
         assert!(project.load_summary.report.files_failed.is_empty());

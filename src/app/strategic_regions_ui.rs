@@ -56,6 +56,7 @@ pub(crate) enum StrategicRegionsCoveragePresentation {
     Incomplete {
         regions: usize,
         files_visible: usize,
+        files_loaded: usize,
         files_failed: usize,
     },
 }
@@ -278,6 +279,7 @@ fn coverage_presentation(
         } => StrategicRegionsCoveragePresentation::Incomplete {
             regions: loaded.regions.len(),
             files_visible,
+            files_loaded: files_visible.saturating_sub(files_failed),
             files_failed,
         },
     }

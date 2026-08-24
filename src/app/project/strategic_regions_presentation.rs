@@ -13,11 +13,14 @@ use vecmath::Vector2;
 use crate::app::map::{Color, Map, ProvinceKind};
 use crate::util::hsl::hsl_to_rgb;
 
-use super::{StrategicRegionCoverage, StrategicRegionLoadResult};
+use super::StrategicRegionLoadResult;
 
-pub const STRATEGIC_REGION_AMBIGUOUS_COLOR: Color = [0xe8, 0x45, 0xa0];
-pub const STRATEGIC_REGION_UNASSIGNED_COLOR: Color = [0x82, 0x82, 0x82];
-pub const STRATEGIC_REGION_UNKNOWN_COLOR: Color = [0x9b, 0x71, 0x24];
+pub const STRATEGIC_REGION_AMBIGUOUS_COLOR: Color = [0x56, 0x24, 0x58];
+pub const STRATEGIC_REGION_AMBIGUOUS_PATTERN_COLOR: Color = [0xf4, 0x72, 0xc2];
+pub const STRATEGIC_REGION_UNASSIGNED_COLOR: Color = [0x4e, 0x43, 0x2d];
+pub const STRATEGIC_REGION_UNASSIGNED_PATTERN_COLOR: Color = [0xe5, 0xb5, 0x3a];
+pub const STRATEGIC_REGION_UNKNOWN_COLOR: Color = [0x3b, 0x42, 0x48];
+pub const STRATEGIC_REGION_UNKNOWN_PATTERN_COLOR: Color = [0x7d, 0x88, 0x91];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrategicRegionMembership {
@@ -59,26 +62,21 @@ pub fn build_strategic_regions_map_model(
 ) -> StrategicRegionsMapModel {
     let valid = valid_province_ids.into_iter().collect::<BTreeSet<_>>();
     let mut candidates = BTreeMap::<u32, Vec<u32>>::new();
-    if loaded.coverage.is_complete() {
-        for region in &loaded.regions {
-            for &province_id in &region.provinces {
-                if valid.contains(&province_id) {
-                    candidates.entry(province_id).or_default().push(region.id);
-                }
+    for region in &loaded.regions {
+        for &province_id in &region.provinces {
+            if valid.contains(&province_id) {
+                candidates.entry(province_id).or_default().push(region.id);
             }
         }
     }
     let membership = valid
         .into_iter()
         .map(|province_id| {
-            let status = match loaded.coverage {
-                StrategicRegionCoverage::NotPresent
-                | StrategicRegionCoverage::Incomplete { .. } => StrategicRegionMembership::Unknown,
-                StrategicRegionCoverage::Complete => match candidates.get(&province_id) {
-                    None => StrategicRegionMembership::Unassigned,
-                    Some(ids) if ids.len() == 1 => StrategicRegionMembership::Assigned(ids[0]),
-                    Some(_) => StrategicRegionMembership::Ambiguous,
-                },
+            let status = match candidates.get(&province_id) {
+                Some(ids) if ids.len() == 1 => StrategicRegionMembership::Assigned(ids[0]),
+                Some(_) => StrategicRegionMembership::Ambiguous,
+                None if loaded.coverage.is_complete() => StrategicRegionMembership::Unassigned,
+                None => StrategicRegionMembership::Unknown,
             };
             (province_id, status)
         })
@@ -105,9 +103,16 @@ pub fn collect_strategic_region_boundaries(
 }
 
 pub fn strategic_region_texture(map: &Map, model: &StrategicRegionsMapModel) -> RgbaImage {
-    map.gen_texture_buffer(|province_color| {
-        let province = map.get_province(province_color);
-        color_for_membership(province.preserved_id, province.kind, &model.membership)
+    RgbaImage::from_fn(map.width(), map.height(), |x, y| {
+        let province = map.get_province_at([x, y]);
+        let color = color_for_membership_at(
+            province.preserved_id,
+            province.kind,
+            &model.membership,
+            x,
+            y,
+        );
+        Rgba([color[0], color[1], color[2], 255])
     })
 }
 
@@ -172,26 +177,50 @@ pub fn strategic_region_state_split_overlay(
     })
 }
 
-fn color_for_membership(
+fn color_for_membership_at(
     province_id: Option<u32>,
     kind: ProvinceKind,
     membership: &BTreeMap<u32, StrategicRegionMembership>,
+    x: u32,
+    y: u32,
 ) -> Color {
     if kind == ProvinceKind::Unknown {
         return STRATEGIC_REGION_UNKNOWN_COLOR;
     }
     match province_id.and_then(|id| membership.get(&id)).copied() {
         Some(StrategicRegionMembership::Assigned(id)) => strategic_region_color(id),
-        Some(StrategicRegionMembership::Ambiguous) => STRATEGIC_REGION_AMBIGUOUS_COLOR,
-        Some(StrategicRegionMembership::Unassigned) => STRATEGIC_REGION_UNASSIGNED_COLOR,
-        Some(StrategicRegionMembership::Unknown) | None => STRATEGIC_REGION_UNKNOWN_COLOR,
+        Some(StrategicRegionMembership::Ambiguous) => patterned_color(
+            STRATEGIC_REGION_AMBIGUOUS_COLOR,
+            STRATEGIC_REGION_AMBIGUOUS_PATTERN_COLOR,
+            x.wrapping_add(y.wrapping_mul(2)) % 9 < 2,
+        ),
+        Some(StrategicRegionMembership::Unassigned) => patterned_color(
+            STRATEGIC_REGION_UNASSIGNED_COLOR,
+            STRATEGIC_REGION_UNASSIGNED_PATTERN_COLOR,
+            x.wrapping_add(y) % 11 < 2,
+        ),
+        Some(StrategicRegionMembership::Unknown) | None => patterned_color(
+            STRATEGIC_REGION_UNKNOWN_COLOR,
+            STRATEGIC_REGION_UNKNOWN_PATTERN_COLOR,
+            (x / 5 + y / 5).is_multiple_of(2),
+        ),
     }
+}
+
+fn patterned_color(base: Color, pattern: Color, pattern_here: bool) -> Color {
+    if pattern_here { pattern } else { base }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::project::{StrategicRegion, StrategicRegionLoadResult};
+    use crate::app::format::{Definition, DefinitionKind};
+    use crate::app::map::construct_map_data_for_sparse_tests;
+    use crate::app::project::{
+        StrategicRegion, StrategicRegionCoverage, StrategicRegionLoadResult,
+    };
+    use crate::config::Config;
+    use image::{Rgb, RgbImage};
 
     fn loaded(
         coverage: StrategicRegionCoverage,
@@ -238,18 +267,68 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_and_absent_sources_are_unknown() {
-        for coverage in [
-            StrategicRegionCoverage::NotPresent,
-            StrategicRegionCoverage::Incomplete {
-                files_visible: 2,
-                files_failed: 1,
+    fn partial_coverage_keeps_known_memberships_and_marks_only_unknown_gaps() {
+        let model = build_strategic_regions_map_model(
+            &loaded(
+                StrategicRegionCoverage::Incomplete {
+                    files_visible: 2,
+                    files_failed: 1,
+                },
+                vec![(4, vec![2]), (9, vec![3, 2])],
+            ),
+            [1, 2, 3],
+        );
+        assert_eq!(model.membership[&1], StrategicRegionMembership::Unknown);
+        assert_eq!(model.membership[&2], StrategicRegionMembership::Ambiguous);
+        assert_eq!(model.membership[&3], StrategicRegionMembership::Assigned(9));
+    }
+
+    #[test]
+    fn special_memberships_have_distinct_cpu_raster_patterns() {
+        let colors = [[20, 30, 40], [50, 60, 70], [80, 90, 100]];
+        let map = construct_map_data_for_sparse_tests(
+            RgbImage::from_fn(60, 1, |x, _| Rgb(colors[(x / 20) as usize])),
+            colors
+                .into_iter()
+                .enumerate()
+                .map(|(index, rgb)| Definition {
+                    id: index as u32 + 1,
+                    rgb,
+                    kind: DefinitionKind::Land,
+                    coastal: false,
+                    terrain: "plains".to_owned(),
+                    continent: 1,
+                })
+                .collect(),
+            Vec::new(),
+            None,
+            Config {
+                preserve_ids: true,
+                ..Config::default()
             },
-        ] {
-            let model =
-                build_strategic_regions_map_model(&loaded(coverage, vec![(4, vec![2])]), [2]);
-            assert_eq!(model.membership[&2], StrategicRegionMembership::Unknown);
-        }
+        )
+        .unwrap()
+        .map;
+        let model = StrategicRegionsMapModel {
+            membership: BTreeMap::from([
+                (1, StrategicRegionMembership::Unknown),
+                (2, StrategicRegionMembership::Unassigned),
+                (3, StrategicRegionMembership::Ambiguous),
+            ]),
+            boundaries: Vec::new(),
+        };
+        let raster = strategic_region_texture(&map, &model);
+        let colors_at = |start| {
+            (start..start + 20)
+                .map(|x| raster.get_pixel(x, 0).0)
+                .collect::<BTreeSet<_>>()
+        };
+        let unknown = colors_at(0);
+        let unassigned = colors_at(20);
+        let ambiguous = colors_at(40);
+        assert!(unknown.len() > 1 && unassigned.len() > 1 && ambiguous.len() > 1);
+        assert_ne!(unknown, unassigned);
+        assert_ne!(unassigned, ambiguous);
     }
 
     #[test]

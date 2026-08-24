@@ -3750,6 +3750,7 @@ impl Canvas {
             self.draw_resource_labels(ctx, interface, glyph_cache, gl);
         }
         self.draw_victory_points_overlay(ctx, interface, glyph_cache, gl);
+        self.draw_map_presentation_legend(ctx, interface, glyph_cache, gl);
         if self.map_layers.show_adjacencies {
             self.draw_adjacencies(ctx, interface, cursor_pos, gl);
         }
@@ -5212,11 +5213,16 @@ impl Canvas {
             }
             StrategicRegionsCoveragePresentation::Incomplete {
                 files_visible,
+                files_loaded,
                 files_failed,
                 ..
-            } => format!(
-                "{} ({files_failed}/{files_visible})",
-                tr("strategic_regions.partial")
+            } => tr_args(
+                "strategic_regions.partial_status",
+                &[
+                    ("loaded", &files_loaded.to_string()),
+                    ("visible", &files_visible.to_string()),
+                    ("failed", &files_failed.to_string()),
+                ],
             ),
         };
         draw_canvas_text(
@@ -5248,9 +5254,10 @@ impl Canvas {
             } else {
                 colors::WHITE_T
             },
-            [layout.panel[0] + 14.0, layout.panel[1] + 64.0],
+            [layout.panel[0] + 14.0, layout.panel[1] + 82.0],
             &fit_editor_text(&edit_status, layout.panel[2] - 30.0),
         );
+        self.draw_strategic_region_membership_legend(ctx, layout, glyph_cache, gl);
         draw_editor_button(
             ctx,
             glyph_cache,
@@ -6985,6 +6992,153 @@ impl Canvas {
                 ctx.transform
                     .append_transform(self.camera.display_matrix(interface)),
                 gl,
+            );
+        }
+    }
+
+    fn draw_map_presentation_legend(
+        &self,
+        ctx: Context,
+        interface: &Interface,
+        glyph_cache: &mut FontGlyphCache,
+        gl: &mut GlGraphics,
+    ) {
+        let Some(model) = self.presentation.map_presentation() else {
+            return;
+        };
+        let (title, entries) = match self.map_layers.base_view {
+            MapBaseView::Manpower => (
+                tr("map_presentation.manpower_legend"),
+                vec![
+                    (
+                        super::project::MANPOWER_ZERO_COLOR,
+                        tr("map_presentation.zero").to_owned(),
+                    ),
+                    (
+                        super::project::manpower_color(
+                            Some(model.manpower_legend.low.max(1)),
+                            model.manpower_legend.high,
+                        ),
+                        tr_args(
+                            "map_presentation.low",
+                            &[("value", &format_integer_pt_br(model.manpower_legend.low))],
+                        ),
+                    ),
+                    (
+                        super::project::manpower_color(
+                            Some(model.manpower_legend.medium.max(1)),
+                            model.manpower_legend.high,
+                        ),
+                        tr_args(
+                            "map_presentation.medium",
+                            &[("value", &format_integer_pt_br(model.manpower_legend.medium))],
+                        ),
+                    ),
+                    (
+                        super::project::manpower_color(
+                            Some(model.manpower_legend.high.max(1)),
+                            model.manpower_legend.high,
+                        ),
+                        tr_args(
+                            "map_presentation.high",
+                            &[("value", &format_integer_pt_br(model.manpower_legend.high))],
+                        ),
+                    ),
+                    (
+                        super::project::MANPOWER_MISSING_COLOR,
+                        tr("map_presentation.missing").to_owned(),
+                    ),
+                ],
+            ),
+            MapBaseView::StateCategory => (
+                tr("map_presentation.category_legend"),
+                model
+                    .category_legend
+                    .iter()
+                    .take(8)
+                    .map(|entry| (entry.color, entry.category.clone()))
+                    .collect(),
+            ),
+            _ => return,
+        };
+        let width = 210.0;
+        let height = 30.0 + entries.len() as f64 * 19.0;
+        let window = interface.get_window_size();
+        let rect = [window[0] - width - 14.0, 52.0, width, height];
+        graphics::rectangle([0.055, 0.06, 0.075, 0.93], rect, ctx.transform, gl);
+        draw_canvas_text(
+            ctx,
+            glyph_cache,
+            gl,
+            colors::WHITE,
+            [rect[0] + 9.0, rect[1] + 19.0],
+            title,
+        );
+        for (index, (color, label)) in entries.iter().enumerate() {
+            let y = rect[1] + 29.0 + index as f64 * 19.0;
+            graphics::rectangle(
+                [
+                    color[0] as f32 / 255.0,
+                    color[1] as f32 / 255.0,
+                    color[2] as f32 / 255.0,
+                    1.0,
+                ],
+                [rect[0] + 9.0, y, 12.0, 12.0],
+                ctx.transform,
+                gl,
+            );
+            draw_canvas_text(
+                ctx,
+                glyph_cache,
+                gl,
+                colors::WHITE_T,
+                [rect[0] + 27.0, y + 11.0],
+                &fit_editor_text(label, rect[2] - 35.0),
+            );
+        }
+    }
+
+    fn draw_strategic_region_membership_legend(
+        &self,
+        ctx: Context,
+        layout: StrategicRegionsCanvasLayout,
+        glyph_cache: &mut FontGlyphCache,
+        gl: &mut GlGraphics,
+    ) {
+        let entries = [
+            (
+                super::project::STRATEGIC_REGION_UNKNOWN_COLOR,
+                tr("strategic_regions.unknown"),
+            ),
+            (
+                super::project::STRATEGIC_REGION_UNASSIGNED_COLOR,
+                tr("strategic_regions.unassigned"),
+            ),
+            (
+                super::project::STRATEGIC_REGION_AMBIGUOUS_COLOR,
+                tr("strategic_regions.ambiguous"),
+            ),
+        ];
+        for (index, (color, label)) in entries.into_iter().enumerate() {
+            let x = layout.panel[0] + 14.0 + index as f64 * 130.0;
+            graphics::rectangle(
+                [
+                    color[0] as f32 / 255.0,
+                    color[1] as f32 / 255.0,
+                    color[2] as f32 / 255.0,
+                    1.0,
+                ],
+                [x, layout.panel[1] + 64.0, 12.0, 12.0],
+                ctx.transform,
+                gl,
+            );
+            draw_canvas_text(
+                ctx,
+                glyph_cache,
+                gl,
+                colors::WHITE_T,
+                [x + 17.0, layout.panel[1] + 75.0],
+                label,
             );
         }
     }
@@ -12739,20 +12893,20 @@ impl StrategicRegionsCanvasLayout {
     fn search(self) -> [f64; 4] {
         [
             self.panel[0] + 12.0,
-            self.panel[1] + 118.0,
+            self.panel[1] + 137.0,
             self.panel[2] - 24.0,
             25.0,
         ]
     }
 
     fn edit_toggle(self) -> [f64; 4] {
-        [self.panel[0] + 12.0, self.panel[1] + 76.0, 160.0, 25.0]
+        [self.panel[0] + 12.0, self.panel[1] + 95.0, 160.0, 25.0]
     }
 
     fn tool_button(self, index: usize) -> [f64; 4] {
         [
             self.panel[0] + 178.0 + index as f64 * 76.0,
-            self.panel[1] + 76.0,
+            self.panel[1] + 95.0,
             70.0,
             25.0,
         ]
@@ -12761,9 +12915,9 @@ impl StrategicRegionsCanvasLayout {
     fn list(self) -> [f64; 4] {
         [
             self.panel[0] + 12.0,
-            self.panel[1] + 154.0,
+            self.panel[1] + 173.0,
             (self.panel[2] * 0.42).max(185.0),
-            self.panel[3] - 168.0,
+            self.panel[3] - 187.0,
         ]
     }
 

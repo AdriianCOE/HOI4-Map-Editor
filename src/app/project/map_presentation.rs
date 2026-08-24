@@ -5,7 +5,22 @@ use image::{Rgba, RgbaImage};
 use crate::app::map::Color;
 use crate::app::project::SourceGeneration;
 use crate::app::state::StateData;
-use crate::util::hsl::hsl_to_rgb;
+const CATEGORY_PALETTE: [Color; 12] = [
+    [0x4e, 0x79, 0xa7],
+    [0xf2, 0x8e, 0x2b],
+    [0x59, 0xa1, 0x4f],
+    [0xe1, 0x57, 0x59],
+    [0x76, 0xb7, 0xb2],
+    [0xb0, 0x7a, 0xa1],
+    [0xed, 0xc9, 0x48],
+    [0xff, 0x9d, 0xa7],
+    [0x9c, 0x75, 0x5f],
+    [0xba, 0xb0, 0xab],
+    [0x86, 0xbc, 0xb6],
+    [0x8c, 0x6d, 0xb0],
+];
+pub const MANPOWER_MISSING_COLOR: Color = [0x66, 0x66, 0x66];
+pub const MANPOWER_ZERO_COLOR: Color = [0x25, 0x32, 0x4d];
 
 /// Cached, read-only state presentation.  It deliberately consumes the
 /// `StateEditSession` snapshot supplied by Canvas rather than re-reading files.
@@ -15,6 +30,21 @@ pub struct MapPresentationModel {
     pub state_revision: u64,
     pub states: BTreeMap<u32, StatePresentation>,
     pub victory_points: Vec<VictoryPointMarker>,
+    pub category_legend: Vec<CategoryLegendEntry>,
+    pub manpower_legend: ManpowerLegend,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CategoryLegendEntry {
+    pub category: String,
+    pub color: Color,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ManpowerLegend {
+    pub low: u64,
+    pub medium: u64,
+    pub high: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -44,14 +74,28 @@ pub fn build_map_presentation(
         .into_iter()
         .filter_map(|state| state.id.map(|id| (id, state)))
         .collect::<BTreeMap<_, _>>();
-    let max_manpower = states
+    let manpower_values = states
         .values()
         .filter_map(|state| state.manpower)
-        .max()
-        .unwrap_or(0);
+        .filter(|value| *value > 0)
+        .collect::<Vec<_>>();
+    let manpower_legend = manpower_legend(&manpower_values);
+    let categories = category_palette(
+        states
+            .values()
+            .filter_map(|state| state.state_category.as_deref()),
+    );
     let mut presentation = MapPresentationModel {
         generation,
         state_revision,
+        category_legend: categories
+            .iter()
+            .map(|(category, color)| CategoryLegendEntry {
+                category: category.clone(),
+                color: *color,
+            })
+            .collect(),
+        manpower_legend,
         ..Default::default()
     };
     let mut markers = BTreeMap::new();
@@ -60,9 +104,13 @@ pub fn build_map_presentation(
             state_id,
             StatePresentation {
                 state_id,
-                category_color: category_color(state.state_category.as_deref()),
+                category_color: state
+                    .state_category
+                    .as_deref()
+                    .and_then(|category| categories.get(category).copied())
+                    .unwrap_or_else(|| category_color(None)),
                 category: state.state_category,
-                manpower_color: manpower_color(state.manpower, max_manpower),
+                manpower_color: manpower_color(state.manpower, manpower_legend.high),
                 manpower: state.manpower,
                 demilitarized_zone: state.demilitarized_zone == Some(true),
             },
@@ -95,18 +143,60 @@ pub fn category_color(category: Option<&str>) -> Color {
     let hash = category.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
     });
-    hsl_to_rgb([(hash % 360) as f32, 0.58, 0.50])
+    CATEGORY_PALETTE[hash as usize % CATEGORY_PALETTE.len()]
 }
 
 pub fn manpower_color(manpower: Option<u64>, maximum: u64) -> Color {
     match manpower {
-        None => [0x66, 0x66, 0x66],
-        Some(0) => [0x3c, 0x3c, 0x3c],
+        None => MANPOWER_MISSING_COLOR,
+        Some(0) => MANPOWER_ZERO_COLOR,
         Some(value) => {
             let denominator = (maximum.max(1) as f64 + 1.0).ln();
             let normalized = ((value as f64 + 1.0).ln() / denominator).clamp(0.0, 1.0);
-            blend([0x32, 0x68, 0xb7], [0xe2, 0x44, 0x30], normalized)
+            sequential_manpower_color(normalized)
         }
+    }
+}
+
+fn category_palette<'a>(categories: impl Iterator<Item = &'a str>) -> BTreeMap<String, Color> {
+    categories
+        .filter(|category| !category.is_empty())
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(index, category)| (category, CATEGORY_PALETTE[index % CATEGORY_PALETTE.len()]))
+        .collect()
+}
+
+fn manpower_legend(values: &[u64]) -> ManpowerLegend {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    // The lower discrete quantile keeps a lone tail value from becoming the
+    // whole scale in small projects too (the usual nearest-rank p90 would not).
+    let high = sorted
+        .get(sorted.len().saturating_sub(1) * 9 / 10)
+        .copied()
+        .unwrap_or(0);
+    let low = sorted.first().copied().unwrap_or(0);
+    let medium = (((high as f64 + 1.0).ln() / 2.0).exp() - 1.0).round() as u64;
+    ManpowerLegend { low, medium, high }
+}
+
+fn sequential_manpower_color(value: f64) -> Color {
+    const STOPS: [Color; 5] = [
+        [0x1b, 0x38, 0x63],
+        [0x1e, 0x6f, 0x9a],
+        [0x2f, 0xa4, 0x8f],
+        [0xa9, 0xcf, 0x5a],
+        [0xf0, 0xd1, 0x4f],
+    ];
+    let scaled = value.clamp(0.0, 1.0) * (STOPS.len() - 1) as f64;
+    let index = scaled.floor() as usize;
+    if index + 1 == STOPS.len() {
+        STOPS[index]
+    } else {
+        blend(STOPS[index], STOPS[index + 1], scaled.fract())
     }
 }
 
@@ -188,11 +278,43 @@ mod tests {
             category_color(Some("modded_category")),
             category_color(None)
         );
-        assert_eq!(manpower_color(Some(0), 1_000), [0x3c, 0x3c, 0x3c]);
-        assert_eq!(manpower_color(None, 1_000), [0x66, 0x66, 0x66]);
+        assert_eq!(manpower_color(Some(0), 1_000), MANPOWER_ZERO_COLOR);
+        assert_eq!(manpower_color(None, 1_000), MANPOWER_MISSING_COLOR);
         let small = manpower_color(Some(10), 1_000_000);
         let large = manpower_color(Some(1_000_000), 1_000_000);
         assert_ne!(small, large);
+    }
+
+    #[test]
+    fn legends_are_deterministic_and_outliers_do_not_flatten_the_scale() {
+        let model = build_map_presentation(
+            SourceGeneration::new(1),
+            1,
+            [
+                state(1, Some("city"), Some(10)),
+                state(2, Some("rural"), Some(20)),
+                state(3, Some("city"), Some(30)),
+                state(4, Some("custom"), Some(1_000_000)),
+            ],
+            |_| None,
+        );
+        assert_eq!(
+            model
+                .category_legend
+                .iter()
+                .map(|entry| entry.category.as_str())
+                .collect::<Vec<_>>(),
+            ["city", "custom", "rural"]
+        );
+        assert!(model.manpower_legend.high < 1_000_000);
+        assert_ne!(
+            model.states[&1].category_color,
+            model.states[&2].category_color
+        );
+        assert_ne!(
+            model.states[&1].manpower_color,
+            model.states[&2].manpower_color
+        );
     }
 
     #[test]
