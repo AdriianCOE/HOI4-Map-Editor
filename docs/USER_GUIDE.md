@@ -21,11 +21,18 @@ map, so inspector edits appear before Save Project. Resource icons are loaded
 from the local mod/base-game installation; unresolved or custom icons use a
 textual fallback.
 
-**Strategic Regions** is a read-only Map View. It colors loaded memberships,
-draws boundaries between regions, and opens the selected region in the existing
-Strategic Regions panel. Ambiguous memberships retain the current selection;
-unassigned or unavailable source coverage clears it. It does not edit or save
-Strategic Region files.
+**Strategic Regions** opens in read-only selection mode. It colors working
+memberships, draws boundaries, and opens the selected region in the Strategic
+Regions panel. In this map view, enable **Edit Strategic Regions** and choose
+Select, Brush, Fill, or Lasso to assign whole Provinces to the selected region.
+Brush and Lasso collect a temporary deterministic set, and Fill traverses the
+geographic Province adjacency graph; each completed operation is one undoable
+in-memory transaction. Middle-click picks only a unique working membership.
+
+No Strategic Region file changes until **Save Project**. Mutation stays
+disabled for incomplete data, duplicate region IDs, unsafe comment-protected
+fields, and archive-backed sources that cannot be safely changed. `Esc`, a
+tool change, a map-view change, or a project switch discards any active draft.
 
 ## Province workspace
 

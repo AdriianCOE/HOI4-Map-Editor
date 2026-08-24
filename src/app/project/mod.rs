@@ -109,8 +109,8 @@ pub use strategic_regions::{
 };
 pub use strategic_regions_edit::{
     StrategicRegionDocument, StrategicRegionEditError, StrategicRegionEditSession,
-    StrategicRegionRecordLocation, WorkingStrategicRegion, plan_strategic_region_patches,
-    working_load_result,
+    StrategicRegionProvinceMembership, StrategicRegionRecordLocation, WorkingStrategicRegion,
+    plan_strategic_region_patches, working_load_result,
 };
 pub use strategic_regions_presentation::{
     STRATEGIC_REGION_AMBIGUOUS_COLOR, STRATEGIC_REGION_UNASSIGNED_COLOR,

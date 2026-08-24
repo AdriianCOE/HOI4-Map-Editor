@@ -52,8 +52,9 @@ game and needs no playset entry.
 - Political View and the Resources overlay load only the runtime presentation
   metadata they need from the user's local mod/base-game files. Broader game
   metadata and general-purpose `.gfx`/`.dds` rendering are still limited.
-- Adjacencies, Strategic Regions, and Continents do not yet have complete
-  dedicated editing workspaces.
+- Adjacencies and Continents do not yet have complete dedicated editing
+  workspaces. Strategic Region membership editing is available; creation,
+  deletion, and property editing remain planned.
 
 **This is preview software.** Keep an independent backup of your mod,
 separate from the automatic backups the editor creates during a save.

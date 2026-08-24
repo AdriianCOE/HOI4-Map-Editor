@@ -65,7 +65,14 @@ Switch between:
 - Coastal Provinces
 - States
 - Political
-- Strategic Regions (read-only)
+- Strategic Regions
+
+Strategic Regions open in safe read-only selection mode. In the Strategic
+Regions map view, enable **Edit Strategic Regions** to move whole province
+memberships with Select, Brush, Fill, or Lasso. Each completed gesture is one
+undoable in-memory membership transaction; no source file is changed until
+Save Project. Editing is unavailable when region coverage is incomplete, a
+region identity is duplicated, or the source cannot be safely patched.
 
 Political View resolves country colors, localized country names, and available
 normal flags from the user's mod/base-game installation. It remains read-only:
@@ -128,6 +135,9 @@ multi-file project. Unix builds also persist critical file and directory-entry
 changes around the save journal.
 
 Existing state files retain unrelated comments, formatting, unknown fields, and unsupported blocks.
+Strategic Region updates use the same candidate-first Save Project transaction;
+their source files are changed only after validation and rollback protection are
+prepared.
 
 ### Settings and languages
 
@@ -261,7 +271,8 @@ Map shortcuts are suspended while typing in a field, picker, or search box.
   they need at runtime.
 - Adjacencies can be inspected and preserved, but the full editing workspace is
   still planned; invalid references require external repair.
-- Strategic Regions and Continents do not yet have complete dedicated editing workspaces.
+- Strategic Regions support membership editing; creation, deletion, and property
+  editing remain planned. Continents do not yet have a dedicated editing workspace.
 - Rivers, supply networks, heightmaps, and tree maps are not directly editable.
 - The executable is not currently digitally signed, so Windows SmartScreen may display a warning for early preview builds.
 
@@ -300,14 +311,14 @@ The project does not distribute proprietary Hearts of Iron IV assets.
 
 ### Strategic Regions
 
-Strategic Regions can be inspected as a read-only Map View with deterministic
-region colors, membership boundaries, selection, and State-split decoration.
-The existing inspector remains available for source details and provenance.
+Strategic Regions support safe in-memory Province-membership editing with
+Select, middle-click picker, Brush, Fill, Lasso, undo/redo, candidate Save,
+working validation, deterministic region colors, membership boundaries, and
+State-split decoration. The existing inspector remains available for source
+details and provenance.
 
-- Create and edit strategic regions.
-- Assign and remove states.
-- Edit weather and related region data.
-- Validate and save region files safely.
+- Create and delete strategic regions.
+- Edit name, localization key, ID, naval terrain, weather, and related data.
 
 ### Continents
 

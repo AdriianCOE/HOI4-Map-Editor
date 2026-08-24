@@ -50,13 +50,14 @@ use super::project::{
     StateFillProvince, StateFillProvinceKind, StateLassoPhase, StatePropertyDraft,
     StateRemovalPolicy, StateSaveCancellation, StateSaveConditions, StateSaveFault,
     StateSaveOutcome, StateSaveReport, StateSelection, StrategicRegionEditSession,
-    WorkingStateOrigin, boundaries_for_state, classify_state_lasso, detect_state_save_recovery,
-    execute_project_save, execute_state_save, format_integer_pt_br, generate_state_view,
-    generate_state_view_for, generate_state_view_region_for, parse_grouped_nonnegative_integer,
-    plan_state_fill, plan_state_patches, plan_strategic_region_patches,
-    recover_interrupted_state_save, sample_segment, save_confirmation_text,
-    select_state_at_for as resolve_state_at_for, selection_overlay_for, state_save_eligibility,
-    validate_project_with_working_context, working_load_result,
+    StrategicRegionProvinceMembership, WorkingStateOrigin, boundaries_for_state,
+    classify_state_lasso, detect_state_save_recovery, execute_project_save, execute_state_save,
+    format_integer_pt_br, generate_state_view, generate_state_view_for,
+    generate_state_view_region_for, parse_grouped_nonnegative_integer, plan_state_fill,
+    plan_state_patches, plan_strategic_region_patches, recover_interrupted_state_save,
+    sample_segment, save_confirmation_text, select_state_at_for as resolve_state_at_for,
+    selection_overlay_for, state_save_eligibility, validate_project_with_working_context,
+    working_load_result,
 };
 use super::resources::{
     ResourceIconResolver, ResourceMapState, prepare_resource_labels_with_index,
@@ -98,6 +99,20 @@ fn lasso_mode_from_gesture_modifiers(modifiers: GestureModifiers) -> Option<Lass
     } else {
         None
     }
+}
+
+fn point_in_polygon(point: Vector2<f64>, polygon: &[Vector2<f64>]) -> bool {
+    let mut inside = false;
+    for index in 0..polygon.len() {
+        let a = polygon[index];
+        let b = polygon[(index + 1) % polygon.len()];
+        if (a[1] > point[1]) != (b[1] > point[1])
+            && point[0] < (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0]
+        {
+            inside = !inside;
+        }
+    }
+    inside
 }
 
 const STATE_PROPERTY_LABELS: [&str; StatePropertyDraft::TEXT_FIELD_COUNT] = [
@@ -224,6 +239,9 @@ pub struct Canvas {
     selected_strategic_region_id: Option<u32>,
     pending_strategic_region_focus: Option<u32>,
     strategic_regions_search_focused: bool,
+    strategic_region_edit_mode: bool,
+    strategic_region_tool: StrategicRegionTool,
+    strategic_region_gesture: Option<StrategicRegionGestureDraft>,
     map_tag_picker: MapTagPicker,
     state_double_click: DoubleClickTracker,
     session_started: Instant,
@@ -461,6 +479,28 @@ enum StateFillPhase {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StrategicRegionTool {
+    #[default]
+    Select,
+    Brush,
+    Fill,
+    Lasso,
+}
+
+#[derive(Debug, Clone)]
+enum StrategicRegionGestureDraft {
+    Brush {
+        target_region_id: u32,
+        provinces: BTreeSet<u32>,
+        previous_map_position: Vector2<f64>,
+    },
+    Lasso {
+        target_region_id: u32,
+        points: Vec<Vector2<f64>>,
+    },
+}
+
 impl StateLifecycleDraft {
     fn text_field_count(&self) -> usize {
         match self {
@@ -517,6 +557,9 @@ impl Canvas {
         self.selected_strategic_region_id = None;
         self.pending_strategic_region_focus = None;
         self.strategic_regions_search_focused = false;
+        self.strategic_region_edit_mode = false;
+        self.strategic_region_tool = StrategicRegionTool::Select;
+        self.strategic_region_gesture = None;
         self.save_ui.reset_for_generation(generation);
     }
 
@@ -814,6 +857,9 @@ impl Canvas {
             selected_strategic_region_id: None,
             pending_strategic_region_focus: None,
             strategic_regions_search_focused: false,
+            strategic_region_edit_mode: false,
+            strategic_region_tool: StrategicRegionTool::Select,
+            strategic_region_gesture: None,
             map_tag_picker: MapTagPicker::default(),
             state_double_click: DoubleClickTracker::default(),
             session_started: Instant::now(),
@@ -982,6 +1028,323 @@ impl Canvas {
         self.strategic_regions_ui
             .open(SourceGeneration::new(self.project_generation.0));
         self.strategic_regions_search_focused = false;
+    }
+
+    pub fn strategic_region_editability_reason(&self) -> Option<String> {
+        self.strategic_region_edit_session
+            .as_ref()
+            .and_then(|session| session.editability_reason(self.selected_strategic_region_id))
+            .or_else(|| {
+                (!self.strategic_region_edit_mode)
+                    .then_some("Edit Strategic Regions is off.".to_owned())
+            })
+    }
+
+    pub fn strategic_region_edit_mode(&self) -> bool {
+        self.strategic_region_edit_mode
+    }
+
+    pub fn strategic_region_edit_context_active(&self) -> bool {
+        self.map_layers.base_view == MapBaseView::StrategicRegions
+            && self.strategic_region_edit_mode
+    }
+
+    pub fn set_strategic_region_edit_mode(&mut self, enabled: bool, alerts: &mut Alerts) {
+        self.cancel_strategic_region_gesture();
+        if enabled {
+            let reason = self
+                .strategic_region_edit_session
+                .as_ref()
+                .and_then(|session| session.editability_reason(None));
+            if let Some(reason) = reason {
+                alerts.push(Err(reason));
+                self.strategic_region_edit_mode = false;
+                return;
+            }
+        }
+        self.strategic_region_edit_mode = enabled;
+        self.strategic_region_tool = StrategicRegionTool::Select;
+        self.refresh_state_information();
+        alerts.push(Ok(if enabled {
+            "Edit Strategic Regions enabled".to_owned()
+        } else {
+            "Edit Strategic Regions disabled".to_owned()
+        }));
+    }
+
+    pub fn set_strategic_region_tool(&mut self, tool: StrategicRegionTool, alerts: &mut Alerts) {
+        self.cancel_strategic_region_gesture();
+        if !self.strategic_region_edit_mode {
+            alerts.push(Err("Enable Edit Strategic Regions first"));
+            return;
+        }
+        if !matches!(tool, StrategicRegionTool::Select)
+            && let Some(reason) = self.strategic_region_editability_reason()
+        {
+            alerts.push(Err(reason));
+            return;
+        }
+        self.strategic_region_tool = tool;
+        self.refresh_state_information();
+    }
+
+    fn strategic_region_target(&self) -> Result<u32, String> {
+        let target = self
+            .selected_strategic_region_id
+            .ok_or_else(|| "Select a target Strategic Region first".to_owned())?;
+        let session = self
+            .strategic_region_edit_session
+            .as_ref()
+            .ok_or_else(|| "Strategic Region editing is unavailable".to_owned())?;
+        session
+            .editability_reason(Some(target))
+            .map_or(Ok(target), Err)
+    }
+
+    fn strategic_region_province_at(
+        &self,
+        interface: &Interface,
+        screen: Vector2<f64>,
+    ) -> Option<u32> {
+        self.camera
+            .relative_position_int(interface, screen)
+            .and_then(|position| self.bundle.map.get_province_at(position).preserved_id)
+    }
+
+    fn begin_strategic_region_brush(
+        &mut self,
+        interface: &Interface,
+        screen: Vector2<f64>,
+        alerts: &mut Alerts,
+    ) -> bool {
+        let target_region_id = match self.strategic_region_target() {
+            Ok(target_region_id) => target_region_id,
+            Err(error) => {
+                alerts.push(Err(error));
+                return false;
+            }
+        };
+        let Some(position) = self.camera.relative_position_int(interface, screen) else {
+            return false;
+        };
+        let mut provinces = BTreeSet::new();
+        self.collect_strategic_region_brush(
+            &mut provinces,
+            [position[0] as f64, position[1] as f64],
+            [position[0] as f64, position[1] as f64],
+        );
+        self.strategic_region_gesture = Some(StrategicRegionGestureDraft::Brush {
+            target_region_id,
+            provinces,
+            previous_map_position: [position[0] as f64, position[1] as f64],
+        });
+        self.refresh_strategic_region_preview();
+        true
+    }
+
+    fn update_strategic_region_brush(&mut self, interface: &Interface, screen: Vector2<f64>) {
+        let Some(position) = self.camera.relative_position_int(interface, screen) else {
+            return;
+        };
+        let Some(StrategicRegionGestureDraft::Brush {
+            previous_map_position,
+            ..
+        }) = self.strategic_region_gesture.as_ref()
+        else {
+            return;
+        };
+        let previous = *previous_map_position;
+        let current = [position[0] as f64, position[1] as f64];
+        let mut sampled = BTreeSet::new();
+        self.collect_strategic_region_brush(&mut sampled, previous, current);
+        if let Some(StrategicRegionGestureDraft::Brush {
+            provinces,
+            previous_map_position,
+            ..
+        }) = self.strategic_region_gesture.as_mut()
+        {
+            provinces.extend(sampled);
+            *previous_map_position = current;
+        }
+        self.refresh_strategic_region_preview();
+    }
+
+    fn collect_strategic_region_brush(
+        &self,
+        provinces: &mut BTreeSet<u32>,
+        from: Vector2<f64>,
+        to: Vector2<f64>,
+    ) {
+        let dimensions = self.bundle.map.dimensions();
+        let radius = self.tool.radius.ceil() as i32;
+        for point in sample_segment(from, to, 1.0, dimensions) {
+            let center_x = point[0] as i32;
+            let center_y = point[1] as i32;
+            for offset_y in -radius..=radius {
+                for offset_x in -radius..=radius {
+                    if offset_x * offset_x + offset_y * offset_y > radius * radius {
+                        continue;
+                    }
+                    let x = center_x + offset_x;
+                    let y = center_y + offset_y;
+                    if x < 0 || y < 0 || x >= dimensions[0] as i32 || y >= dimensions[1] as i32 {
+                        continue;
+                    }
+                    if let Some(id) = self
+                        .bundle
+                        .map
+                        .get_province_at([x as u32, y as u32])
+                        .preserved_id
+                    {
+                        provinces.insert(id);
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish_strategic_region_brush(&mut self, alerts: &mut Alerts) {
+        let Some(StrategicRegionGestureDraft::Brush {
+            target_region_id,
+            provinces,
+            ..
+        }) = self.strategic_region_gesture.take()
+        else {
+            return;
+        };
+        self.clear_strategic_region_preview();
+        self.commit_strategic_region_assignment(provinces, target_region_id, alerts);
+    }
+
+    fn commit_strategic_region_assignment(
+        &mut self,
+        provinces: BTreeSet<u32>,
+        target: u32,
+        alerts: &mut Alerts,
+    ) {
+        if provinces.is_empty() {
+            return;
+        }
+        let result = self
+            .strategic_region_edit_session
+            .as_mut()
+            .ok_or_else(|| "Strategic Region editing is unavailable".to_owned())
+            .and_then(|session| {
+                session
+                    .assign_provinces_to_region(provinces.iter().copied(), target)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(true) => {
+                self.ensure_strategic_regions_presentation();
+                self.refresh_strategic_region_working_validation();
+                self.refresh_state_information();
+                alerts.push(Ok(format!(
+                    "Assigned {} provinces to Strategic Region {target}",
+                    provinces.len()
+                )));
+            }
+            Ok(false) => alerts.push(Ok("Strategic Region membership already matches target")),
+            Err(error) => alerts.push(Err(error)),
+        }
+    }
+
+    fn refresh_strategic_region_working_validation(&mut self) {
+        let Some(project) = self.project.as_ref() else {
+            return;
+        };
+        let strategic_regions = self
+            .strategic_regions_for_view()
+            .unwrap_or_else(|| project.strategic_regions.clone());
+        let state_by_province = self
+            .state_edit_session
+            .as_ref()
+            .map(StateEditSession::state_by_province);
+        self.project_validation_report = Some(validate_project_with_working_context(
+            &self.bundle,
+            project,
+            ProjectValidationTarget::CurrentProject,
+            &strategic_regions,
+            state_by_province,
+        ));
+        self.refresh_problems_overlay();
+        self.problems_ui.reset();
+    }
+
+    fn refresh_strategic_region_preview(&mut self) {
+        let provinces = match &self.strategic_region_gesture {
+            Some(StrategicRegionGestureDraft::Brush { provinces, .. }) => provinces,
+            Some(StrategicRegionGestureDraft::Lasso { points, .. }) => {
+                self.lasso_preview_boundaries =
+                    self.boundaries_for_provinces(&self.strategic_region_lasso_provinces(points));
+                self.refresh_state_information();
+                return;
+            }
+            None => return,
+        };
+        self.brush_preview_boundaries = self.boundaries_for_provinces(provinces);
+        self.refresh_state_information();
+    }
+
+    fn clear_strategic_region_preview(&mut self) {
+        self.brush_preview_boundaries.clear();
+        self.lasso_preview_boundaries.clear();
+    }
+
+    pub fn cancel_strategic_region_gesture(&mut self) -> bool {
+        let active = self.strategic_region_gesture.take().is_some();
+        if active {
+            self.clear_strategic_region_preview();
+            self.refresh_state_information();
+        }
+        active
+    }
+
+    /// SR lasso follows the established State-lasso centroid policy. It is
+    /// deliberately a sparse working set and never paints map pixels.
+    fn strategic_region_lasso_provinces(&self, points: &[Vector2<f64>]) -> BTreeSet<u32> {
+        if points.len() < 3 {
+            return BTreeSet::new();
+        }
+        self.bundle
+            .map
+            .iter_province_data()
+            .filter_map(|(_, province)| {
+                let id = province.preserved_id?;
+                point_in_polygon(province.center_of_mass(), points).then_some(id)
+            })
+            .collect()
+    }
+
+    fn strategic_region_fill_provinces(&self, start: u32) -> Result<BTreeSet<u32>, String> {
+        let session = self
+            .strategic_region_edit_session
+            .as_ref()
+            .ok_or_else(|| "Strategic Region editing is unavailable".to_owned())?;
+        let source = session.membership_of(start);
+        if matches!(
+            source,
+            StrategicRegionProvinceMembership::Ambiguous
+                | StrategicRegionProvinceMembership::Unknown
+        ) {
+            return Err(
+                "Fill requires a Province with an unambiguous Strategic Region membership"
+                    .to_owned(),
+            );
+        }
+        let mut found = BTreeSet::new();
+        let mut queue = std::collections::VecDeque::from([start]);
+        while let Some(province) = queue.pop_front() {
+            if !found.insert(province) {
+                continue;
+            }
+            for neighbor in self.province_adjacency.neighbors(province) {
+                if !found.contains(&neighbor) && session.membership_of(neighbor) == source {
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+        Ok(found)
     }
 
     /// The loaded result remains immutable; consumers receive an inexpensive
@@ -4871,6 +5234,49 @@ impl Canvas {
             [layout.panel[0] + 14.0, layout.panel[1] + 48.0],
             &fit_editor_text(&coverage, layout.panel[2] - 30.0),
         );
+        let editability = self.strategic_region_editability_reason();
+        let edit_status = editability.as_deref().map_or_else(
+            || tr("strategic_regions.editable").to_owned(),
+            |reason| format!("{}: {reason}", tr("strategic_regions.read_only")),
+        );
+        draw_canvas_text(
+            ctx,
+            glyph_cache,
+            gl,
+            if editability.is_some() {
+                colors::WARNING
+            } else {
+                colors::WHITE_T
+            },
+            [layout.panel[0] + 14.0, layout.panel[1] + 64.0],
+            &fit_editor_text(&edit_status, layout.panel[2] - 30.0),
+        );
+        draw_editor_button(
+            ctx,
+            glyph_cache,
+            gl,
+            layout.edit_toggle(),
+            tr("strategic_regions.edit"),
+            self.strategic_region_edit_mode,
+        );
+        for (index, (label, tool)) in [
+            (tr("strategic_regions.select"), StrategicRegionTool::Select),
+            (tr("strategic_regions.brush"), StrategicRegionTool::Brush),
+            (tr("strategic_regions.fill"), StrategicRegionTool::Fill),
+            (tr("strategic_regions.lasso"), StrategicRegionTool::Lasso),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            draw_editor_button(
+                ctx,
+                glyph_cache,
+                gl,
+                layout.tool_button(index),
+                label,
+                self.strategic_region_edit_mode && self.strategic_region_tool == tool,
+            );
+        }
         graphics::rectangle(
             if self.strategic_regions_search_focused {
                 colors::BUTTON_ACTIVE
@@ -5053,6 +5459,24 @@ impl Canvas {
             self.strategic_regions_ui.close();
             self.strategic_regions_search_focused = false;
             return (true, None);
+        }
+        if point_in_rect(pos, layout.edit_toggle()) {
+            self.set_strategic_region_edit_mode(!self.strategic_region_edit_mode, alerts);
+            return (true, None);
+        }
+        for (index, tool) in [
+            StrategicRegionTool::Select,
+            StrategicRegionTool::Brush,
+            StrategicRegionTool::Fill,
+            StrategicRegionTool::Lasso,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if point_in_rect(pos, layout.tool_button(index)) {
+                self.set_strategic_region_tool(tool, alerts);
+                return (true, None);
+            }
         }
         if point_in_rect(pos, layout.search()) {
             self.strategic_regions_search_focused = true;
@@ -6524,13 +6948,10 @@ impl Canvas {
     }
 
     fn focus_strategic_region_bounds(&mut self, interface: &Interface, id: u32) {
-        let Some(region) = self.project.as_ref().and_then(|project| {
-            project
-                .strategic_regions
-                .regions
-                .iter()
-                .find(|region| region.id == id)
-        }) else {
+        let Some(region) = self
+            .strategic_regions_for_view()
+            .and_then(|regions| regions.regions.into_iter().find(|region| region.id == id))
+        else {
             return;
         };
         let extents = self.bundle.map.province_extents_by_id();
@@ -7166,6 +7587,20 @@ impl Canvas {
     }
 
     pub fn undo(&mut self, alerts: &mut Alerts) {
+        if self.map_layers.base_view == MapViewMode::StrategicRegions
+            && self.strategic_region_edit_mode
+        {
+            self.cancel_strategic_region_gesture();
+            if self
+                .strategic_region_edit_session
+                .as_mut()
+                .is_some_and(StrategicRegionEditSession::undo)
+            {
+                self.ensure_strategic_regions_presentation();
+                self.refresh_state_information();
+            }
+            return;
+        }
         if let Some(transaction) = self.province_removal_undo.last().copied()
             && self.history.position() == transaction.map_after
             && self
@@ -7233,6 +7668,20 @@ impl Canvas {
     }
 
     pub fn redo(&mut self, alerts: &mut Alerts) {
+        if self.map_layers.base_view == MapViewMode::StrategicRegions
+            && self.strategic_region_edit_mode
+        {
+            self.cancel_strategic_region_gesture();
+            if self
+                .strategic_region_edit_session
+                .as_mut()
+                .is_some_and(StrategicRegionEditSession::redo)
+            {
+                self.ensure_strategic_regions_presentation();
+                self.refresh_state_information();
+            }
+            return;
+        }
         if let Some(transaction) = self.province_removal_redo.last().copied()
             && self.history.position() == transaction.map_before
             && self
@@ -7354,6 +7803,11 @@ impl Canvas {
     }
 
     pub fn set_map_view_mode(&mut self, alerts: &mut Alerts, map_view_mode: MapViewMode) {
+        if self.map_layers.base_view == MapViewMode::StrategicRegions
+            && map_view_mode != MapViewMode::StrategicRegions
+        {
+            self.cancel_strategic_region_gesture();
+        }
         if map_view_mode.requires_state_history() && self.state_texture.is_none() {
             alerts.push(Err(
                 "States and Political views are available only for loaded state projects",
@@ -7441,8 +7895,36 @@ impl Canvas {
         let brush_active = self.state_brush_is_active();
         let fill_active = self.state_fill_is_active();
         let fill_preview = matches!(self.state_fill_phase, StateFillPhase::Preview { .. });
+        let strategic_region_view = self.map_layers.base_view == MapBaseView::StrategicRegions;
+        let strategic_region_editable =
+            self.strategic_region_edit_session
+                .as_ref()
+                .is_some_and(|session| {
+                    session
+                        .editability_reason(self.selected_strategic_region_id)
+                        .is_none()
+                });
+        let strategic_region_history_active =
+            strategic_region_view && self.strategic_region_edit_mode;
+        let strategic_region_can_undo = strategic_region_history_active
+            && self
+                .strategic_region_edit_session
+                .as_ref()
+                .is_some_and(StrategicRegionEditSession::can_undo);
+        let strategic_region_can_redo = strategic_region_history_active
+            && self
+                .strategic_region_edit_session
+                .as_ref()
+                .is_some_and(StrategicRegionEditSession::can_redo);
         let Some(edit) = self.state_edit_session.as_ref() else {
-            return StateActionAvailability::default();
+            return StateActionAvailability {
+                strategic_region_view,
+                strategic_region_edit_mode: self.strategic_region_edit_mode,
+                strategic_region_editable,
+                can_undo: strategic_region_can_undo,
+                can_redo: strategic_region_can_redo,
+                ..StateActionAvailability::default()
+            };
         };
         let draft_modified = self.property_draft_is_modified();
         let patch_preview_stale = self
@@ -7523,8 +8005,16 @@ impl Canvas {
                     .is_some_and(|state_id| edit.validate_removable_state(state_id).is_ok()),
             property_editor_open: self.property_editor_is_open(),
             property_draft_modified: draft_modified,
-            can_undo: !edits_blocked && !draft_modified && edit.can_undo(),
-            can_redo: !edits_blocked && !draft_modified && edit.can_redo(),
+            can_undo: if strategic_region_history_active {
+                strategic_region_can_undo
+            } else {
+                !edits_blocked && !draft_modified && edit.can_undo()
+            },
+            can_redo: if strategic_region_history_active {
+                strategic_region_can_redo
+            } else {
+                !edits_blocked && !draft_modified && edit.can_redo()
+            },
             has_edits: edit.is_dirty() || draft_modified,
             has_patch_preview: self.patch_preview.is_some(),
             patch_preview_files: self
@@ -7546,6 +8036,9 @@ impl Canvas {
             recovery_required,
             has_save_report: self.state_save_report.is_some(),
             project_loaded: self.project.is_some(),
+            strategic_region_view,
+            strategic_region_edit_mode: self.strategic_region_edit_mode,
+            strategic_region_editable,
         }
     }
 
@@ -7658,6 +8151,7 @@ impl Canvas {
             || self.state_lasso_is_active()
             || self.state_brush_is_active()
             || self.state_fill_is_active()
+            || self.strategic_region_gesture.is_some()
         {
             alerts.push(Err(
                 "Apply or cancel the active draft/tool before reviewing state files",
@@ -9196,6 +9690,9 @@ impl Canvas {
             .project
             .as_ref()
             .and_then(|project| StrategicRegionEditSession::new(project).ok());
+        self.strategic_region_edit_mode = false;
+        self.strategic_region_tool = StrategicRegionTool::Select;
+        self.strategic_region_gesture = None;
         self.patch_preview = None;
         self.patch_preview_file = 0;
         self.round_trip_report = None;
@@ -10074,7 +10571,12 @@ impl Canvas {
                 screen_position,
                 modifiers,
             } => {
-                if self.state_brush_is_stroking() {
+                if matches!(
+                    self.strategic_region_gesture,
+                    Some(StrategicRegionGestureDraft::Brush { .. })
+                ) {
+                    self.update_strategic_region_brush(interface, screen_position);
+                } else if self.state_brush_is_stroking() {
                     self.update_state_brush(interface, screen_position);
                 } else if !self.is_state_workspace()
                     && self.tool.mode == ToolMode::PaintArea
@@ -10087,6 +10589,11 @@ impl Canvas {
             MapGestureRequest::End => {
                 if self.state_pan_is_active() {
                     self.camera.set_panning(false);
+                } else if matches!(
+                    self.strategic_region_gesture,
+                    Some(StrategicRegionGestureDraft::Brush { .. })
+                ) {
+                    self.finish_strategic_region_brush(alerts);
                 } else if self.state_brush_is_stroking() {
                     self.finish_state_brush(alerts);
                 } else {
@@ -10133,6 +10640,76 @@ impl Canvas {
             return MapGestureExecution::needs_property_draft_resolution();
         }
         if self.map_layers.base_view == MapBaseView::StrategicRegions {
+            if self.strategic_region_edit_mode {
+                match self.strategic_region_tool {
+                    StrategicRegionTool::Select => {}
+                    StrategicRegionTool::Brush => {
+                        return MapGestureExecution::handled(self.begin_strategic_region_brush(
+                            interface,
+                            screen_position,
+                            alerts,
+                        ));
+                    }
+                    StrategicRegionTool::Fill => {
+                        if let (Ok(target), Some(province)) = (
+                            self.strategic_region_target(),
+                            self.strategic_region_province_at(interface, screen_position),
+                        ) {
+                            match self.strategic_region_fill_provinces(province) {
+                                Ok(provinces) => self
+                                    .commit_strategic_region_assignment(provinces, target, alerts),
+                                Err(error) => alerts.push(Err(error)),
+                            }
+                        }
+                        return MapGestureExecution::handled(false);
+                    }
+                    StrategicRegionTool::Lasso => {
+                        let target_region_id = match self.strategic_region_target() {
+                            Ok(target_region_id) => target_region_id,
+                            Err(error) => {
+                                alerts.push(Err(error));
+                                return MapGestureExecution::handled(false);
+                            }
+                        };
+                        let point = self.camera.relative_position(interface, screen_position);
+                        let finished_points = match &mut self.strategic_region_gesture {
+                            Some(StrategicRegionGestureDraft::Lasso {
+                                target_region_id: active,
+                                points,
+                            }) if *active == target_region_id => {
+                                if points.len() >= 3
+                                    && vecmath::vec2_len(vecmath::vec2_sub(points[0], point)) < 5.0
+                                {
+                                    Some(points.clone())
+                                } else {
+                                    points.push(point);
+                                    None
+                                }
+                            }
+                            _ => {
+                                self.strategic_region_gesture =
+                                    Some(StrategicRegionGestureDraft::Lasso {
+                                        target_region_id,
+                                        points: vec![point],
+                                    });
+                                None
+                            }
+                        };
+                        self.refresh_strategic_region_preview();
+                        if let Some(points) = finished_points {
+                            let provinces = self.strategic_region_lasso_provinces(&points);
+                            self.strategic_region_gesture = None;
+                            self.clear_strategic_region_preview();
+                            self.commit_strategic_region_assignment(
+                                provinces,
+                                target_region_id,
+                                alerts,
+                            );
+                        }
+                        return MapGestureExecution::handled(false);
+                    }
+                }
+            }
             let execution = self.apply_selection_navigation(
                 interface,
                 SelectionNavigationRequest::SelectStrategicRegionAt { screen_position },
@@ -10184,7 +10761,10 @@ impl Canvas {
     }
 
     fn edit_gesture_continues_on_motion(&self) -> bool {
-        self.state_brush_is_stroking()
+        matches!(
+            self.strategic_region_gesture,
+            Some(StrategicRegionGestureDraft::Brush { .. })
+        ) || self.state_brush_is_stroking()
             || (!self.is_state_workspace()
                 && self.tool.mode == ToolMode::PaintArea
                 && self.view_mode() != ViewMode::Adjacencies)
@@ -11580,6 +12160,30 @@ impl Canvas {
         cursor_pos: Vector2<f64>,
         alerts: &mut Alerts,
     ) {
+        if self.map_layers.base_view == MapBaseView::StrategicRegions
+            && self.strategic_region_edit_mode
+        {
+            let Some(province_id) = self.strategic_region_province_at(interface, cursor_pos) else {
+                return;
+            };
+            let Some(session) = self.strategic_region_edit_session.as_ref() else {
+                return;
+            };
+            match session.membership_of(province_id) {
+                StrategicRegionProvinceMembership::Assigned(region_id) => {
+                    self.select_strategic_region(region_id);
+                    alerts.push(Ok(format!("Picked Strategic Region {region_id}")));
+                }
+                StrategicRegionProvinceMembership::Ambiguous => alerts.push(Err(
+                    "Strategic Region membership is ambiguous; target preserved",
+                )),
+                StrategicRegionProvinceMembership::Unassigned
+                | StrategicRegionProvinceMembership::Unknown => alerts.push(Err(
+                    "Province has no unique Strategic Region; target preserved",
+                )),
+            }
+            return;
+        }
         if let Some(pos) = self.camera.relative_position_int(interface, cursor_pos) {
             let color = self.bundle.map.get_color_at(pos);
             let province_data = self.bundle.map.get_province_at(pos);
@@ -11615,6 +12219,14 @@ impl Canvas {
 
     pub fn change_tool_radius(&mut self, d: f64) {
         const LIMIT: f64 = std::f64::consts::SQRT_2 / 2.0;
+        if self.map_layers.base_view == MapBaseView::StrategicRegions
+            && self.strategic_region_edit_mode
+            && self.strategic_region_tool == StrategicRegionTool::Brush
+        {
+            let radius = self.tool.radius;
+            self.tool.radius = (radius + d * (1.0 + 0.025 * radius)).max(LIMIT);
+            return;
+        }
         if let (ViewMode::Color, ToolMode::PaintArea) = (self.view_mode, &self.tool.mode) {
             let r = self.tool.radius;
             let d = d * (1.0 + 0.025 * r);
@@ -12127,8 +12739,21 @@ impl StrategicRegionsCanvasLayout {
     fn search(self) -> [f64; 4] {
         [
             self.panel[0] + 12.0,
-            self.panel[1] + 62.0,
+            self.panel[1] + 118.0,
             self.panel[2] - 24.0,
+            25.0,
+        ]
+    }
+
+    fn edit_toggle(self) -> [f64; 4] {
+        [self.panel[0] + 12.0, self.panel[1] + 76.0, 160.0, 25.0]
+    }
+
+    fn tool_button(self, index: usize) -> [f64; 4] {
+        [
+            self.panel[0] + 178.0 + index as f64 * 76.0,
+            self.panel[1] + 76.0,
+            70.0,
             25.0,
         ]
     }
@@ -12136,9 +12761,9 @@ impl StrategicRegionsCanvasLayout {
     fn list(self) -> [f64; 4] {
         [
             self.panel[0] + 12.0,
-            self.panel[1] + 98.0,
+            self.panel[1] + 154.0,
             (self.panel[2] * 0.42).max(185.0),
-            self.panel[3] - 112.0,
+            self.panel[3] - 168.0,
         ]
     }
 

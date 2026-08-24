@@ -65,6 +65,14 @@ pub enum StrategicRegionEditError {
     UnsafeCommentAssociation { region_id: u32, path: PathBuf },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategicRegionProvinceMembership {
+    Assigned(u32),
+    Unassigned,
+    Ambiguous,
+    Unknown,
+}
+
 impl std::fmt::Display for StrategicRegionEditError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -219,22 +227,113 @@ impl StrategicRegionEditSession {
             .collect()
     }
 
+    pub fn history_len(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    pub fn membership_of(&self, province_id: u32) -> StrategicRegionProvinceMembership {
+        if !self.coverage.is_complete() {
+            return StrategicRegionProvinceMembership::Unknown;
+        }
+        let owners = self
+            .working
+            .values()
+            .filter(|region| region.provinces.contains(&province_id))
+            .map(|region| region.id)
+            .collect::<Vec<_>>();
+        match owners.as_slice() {
+            [] => StrategicRegionProvinceMembership::Unassigned,
+            [id] => StrategicRegionProvinceMembership::Assigned(*id),
+            _ => StrategicRegionProvinceMembership::Ambiguous,
+        }
+    }
+
+    pub fn editability_reason(&self, target_region_id: Option<u32>) -> Option<String> {
+        match self.coverage {
+            StrategicRegionCoverage::NotPresent => {
+                return Some("Strategic Region data is not present.".to_owned());
+            }
+            StrategicRegionCoverage::Incomplete { .. } => {
+                return Some("Strategic Region data is incomplete.".to_owned());
+            }
+            StrategicRegionCoverage::Complete => {}
+        }
+        target_region_id.and_then(|id| self.ensure_mutable(id).err().map(|error| error.to_string()))
+    }
+
     pub fn assign_province(
         &mut self,
         province_id: u32,
         target_region_id: u32,
     ) -> Result<bool, StrategicRegionEditError> {
-        self.ensure_mutable(target_region_id)?;
+        self.assign_provinces_to_region([province_id], target_region_id)
+    }
+
+    /// Applies a complete gesture as one working-copy command. Every source
+    /// record that could lose a membership is checked before anything changes.
+    pub fn assign_provinces_to_region(
+        &mut self,
+        province_ids: impl IntoIterator<Item = u32>,
+        target_region_id: u32,
+    ) -> Result<bool, StrategicRegionEditError> {
+        let province_ids = province_ids
+            .into_iter()
+            .filter(|id| *id != 0)
+            .collect::<BTreeSet<_>>();
+        self.preflight_assignment(&province_ids, target_region_id)?;
         let mut after = self.working.clone();
         for region in after.values_mut() {
-            region.provinces.retain(|&id| id != province_id);
+            region.provinces.retain(|id| !province_ids.contains(id));
         }
         let target = after
             .get_mut(&target_region_id)
             .expect("checked target region");
         target.has_provinces_field = true;
-        target.provinces.push(province_id);
+        target.provinces.extend(province_ids);
         self.commit(after)
+    }
+
+    fn preflight_assignment(
+        &self,
+        province_ids: &BTreeSet<u32>,
+        target_region_id: u32,
+    ) -> Result<(), StrategicRegionEditError> {
+        self.ensure_mutable(target_region_id)?;
+        let affected = self
+            .working
+            .values()
+            .filter(|region| region.provinces.iter().any(|id| province_ids.contains(id)))
+            .map(|region| region.id)
+            .chain(std::iter::once(target_region_id))
+            .collect::<BTreeSet<_>>();
+        for id in affected {
+            self.ensure_mutable(id)?;
+        }
+        // Rendering a clone performs the same source-span/comment preflight as
+        // Save planning, while retaining this operation as a pure session API.
+        let mut candidate = self.clone();
+        let mut after = candidate.working.clone();
+        for region in after.values_mut() {
+            region.provinces.retain(|id| !province_ids.contains(id));
+        }
+        let target = after
+            .get_mut(&target_region_id)
+            .expect("checked target region");
+        target.has_provinces_field = true;
+        target.provinces.extend(province_ids.iter().copied());
+        candidate.working = after;
+        for document in candidate.documents.values() {
+            render_document(&candidate, document)?;
+        }
+        Ok(())
     }
 
     pub fn remove_province(
@@ -683,6 +782,76 @@ mod tests {
         assert_eq!(session.region(100).unwrap().provinces, vec![42]);
         assert!(session.redo());
         assert_eq!(session.region(500).unwrap().provinces, vec![7, 42]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_assignment_is_one_history_command_and_is_atomic() {
+        let (root, project) = project();
+        let mut session = StrategicRegionEditSession::new(&project).unwrap();
+        assert!(
+            session
+                .assign_provinces_to_region([42, 7, 42], 500)
+                .unwrap()
+        );
+        assert_eq!(session.history_len(), 1);
+        assert_eq!(session.region(100).unwrap().provinces, Vec::<u32>::new());
+        assert_eq!(session.region(500).unwrap().provinces, vec![7, 42]);
+        assert!(session.undo());
+        assert_eq!(session.region(100).unwrap().provinces, vec![42]);
+        assert_eq!(session.region(500).unwrap().provinces, vec![7]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn membership_classifies_unassigned_unique_and_ambiguous_provinces() {
+        let (root, project) = project();
+        let mut session = StrategicRegionEditSession::new(&project).unwrap();
+        assert_eq!(
+            session.membership_of(1),
+            StrategicRegionProvinceMembership::Unassigned
+        );
+        assert_eq!(
+            session.membership_of(42),
+            StrategicRegionProvinceMembership::Assigned(100)
+        );
+        session.working.get_mut(&500).unwrap().provinces.push(42);
+        assert_eq!(
+            session.membership_of(42),
+            StrategicRegionProvinceMembership::Ambiguous
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_assignment_that_already_matches_is_a_noop() {
+        let (root, project) = project();
+        let mut session = StrategicRegionEditSession::new(&project).unwrap();
+        let revision = session.revision();
+        assert!(!session.assign_provinces_to_region([7, 7], 500).unwrap());
+        assert_eq!(session.history_len(), 0);
+        assert_eq!(session.revision(), revision);
+        assert!(!session.is_dirty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_preflight_rejects_comment_protected_source_without_mutation() {
+        let (root, mut project) = project();
+        fs::write(
+            root.join("map/strategicregions/a.txt"),
+            "strategic_region = { id = 100 provinces = { 42 # retain\n } }\nstrategic_region = { id = 500 provinces = { 7 } }",
+        )
+        .unwrap();
+        project.load_strategic_regions();
+        let mut session = StrategicRegionEditSession::new(&project).unwrap();
+        assert!(matches!(
+            session.assign_provinces_to_region([42], 500),
+            Err(StrategicRegionEditError::UnsafeCommentAssociation { region_id: 100, .. })
+        ));
+        assert_eq!(session.history_len(), 0);
+        assert_eq!(session.region(100).unwrap().provinces, vec![42]);
+        assert_eq!(session.region(500).unwrap().provinces, vec![7]);
         fs::remove_dir_all(root).unwrap();
     }
 

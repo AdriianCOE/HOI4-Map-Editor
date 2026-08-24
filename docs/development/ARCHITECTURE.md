@@ -109,7 +109,7 @@ com o App e nao e clonado para um comando.
 
 ## Limites de projeto
 
-### Strategic Regions (Step 9A)
+### Strategic Regions (Steps 9A–9C2)
 
 `project::strategic_regions` e um dominio somente-leitura para
 `map/strategicregions/*.txt`. Ele usa exclusivamente `ProjectSources` para
@@ -120,12 +120,12 @@ mantem IDs esparsos, token `name`, nome localizado opcional, provincias na
 ordem declarada, `naval_terrain`, fonte e span; falhas de arquivo tornam a
 cobertura parcial sem descartar arquivos validos.
 
-Strategic Regions sao **validados e indexados**, mas ainda **nao sao
-editaveis nem Save-owned**. A validacao e o
-`ProvinceReferenceIndex` consomem o mesmo resultado carregado; nao ha reparse.
-Diagnosticos de ausencia global so ocorrem com cobertura completa, enquanto
-contradicoes positivas (duplicidade, referencia inexistente, associacao
-multipla e State dividido) continuam reportaveis com cobertura parcial.
+Strategic Regions sao **validados, indexados e Save-owned**. A validacao e o
+`ProvinceReferenceIndex` consomem o resultado carregado ou a copia de trabalho
+da sessao; nao ha reparse durante a interacao. Diagnosticos de ausencia global
+so ocorrem com cobertura completa, enquanto contradicoes positivas
+(duplicidade, referencia inexistente, associacao multipla e State dividido)
+continuam reportaveis com cobertura parcial.
 
 ### Strategic Regions inspector (Step 9B)
 
@@ -141,17 +141,31 @@ anterior.
 
 ### Strategic Regions map view (Step 9B2)
 
-`MapBaseView::StrategicRegions` e uma camada-base somente leitura, composta a
-partir do `StrategicRegionLoadResult` ja carregado. O cache base e ligado a
-geracao do projeto/mapa; a decoracao de State-split depende apenas da revisao
-efetiva de Estados; e a selecao e uma camada leve de `Canvas`. A classificacao
+`MapBaseView::StrategicRegions` e uma camada-base composta a partir do
+`StrategicRegionLoadResult` ou da copia de trabalho da sessao. O cache base e
+ligado a geracao do projeto/mapa e a revisao de SR; a decoracao de State-split
+depende apenas da revisao efetiva de Estados; e a selecao e uma camada leve de
+`Canvas`. A classificacao
 e explicita (`Assigned`, `Ambiguous`, `Unassigned`, `Unknown`), usa mapas
 esparsos e trata fontes ausentes/parciais como desconhecidas. Nenhuma fonte e
-relida por frame e a funcionalidade nao adquire permissao de edicao ou Save.
+relida por frame.
+
+O modo **Edit Strategic Regions** e explicitamente desligado por padrao. O
+fluxo e `input classifier → MapGestureRequest → Canvas draft →
+StrategicRegionEditSession batch command`. Canvas possui Select/Brush/Fill/
+Lasso e a sessao possui somente copia de trabalho, preflight, historico e
+serializacao. Brush e Lasso acumulam IDs de Provincias em `BTreeSet` e so
+comitam no fim; Fill usa `ProvinceAdjacency`. Cada gesto e uma revisao e uma
+entrada de historico. O preflight verifica todos os documentos afetados antes
+de mutar, inclusive protecao de comentarios; fonte archive-backed insegura,
+cobertura incompleta e IDs duplicados permanecem somente leitura. Preview e
+leve, sem reconstruir a camada-base ate o commit.
 
 Maturidade atual: **DOMAIN: YES; VALIDATION: YES; REFERENCE INDEX: YES;
-INSPECTOR: YES; SOURCE NAVIGATION: YES; MAP PRESENTATION: YES; MAP SELECTION:
-YES; EDITING: NO; SAVE OWNERSHIP: NO.** O painel e Project Problems podem abrir
+INSPECTOR: YES; SOURCE NAVIGATION: YES; MAP PRESENTATION: YES; READ-ONLY
+SELECTION: YES; EDIT SESSION: YES; SAFE SAVE: YES; EDIT MODE: YES; SELECT:
+YES; PICKER: YES; BRUSH: YES; FILL: YES; LASSO: YES; CREATE: NO; DELETE: NO;
+PROPERTY EDITING: NO.** O painel e Project Problems podem abrir
 fontes filesystem, revelar containers e copiar caminhos; entradas de archive
 nao recebem uma falsa acao de abrir.
 

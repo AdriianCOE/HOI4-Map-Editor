@@ -76,7 +76,7 @@ impl ProvinceAdjacency {
         adjacency
     }
 
-    fn neighbors(&self, province_id: u32) -> impl Iterator<Item = u32> + '_ {
+    pub fn neighbors(&self, province_id: u32) -> impl Iterator<Item = u32> + '_ {
         self.neighbors_by_province
             .get(&province_id)
             .into_iter()

@@ -27,7 +27,10 @@ use piston::input::{Key, MouseButton};
 use vecmath::Vector2;
 
 use self::alerts::Alerts;
-use self::canvas::{Canvas, InspectorExternalRequest, StateApplyDialogAction, ToolMode, ViewMode};
+use self::canvas::{
+    Canvas, InspectorExternalRequest, StateApplyDialogAction, StrategicRegionTool, ToolMode,
+    ViewMode,
+};
 use self::edit_gesture::MapGestureRequest;
 use self::input::{
     ApplicationCommand, CursorCommand, CursorContext, EditingLockedKeyCommand, FileDropCommand,
@@ -674,6 +677,7 @@ impl App {
             }
             MapKeyboardCommand::CancelTool => {
                 if !canvas.map_tag_picker_cancel()
+                    && !canvas.cancel_strategic_region_gesture()
                     && !canvas.cancel_state_brush()
                     && !canvas.cancel_state_lasso()
                     && !canvas.cancel_state_fill()
@@ -700,7 +704,11 @@ impl App {
                 }
             }
             MapKeyboardCommand::ActivateHoveredStateFill => {
-                canvas.activate_state_fill(StateFillMode::HoveredProvince, &mut self.alerts)
+                if canvas.strategic_region_edit_context_active() {
+                    canvas.set_strategic_region_tool(StrategicRegionTool::Fill, &mut self.alerts);
+                } else {
+                    canvas.activate_state_fill(StateFillMode::HoveredProvince, &mut self.alerts)
+                }
             }
             MapKeyboardCommand::CalculateCoastalProvinces => canvas.calculate_coastal_provinces(),
             MapKeyboardCommand::CalculateRecolorMap => canvas.calculate_recolor_map(),
@@ -714,6 +722,8 @@ impl App {
             MapKeyboardCommand::ToolShortcut(ToolShortcut::BrushOrBucket) => {
                 if canvas.is_state_workspace() {
                     canvas.activate_state_brush(StateBrushMode::AssignToTarget, &mut self.alerts);
+                } else if canvas.strategic_region_edit_context_active() {
+                    canvas.set_strategic_region_tool(StrategicRegionTool::Brush, &mut self.alerts);
                 } else {
                     canvas.set_tool_mode(ToolMode::PaintBucket);
                 }
@@ -721,6 +731,8 @@ impl App {
             MapKeyboardCommand::ToolShortcut(ToolShortcut::Lasso { selection_mode }) => {
                 if canvas.is_state_workspace() {
                     canvas.activate_state_lasso(selection_mode, &mut self.alerts);
+                } else if canvas.strategic_region_edit_context_active() {
+                    canvas.set_strategic_region_tool(StrategicRegionTool::Lasso, &mut self.alerts);
                 } else {
                     canvas.set_tool_mode(ToolMode::new_lasso());
                 }
@@ -1426,6 +1438,33 @@ impl App {
             ));
             return;
         }
+        if matches!(
+            id,
+            ToolbarEditToggleStrategicRegions
+                | ToolbarEditStrategicRegionSelect
+                | ToolbarEditStrategicRegionBrush
+                | ToolbarEditStrategicRegionFill
+                | ToolbarEditStrategicRegionLasso
+        ) {
+            if let Some(canvas) = self.canvas.as_mut() {
+                match id {
+                    ToolbarEditToggleStrategicRegions => canvas.set_strategic_region_edit_mode(
+                        !canvas.strategic_region_edit_mode(),
+                        &mut self.alerts,
+                    ),
+                    ToolbarEditStrategicRegionSelect => canvas
+                        .set_strategic_region_tool(StrategicRegionTool::Select, &mut self.alerts),
+                    ToolbarEditStrategicRegionBrush => canvas
+                        .set_strategic_region_tool(StrategicRegionTool::Brush, &mut self.alerts),
+                    ToolbarEditStrategicRegionFill => canvas
+                        .set_strategic_region_tool(StrategicRegionTool::Fill, &mut self.alerts),
+                    ToolbarEditStrategicRegionLasso => canvas
+                        .set_strategic_region_tool(StrategicRegionTool::Lasso, &mut self.alerts),
+                    _ => unreachable!(),
+                }
+            }
+            return;
+        }
         if id == ToolbarEditActivateStateLasso {
             if self.resolve_property_draft()
                 && let Some(canvas) = self.canvas.as_mut()
@@ -1496,6 +1535,14 @@ impl App {
             return;
         }
         match (&mut self.canvas, id) {
+            (
+                _,
+                ToolbarEditToggleStrategicRegions
+                | ToolbarEditStrategicRegionSelect
+                | ToolbarEditStrategicRegionBrush
+                | ToolbarEditStrategicRegionFill
+                | ToolbarEditStrategicRegionLasso,
+            ) => unreachable!(),
             (
                 _,
                 WorkspaceProvinces | WorkspaceStates | WorkspaceReviewChanges | WorkspaceApplyToMod,

@@ -1610,6 +1610,11 @@ pub enum ButtonId {
     ToolbarEditToggleLassoSnap,
     ToolbarEditNextMaskMode,
     ToolbarEditAdjacencies,
+    ToolbarEditToggleStrategicRegions,
+    ToolbarEditStrategicRegionSelect,
+    ToolbarEditStrategicRegionBrush,
+    ToolbarEditStrategicRegionFill,
+    ToolbarEditStrategicRegionLasso,
     ToolbarPatchGenerate,
     ToolbarPatchRegenerate,
     ToolbarPatchPreviousFile,
@@ -1829,6 +1834,16 @@ fn button_visible(id: ButtonId, ictx: InterfaceDrawContext) -> bool {
     }
     if matches!(
         id,
+        ToolbarEditToggleStrategicRegions
+            | ToolbarEditStrategicRegionSelect
+            | ToolbarEditStrategicRegionBrush
+            | ToolbarEditStrategicRegionFill
+            | ToolbarEditStrategicRegionLasso
+    ) {
+        return ictx.state_actions.strategic_region_view;
+    }
+    if matches!(
+        id,
         ToolbarViewStateMap
             | ToolbarViewPoliticalMap
             | ToolbarViewStateCategoryMap
@@ -1875,6 +1890,9 @@ pub struct StateActionAvailability {
     pub recovery_required: bool,
     pub has_save_report: bool,
     pub project_loaded: bool,
+    pub strategic_region_view: bool,
+    pub strategic_region_edit_mode: bool,
+    pub strategic_region_editable: bool,
 }
 
 impl StateActionAvailability {
@@ -1885,6 +1903,17 @@ impl StateActionAvailability {
             WorkspaceReviewChanges | WorkspaceApplyToMod => self.project_loaded,
             ToolbarEditUndo => self.can_undo,
             ToolbarEditRedo => self.can_redo,
+            ToolbarEditToggleStrategicRegions => self.strategic_region_view,
+            ToolbarEditStrategicRegionSelect => {
+                self.strategic_region_view && self.strategic_region_edit_mode
+            }
+            ToolbarEditStrategicRegionBrush
+            | ToolbarEditStrategicRegionFill
+            | ToolbarEditStrategicRegionLasso => {
+                self.strategic_region_view
+                    && self.strategic_region_edit_mode
+                    && self.strategic_region_editable
+            }
             ToolbarEditNewState => {
                 self.state_view && self.can_create_state && !self.property_editor_open
             }
@@ -2151,6 +2180,31 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 ButtonId::ToolbarEditProblems,
             ),
             ("Edit Adjacencies", "", ButtonId::ToolbarEditAdjacencies),
+            (
+                "Edit Strategic Regions",
+                "",
+                ButtonId::ToolbarEditToggleStrategicRegions,
+            ),
+            (
+                "Strategic Region Tool: Select",
+                "",
+                ButtonId::ToolbarEditStrategicRegionSelect,
+            ),
+            (
+                "Strategic Region Tool: Brush",
+                "B",
+                ButtonId::ToolbarEditStrategicRegionBrush,
+            ),
+            (
+                "Strategic Region Tool: Fill",
+                "",
+                ButtonId::ToolbarEditStrategicRegionFill,
+            ),
+            (
+                "Strategic Region Tool: Lasso",
+                "L",
+                ButtonId::ToolbarEditStrategicRegionLasso,
+            ),
         ],
     ),
     (
