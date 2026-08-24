@@ -53,6 +53,7 @@ pub(crate) struct ResourcesPresentationCache {
 /// scoped; and selection is intentionally independent from both.
 #[derive(Default)]
 pub(crate) struct StrategicRegionsPresentationCache {
+    pub(crate) revision: Option<u64>,
     pub(crate) model: Option<StrategicRegionsMapModel>,
     pub(crate) texture: Option<Texture>,
     pub(crate) boundaries: Vec<uord::UOrd2<vecmath::Vector2<u32>>>,
@@ -226,11 +227,22 @@ impl PresentationRuntime {
         generation: ProjectGeneration,
         map: &Map,
         loaded: &StrategicRegionLoadResult,
+        strategic_region_revision: u64,
         state_by_province: Option<&HashMap<u32, u32>>,
         state_revision: Option<u64>,
     ) {
         if self.generation != Some(generation) {
             self.on_project_replaced(generation);
+        }
+        if self.strategic_regions.revision != Some(strategic_region_revision) {
+            self.strategic_regions.model = None;
+            self.strategic_regions.texture = None;
+            self.strategic_regions.boundaries.clear();
+            self.strategic_regions.selection_texture = None;
+            self.strategic_regions.selected_id = None;
+            self.strategic_regions.split = None;
+            self.strategic_regions.split_texture = None;
+            self.strategic_regions.split_revision = None;
         }
         if self.strategic_regions.model.is_none() {
             let mut model = build_strategic_regions_map_model(loaded, map.province_ids());
@@ -242,6 +254,7 @@ impl PresentationRuntime {
             ));
             self.strategic_regions.boundaries = model.boundaries.clone();
             self.strategic_regions.model = Some(model);
+            self.strategic_regions.revision = Some(strategic_region_revision);
         }
         let Some(model) = self.strategic_regions.model.as_ref() else {
             return;

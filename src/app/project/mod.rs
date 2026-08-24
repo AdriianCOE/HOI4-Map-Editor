@@ -21,6 +21,7 @@ mod save_plan;
 mod sources;
 mod state_fill;
 mod strategic_regions;
+mod strategic_regions_edit;
 mod strategic_regions_presentation;
 mod validation;
 mod validation_core;
@@ -106,6 +107,11 @@ pub use strategic_regions::{
     StrategicRegionLoadIssue, StrategicRegionLoadIssueKind, StrategicRegionLoadResult,
     load_strategic_regions,
 };
+pub use strategic_regions_edit::{
+    StrategicRegionDocument, StrategicRegionEditError, StrategicRegionEditSession,
+    StrategicRegionRecordLocation, WorkingStrategicRegion, plan_strategic_region_patches,
+    working_load_result,
+};
 pub use strategic_regions_presentation::{
     STRATEGIC_REGION_AMBIGUOUS_COLOR, STRATEGIC_REGION_UNASSIGNED_COLOR,
     STRATEGIC_REGION_UNKNOWN_COLOR, StrategicRegionMembership, StrategicRegionStateSplitModel,
@@ -126,7 +132,7 @@ pub use validation_core::{
     ProjectValidationDomain, ProjectValidationReport, ProjectValidationSummary,
     ProjectValidationTarget, validate_project, validate_project_against_baseline,
     validate_project_against_baseline_with_strategic_region_context,
-    validate_project_with_strategic_region_context,
+    validate_project_with_strategic_region_context, validate_project_with_working_context,
 };
 pub use view::{
     AMBIGUOUS_PROVINCE_COLOR, MapViewMode, SELECTED_STATE_COLOR, STATE_BOUNDARY_COLOR,

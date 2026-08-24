@@ -49,13 +49,14 @@ use super::project::{
     SourceGeneration, StateBrushMode, StateEditSession, StateFillMode, StateFillPreview,
     StateFillProvince, StateFillProvinceKind, StateLassoPhase, StatePropertyDraft,
     StateRemovalPolicy, StateSaveCancellation, StateSaveConditions, StateSaveFault,
-    StateSaveOutcome, StateSaveReport, StateSelection, WorkingStateOrigin, boundaries_for_state,
-    classify_state_lasso, detect_state_save_recovery, execute_project_save, execute_state_save,
-    format_integer_pt_br, generate_state_view, generate_state_view_for,
-    generate_state_view_region_for, parse_grouped_nonnegative_integer, plan_state_fill,
-    plan_state_patches, recover_interrupted_state_save, sample_segment, save_confirmation_text,
+    StateSaveOutcome, StateSaveReport, StateSelection, StrategicRegionEditSession,
+    WorkingStateOrigin, boundaries_for_state, classify_state_lasso, detect_state_save_recovery,
+    execute_project_save, execute_state_save, format_integer_pt_br, generate_state_view,
+    generate_state_view_for, generate_state_view_region_for, parse_grouped_nonnegative_integer,
+    plan_state_fill, plan_state_patches, plan_strategic_region_patches,
+    recover_interrupted_state_save, sample_segment, save_confirmation_text,
     select_state_at_for as resolve_state_at_for, selection_overlay_for, state_save_eligibility,
-    validate_project,
+    validate_project_with_working_context, working_load_result,
 };
 use super::resources::{
     ResourceIconResolver, ResourceMapState, prepare_resource_labels_with_index,
@@ -166,6 +167,7 @@ pub struct Canvas {
     definition_catalog: Option<GameDefinitionCatalog>,
     definition_base_game_root: Option<PathBuf>,
     state_edit_session: Option<StateEditSession>,
+    strategic_region_edit_session: Option<StrategicRegionEditSession>,
     patch_preview: Option<ProjectPatchPlan>,
     patch_preview_file: usize,
     round_trip_report: Option<RoundTripValidationReport>,
@@ -502,6 +504,10 @@ impl Canvas {
         if let Some(project) = self.project.as_mut() {
             project.bind_project_generation(generation.0);
         }
+        self.strategic_region_edit_session = self
+            .project
+            .as_ref()
+            .and_then(|project| StrategicRegionEditSession::new(project).ok());
         self.round_trip_failure_snapshot = None;
         self.presentation.on_project_replaced(generation);
         self.diagnostic_navigation_marker = None;
@@ -665,6 +671,9 @@ impl Canvas {
         let state_edit_session = project
             .as_ref()
             .map(|project| StateEditSession::new(project, &bundle.map));
+        let strategic_region_edit_session = project
+            .as_ref()
+            .and_then(|project| StrategicRegionEditSession::new(project).ok());
         let workspace_mode = if state_edit_session.is_some() {
             WorkspaceMode::States
         } else {
@@ -746,6 +755,7 @@ impl Canvas {
             definition_catalog,
             definition_base_game_root: base_game_root,
             state_edit_session,
+            strategic_region_edit_session,
             patch_preview: None,
             patch_preview_file: 0,
             round_trip_report: None,
@@ -914,6 +924,10 @@ impl Canvas {
         self.state_edit_session
             .as_ref()
             .is_some_and(StateEditSession::is_dirty)
+            || self
+                .strategic_region_edit_session
+                .as_ref()
+                .is_some_and(StrategicRegionEditSession::is_dirty)
     }
 
     pub fn has_unsaved_province_edits(&self) -> bool {
@@ -970,13 +984,25 @@ impl Canvas {
         self.strategic_regions_search_focused = false;
     }
 
+    /// The loaded result remains immutable; consumers receive an inexpensive
+    /// derived snapshot when the edit session has unsaved changes.
+    fn strategic_regions_for_view(&self) -> Option<super::project::StrategicRegionLoadResult> {
+        let project = self.project.as_ref()?;
+        Some(self.strategic_region_edit_session.as_ref().map_or_else(
+            || project.strategic_regions.clone(),
+            |session| working_load_result(session, &project.strategic_regions),
+        ))
+    }
+
     pub fn focus_strategic_region(&mut self, id: u32, alerts: &mut Alerts) {
         let Some(project) = self.project.as_ref() else {
             alerts.push(Err("Strategic Regions are unavailable without a project"));
             return;
         };
-        if !project
-            .strategic_regions
+        if !self
+            .strategic_regions_for_view()
+            .as_ref()
+            .unwrap_or(&project.strategic_regions)
             .regions
             .iter()
             .any(|region| region.id == id)
@@ -1004,12 +1030,12 @@ impl Canvas {
 
     pub fn inspector_search_move(&mut self, next: bool) {
         if self.strategic_regions_search_focused {
-            let Some(project) = self.project.as_ref() else {
+            let Some(strategic_regions) = self.strategic_regions_for_view() else {
                 return;
             };
             let presentation = self.strategic_regions_ui.presentation(
                 SourceGeneration::new(self.project_generation.0),
-                &project.strategic_regions,
+                &strategic_regions,
                 self.selected_strategic_region_id,
                 |id| self.bundle.map.contains_province_id(id),
             );
@@ -4780,9 +4806,12 @@ impl Canvas {
         let Some(project) = self.project.as_ref() else {
             return;
         };
+        let strategic_regions = self
+            .strategic_regions_for_view()
+            .expect("project has SR view");
         let presentation = self.strategic_regions_ui.presentation(
             SourceGeneration::new(self.project_generation.0),
-            &project.strategic_regions,
+            &strategic_regions,
             self.selected_strategic_region_id,
             |id| self.bundle.map.contains_province_id(id),
         );
@@ -5033,9 +5062,12 @@ impl Canvas {
         let Some(project) = self.project.as_ref() else {
             return (true, None);
         };
+        let strategic_regions = self
+            .strategic_regions_for_view()
+            .expect("project has SR view");
         let presentation = self.strategic_regions_ui.presentation(
             SourceGeneration::new(self.project_generation.0),
-            &project.strategic_regions,
+            &strategic_regions,
             self.selected_strategic_region_id,
             |id| self.bundle.map.contains_province_id(id),
         );
@@ -5103,14 +5135,17 @@ impl Canvas {
         if !point_in_rect(pos, layout.list()) {
             return point_in_rect(pos, layout.panel);
         }
-        let Some(project) = self.project.as_ref() else {
+        let Some(_project) = self.project.as_ref() else {
             return true;
         };
+        let strategic_regions = self
+            .strategic_regions_for_view()
+            .expect("project has SR view");
         let row_count = self
             .strategic_regions_ui
             .presentation(
                 SourceGeneration::new(self.project_generation.0),
-                &project.strategic_regions,
+                &strategic_regions,
                 self.selected_strategic_region_id,
                 |id| self.bundle.map.contains_province_id(id),
             )
@@ -6406,7 +6441,7 @@ impl Canvas {
     }
 
     fn ensure_strategic_regions_presentation(&mut self) {
-        let Some(project) = self.project.as_ref() else {
+        let Some(strategic_regions) = self.strategic_regions_for_view() else {
             return;
         };
         let (state_by_province, revision) = self
@@ -6414,10 +6449,15 @@ impl Canvas {
             .as_ref()
             .map(|edit| (Some(edit.state_by_province()), Some(edit.revision())))
             .unwrap_or((None, None));
+        let strategic_region_revision = self
+            .strategic_region_edit_session
+            .as_ref()
+            .map_or(0, StrategicRegionEditSession::revision);
         self.presentation.ensure_strategic_regions_presentation(
             self.project_generation,
             &self.bundle.map,
-            &project.strategic_regions,
+            &strategic_regions,
+            strategic_region_revision,
             state_by_province,
             revision,
         );
@@ -8323,6 +8363,26 @@ impl Canvas {
             .as_ref()
             .ok_or_else(|| "The project state edit session is unavailable.".to_owned())?;
         let state_plan = plan_state_patches(project, edit);
+        let strategic_region_plan = self
+            .strategic_region_edit_session
+            .as_ref()
+            .filter(|session| session.is_dirty())
+            .map(|session| plan_strategic_region_patches(project, session))
+            .transpose()
+            .map_err(|error| format!("Strategic Region save blocked: {error}"))?;
+        let strategic_region_revision = self
+            .strategic_region_edit_session
+            .as_ref()
+            .map_or(0, StrategicRegionEditSession::revision);
+        let candidate_patch_plan = ProjectSavePlan::new_with_strategic_regions(
+            project,
+            edit.revision(),
+            None,
+            Some(&state_plan),
+            strategic_region_plan.as_ref(),
+            strategic_region_revision,
+        )?
+        .into_patch_plan();
         if state_plan.files_len() != 0 && !project.state_load_is_complete() {
             return Err(format!(
                 "Save Project blocked: {}",
@@ -8341,7 +8401,7 @@ impl Canvas {
             .has_unsaved_province_edits()
             .then(|| build_province_map_candidate(&candidate_bundle))
             .transpose()?;
-        if state_plan.files_len() == 0 && province_candidate.is_none() {
+        if candidate_patch_plan.files_len() == 0 && province_candidate.is_none() {
             self.project_save_plan = None;
             self.project_save_validation = None;
             return Err("No changes to save.".to_owned());
@@ -8368,7 +8428,7 @@ impl Canvas {
         let combined = validator.validate_combined(
             project,
             edit,
-            &state_plan,
+            &candidate_patch_plan,
             map_files,
             |map_directory| {
                 let Some(candidate) = province_candidate.as_ref() else {
@@ -8393,11 +8453,13 @@ impl Canvas {
             self.remember_combined_validation(&combined, StateApplyDialog::ProjectSaveReview);
             return Err(combined.round_trip.summary_text());
         }
-        let mut plan = ProjectSavePlan::new(
+        let mut plan = ProjectSavePlan::new_with_strategic_regions(
             project,
             edit.revision(),
             province_candidate.as_ref(),
             Some(&state_plan),
+            strategic_region_plan.as_ref(),
+            strategic_region_revision,
         )?;
         plan.set_coastal_flags_recalculated(coastal_flags_recalculated);
         if combined.candidate_digest != *plan.candidate_digest() {
@@ -8407,9 +8469,10 @@ impl Canvas {
         }
         let validation = combined.project_validation.as_ref();
         let text = format!(
-            "SAVE PROJECT\n\nProvince Map: {} file(s)\nStates: {} file(s)\nCoastal flags recalculated: {}\n\nValidation: {} error(s), {} warning(s), {} information message(s)\nFiles affected: {}\n\nA combined verified backup and journal will be created. Each file replacement is atomic; the coordinated project save is rollback-capable.",
+            "SAVE PROJECT\n\nProvince Map: {} file(s)\nStates: {} file(s)\nStrategic Regions: {} file(s)\nCoastal flags recalculated: {}\n\nValidation: {} error(s), {} warning(s), {} information message(s)\nFiles affected: {}\n\nA combined verified backup and journal will be created. Each file replacement is atomic; the coordinated project save is rollback-capable.",
             plan.dirty().province_files,
             plan.dirty().state_files,
+            plan.dirty().strategic_region_files,
             plan.coastal_flags_recalculated(),
             validation.map_or(0, |report| report.errors),
             validation.map_or(0, |report| report.warnings),
@@ -8497,10 +8560,19 @@ impl Canvas {
             return;
         };
         let started = Instant::now();
-        let report = validate_project(
+        let strategic_regions = self
+            .strategic_regions_for_view()
+            .unwrap_or_else(|| project.strategic_regions.clone());
+        let state_by_province = self
+            .state_edit_session
+            .as_ref()
+            .map(StateEditSession::state_by_province);
+        let report = validate_project_with_working_context(
             &self.bundle,
             project,
             ProjectValidationTarget::CurrentProject,
+            &strategic_regions,
+            state_by_province,
         );
         let summary = format!(
             "Validation Results: {} error(s), {} warning(s), {} information message(s)",
@@ -8553,7 +8625,13 @@ impl Canvas {
             alerts.push(Err("Validate Project before saving."));
             return;
         };
-        if edit.revision() != plan.patch_plan().generation {
+        if edit.revision() != plan.patch_plan().generation
+            || self
+                .strategic_region_edit_session
+                .as_ref()
+                .map_or(0, StrategicRegionEditSession::revision)
+                != plan.strategic_region_revision()
+        {
             self.save_ui.reset_commit_request();
             alerts.push(Err(
                 "The project changed in memory after validation. Validate again.",
@@ -9114,6 +9192,10 @@ impl Canvas {
             .filter(|province_id| edit.editable_province_state(*province_id).is_ok());
         self.project = Some(reloaded);
         self.state_edit_session = Some(edit);
+        self.strategic_region_edit_session = self
+            .project
+            .as_ref()
+            .and_then(|project| StrategicRegionEditSession::new(project).ok());
         self.patch_preview = None;
         self.patch_preview_file = 0;
         self.round_trip_report = None;

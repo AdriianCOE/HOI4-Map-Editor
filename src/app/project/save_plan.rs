@@ -14,17 +14,19 @@ use crate::app::project::validation::combined_candidate_digest;
 pub enum SaveDomain {
     ProvinceMap,
     States,
+    StrategicRegions,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProjectDirtyState {
     pub province_files: usize,
     pub state_files: usize,
+    pub strategic_region_files: usize,
 }
 
 impl ProjectDirtyState {
     pub fn has_changes(self) -> bool {
-        self.province_files != 0 || self.state_files != 0
+        self.province_files != 0 || self.state_files != 0 || self.strategic_region_files != 0
     }
 }
 
@@ -35,14 +37,27 @@ pub struct ProjectSavePlan {
     dirty: ProjectDirtyState,
     candidate_digest: SourceFingerprint,
     coastal_flags_recalculated: usize,
+    strategic_region_revision: u64,
 }
 
 impl ProjectSavePlan {
+    #[allow(dead_code)]
     pub(crate) fn new(
         project: &Hoi4Project,
         generation: u64,
         province: Option<&ProvinceMapCandidate>,
         states: Option<&ProjectPatchPlan>,
+    ) -> Result<Self, String> {
+        Self::new_with_strategic_regions(project, generation, province, states, None, 0)
+    }
+
+    pub(crate) fn new_with_strategic_regions(
+        project: &Hoi4Project,
+        generation: u64,
+        province: Option<&ProvinceMapCandidate>,
+        states: Option<&ProjectPatchPlan>,
+        strategic_regions: Option<&ProjectPatchPlan>,
+        strategic_region_revision: u64,
     ) -> Result<Self, String> {
         let empty_state_plan = ProjectPatchPlan {
             generation,
@@ -55,11 +70,18 @@ impl ProjectSavePlan {
             timings: PatchPlanTimings::default(),
         };
         let state_plan = states.unwrap_or(&empty_state_plan);
+        let state_files = state_plan.files_len();
         let mut patch_plan = state_plan.clone();
+        let strategic_region_files = strategic_regions.map_or(0, ProjectPatchPlan::files_len);
+        if let Some(strategic_regions) = strategic_regions {
+            if strategic_regions.generation != strategic_region_revision {
+                return Err("Strategic Region patch plan is stale.".to_owned());
+            }
+            merge_patch_plan(&mut patch_plan, strategic_regions)?;
+        }
         patch_plan.generation = generation;
         let candidate_digest =
             combined_candidate_digest(&patch_plan, province.map(|candidate| &candidate.files));
-        let state_files = patch_plan.files_len();
         let province_files = if let Some(candidate) = province {
             append_province_candidate(project, candidate, &mut patch_plan)?
         } else {
@@ -79,15 +101,20 @@ impl ProjectSavePlan {
         if state_files != 0 {
             domains.insert(SaveDomain::States);
         }
+        if strategic_region_files != 0 {
+            domains.insert(SaveDomain::StrategicRegions);
+        }
         Ok(Self {
             patch_plan,
             domains,
             dirty: ProjectDirtyState {
                 province_files,
                 state_files,
+                strategic_region_files,
             },
             candidate_digest,
             coastal_flags_recalculated: 0,
+            strategic_region_revision,
         })
     }
 
@@ -111,6 +138,10 @@ impl ProjectSavePlan {
         self.coastal_flags_recalculated
     }
 
+    pub fn strategic_region_revision(&self) -> u64 {
+        self.strategic_region_revision
+    }
+
     pub(crate) fn set_coastal_flags_recalculated(&mut self, count: usize) {
         self.coastal_flags_recalculated = count;
     }
@@ -118,6 +149,53 @@ impl ProjectSavePlan {
     pub fn into_patch_plan(self) -> ProjectPatchPlan {
         self.patch_plan
     }
+}
+
+fn merge_patch_plan(
+    target: &mut ProjectPatchPlan,
+    additional: &ProjectPatchPlan,
+) -> Result<(), String> {
+    let mut paths = target
+        .modified_files
+        .iter()
+        .map(|file| file.path.clone())
+        .chain(target.created_files.iter().map(|file| file.path.clone()))
+        .chain(target.removed_files.iter().map(|file| file.path.clone()))
+        .collect::<BTreeSet<_>>();
+    for path in additional
+        .modified_files
+        .iter()
+        .map(|file| &file.path)
+        .chain(additional.created_files.iter().map(|file| &file.path))
+        .chain(additional.removed_files.iter().map(|file| &file.path))
+    {
+        if !paths.insert(path.clone()) {
+            return Err(format!("Save Project path collision: {}", path.display()));
+        }
+    }
+    for (path, fingerprint) in &additional.source_fingerprints {
+        if let Some(existing) = target
+            .source_fingerprints
+            .insert(path.clone(), fingerprint.clone())
+            && existing != *fingerprint
+        {
+            return Err(format!(
+                "Save Project source fingerprint collision: {}",
+                path.display()
+            ));
+        }
+    }
+    target
+        .modified_files
+        .extend(additional.modified_files.clone());
+    target
+        .created_files
+        .extend(additional.created_files.clone());
+    target
+        .removed_files
+        .extend(additional.removed_files.clone());
+    target.diagnostics.extend(additional.diagnostics.clone());
+    Ok(())
 }
 
 fn append_province_candidate(

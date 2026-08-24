@@ -88,6 +88,24 @@ pub fn validate_project(
     validate_project_with_strategic_region_context(bundle, project, target, project)
 }
 
+/// Validates explicit working-domain views without mutating the loaded project.
+/// This is used by edit sessions so cross-domain rules observe both unsaved
+/// State assignments and unsaved Strategic Region membership.
+pub fn validate_project_with_working_context(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+    target: ProjectValidationTarget,
+    strategic_regions: &super::StrategicRegionLoadResult,
+    state_by_province: Option<&std::collections::HashMap<u32, u32>>,
+) -> ProjectValidationReport {
+    let mut working = project.clone();
+    working.strategic_regions = strategic_regions.clone();
+    if let Some(state_by_province) = state_by_province {
+        working.state_by_province = state_by_province.clone();
+    }
+    validate_project_with_strategic_region_context(bundle, &working, target, &working)
+}
+
 /// Validates a reloaded editable candidate while retaining the active
 /// project-owned Strategic Region source context. Strategic Regions are
 /// read-only and intentionally absent from Save candidate writes; State and

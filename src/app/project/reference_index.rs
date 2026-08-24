@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 use crate::app::map::Map;
 use crate::app::state::StateData;
 
-use super::{Hoi4Project, ResolvedSource, SourceGeneration, StateEditSession, WorkingStateOrigin};
+use super::{
+    Hoi4Project, ResolvedSource, SourceGeneration, StateEditSession, StrategicRegionEditSession,
+    WorkingStateOrigin,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProvinceReferenceDomain {
@@ -79,6 +82,10 @@ pub enum ProvinceReferenceSource {
     StateSession {
         state_id: u32,
         document_path: Option<PathBuf>,
+        generation: SourceGeneration,
+    },
+    StrategicRegionSession {
+        region_id: u32,
         generation: SourceGeneration,
     },
     Resolved(ResolvedSource),
@@ -224,6 +231,15 @@ pub fn build_province_reference_index(
     map: &Map,
     state_edit_session: Option<&StateEditSession>,
 ) -> ProvinceReferenceIndexBuild {
+    build_province_reference_index_with_strategic_session(project, map, state_edit_session, None)
+}
+
+pub fn build_province_reference_index_with_strategic_session(
+    project: &Hoi4Project,
+    map: &Map,
+    state_edit_session: Option<&StateEditSession>,
+    strategic_region_edit_session: Option<&StrategicRegionEditSession>,
+) -> ProvinceReferenceIndexBuild {
     let started = Instant::now();
     let generation = project.paths.sources.manifest().project_generation;
     let mut references_by_province = BTreeMap::<u32, Vec<ProvinceReference>>::new();
@@ -234,12 +250,41 @@ pub fn build_province_reference_index(
         ReferenceDomain::StrategicRegions,
         strategic_region_coverage(project),
     );
-    for region in &project.strategic_regions.regions {
-        let source = Arc::new(ProvinceReferenceSource::Resolved((*region.source).clone()));
-        for &province_id in &region.provinces {
+    let strategic_regions = strategic_region_edit_session
+        .map(|session| {
+            session
+                .regions()
+                .map(|region| {
+                    (
+                        region.id,
+                        &region.provinces,
+                        Arc::new(ProvinceReferenceSource::StrategicRegionSession {
+                            region_id: region.id,
+                            generation,
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            project
+                .strategic_regions
+                .regions
+                .iter()
+                .map(|region| {
+                    (
+                        region.id,
+                        &region.provinces,
+                        Arc::new(ProvinceReferenceSource::Resolved((*region.source).clone())),
+                    )
+                })
+                .collect()
+        });
+    for (region_id, provinces, source) in strategic_regions {
+        for &province_id in provinces {
             references_by_province.entry(province_id).or_default().push(
                 ProvinceReference::StrategicRegion {
-                    region_id: region.id,
+                    region_id,
                     source: source.clone(),
                 },
             );
@@ -778,6 +823,52 @@ mod tests {
             [ProvinceReference::StateMembership { state_id: 10, source }]
                 if matches!(source.as_ref(), ProvinceReferenceSource::StateSession { document_path: Some(_), .. })
         ));
+    }
+
+    #[test]
+    fn strategic_region_session_replaces_loaded_membership_without_reparse() {
+        let temp = TempProject::new();
+        fs::create_dir_all(temp.0.join("map/strategicregions")).unwrap();
+        fs::write(
+            temp.0.join("map/strategicregions/session.txt"),
+            "strategic_region = { id = 100 provinces = { 42 } } strategic_region = { id = 500 provinces = { 7 } }",
+        )
+        .unwrap();
+        let project = temp.project();
+        let map = sparse_map(Vec::new());
+        let mut session = StrategicRegionEditSession::new(&project).unwrap();
+        session.assign_province(42, 500).unwrap();
+        let built = build_province_reference_index_with_strategic_session(
+            &project,
+            &map,
+            None,
+            Some(&session),
+        );
+        let ids = built
+            .index
+            .references_by_domain(42, ProvinceReferenceDomain::StrategicRegion)
+            .filter_map(|reference| match reference {
+                ProvinceReference::StrategicRegion { region_id, .. } => Some(*region_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![500]);
+        assert!(session.undo());
+        let restored = build_province_reference_index_with_strategic_session(
+            &project,
+            &map,
+            None,
+            Some(&session),
+        );
+        assert!(
+            restored
+                .index
+                .references_by_domain(42, ProvinceReferenceDomain::StrategicRegion)
+                .any(|reference| matches!(
+                    reference,
+                    ProvinceReference::StrategicRegion { region_id: 100, .. }
+                ))
+        );
     }
 
     #[test]

@@ -1339,7 +1339,7 @@ fn validate_plan(
                 .map(|file| ("removed", &file.path, file.safety)),
         )
     {
-        validate_state_relative_path(path)?;
+        validate_candidate_relative_path(path)?;
         has_blocked |= safety == PatchSafety::Blocked;
         has_review_required |= safety == PatchSafety::ReviewRequired;
         let key = path_key(path);
@@ -1411,7 +1411,10 @@ fn validate_plan(
     })
 }
 
-fn validate_state_relative_path(path: &Path) -> Result<(), Failure> {
+/// Candidate writes are deliberately limited to State history and Strategic
+/// Region script files. This is the shared boundary for preview workspaces;
+/// the real save transaction independently enforces the same policy.
+fn validate_candidate_relative_path(path: &Path) -> Result<(), Failure> {
     if path.is_absolute() {
         return Err(unsafe_path(path, "absolute paths are not allowed"));
     }
@@ -1435,19 +1438,26 @@ fn validate_state_relative_path(path: &Path) -> Result<(), Failure> {
             _ => None,
         })
         .collect::<Vec<_>>();
-    if normal.len() != 3
-        || !normal[0].eq_ignore_ascii_case("history")
-        || !normal[1].eq_ignore_ascii_case("states")
-        || Path::new(normal[2])
+    let state_file = normal.len() == 3
+        && normal[0].eq_ignore_ascii_case("history")
+        && normal[1].eq_ignore_ascii_case("states")
+        && Path::new(normal[2])
             .extension()
-            .is_none_or(|ext| !ext.eq_ignore_ascii_case("txt"))
-    {
-        return Err(unsafe_path(
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"));
+    let strategic_region_file = normal.len() >= 3
+        && normal[0].eq_ignore_ascii_case("map")
+        && normal[1].eq_ignore_ascii_case("strategicregions")
+        && Path::new(normal.last().expect("non-empty components"))
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"));
+    if state_file || strategic_region_file {
+        Ok(())
+    } else {
+        Err(unsafe_path(
             path,
-            "candidate state paths must be direct .txt files under history/states",
-        ));
+            "candidate paths must be .txt files under history/states or map/strategicregions",
+        ))
     }
-    Ok(())
 }
 
 fn unsafe_path(path: &Path, reason: &str) -> Failure {
@@ -1464,7 +1474,8 @@ pub fn resolve_candidate_path(
     candidate_root: &Path,
     relative_path: &Path,
 ) -> Result<PathBuf, String> {
-    validate_state_relative_path(relative_path).map_err(|failure| failure.diagnostic.message)?;
+    validate_candidate_relative_path(relative_path)
+        .map_err(|failure| failure.diagnostic.message)?;
     let canonical_root = candidate_root
         .canonicalize()
         .map_err(|err| format!("failed to canonicalize candidate root: {err}"))?;
@@ -1539,6 +1550,19 @@ fn verify_source(
         };
         if SourceFingerprint::from_bytes(&bytes) != *expected {
             return Err(source_changed(&source));
+        }
+    }
+    // Fingerprints may also name a resolved lower-source input used to
+    // materialize a project override. They are not candidate destinations,
+    // but must be fresh before the temporary candidate is built.
+    for (source, expected) in &plan.source_fingerprints {
+        let bytes = read(
+            source,
+            RoundTripStage::SourceVerification,
+            "read planned source fingerprint",
+        )?;
+        if SourceFingerprint::from_bytes(&bytes) != *expected {
+            return Err(source_changed(source));
         }
     }
 
@@ -1903,6 +1927,62 @@ fn copy_source(
             ));
         }
     }
+    // Lower-priority Strategic Region files are not below the mod root. For
+    // an SR-writing candidate, materialize the complete effective directory
+    // only in the temporary workspace so reload uses the same source graph.
+    if plan_sets
+        .modified
+        .iter()
+        .chain(plan_sets.created.iter())
+        .any(|path| is_strategic_region_path(path))
+    {
+        let listing = project
+            .paths
+            .sources
+            .list_files(Path::new("map/strategicregions"))
+            .map_err(|error| {
+                Failure::new(
+                    RoundTripStage::Copying,
+                    None,
+                    None,
+                    format!("Cannot list Strategic Region sources for candidate: {error}"),
+                    "Reload the project and regenerate the Save Project review.",
+                )
+            })?;
+        for source in listing.files.into_iter().filter(|source| {
+            source
+                .logical_path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+        }) {
+            check_cancelled(cancellation, RoundTripStage::Copying)?;
+            let bytes = project
+                .paths
+                .sources
+                .read_resolved(&source)
+                .map_err(|error| {
+                    Failure::new(
+                        RoundTripStage::Copying,
+                        source.filesystem_path().map(Path::to_path_buf),
+                        None,
+                        format!(
+                            "Cannot read resolved Strategic Region source {}: {error}",
+                            source.logical_path.display()
+                        ),
+                        "Reload the project and regenerate the Save Project review.",
+                    )
+                })?;
+            let target = candidate_root.join(&source.logical_path);
+            if !target.exists() {
+                write_new(
+                    &target,
+                    &bytes,
+                    RoundTripStage::Copying,
+                    "copy effective Strategic Region source",
+                )?;
+            }
+        }
+    }
     Ok(TemporaryProjectManifest {
         source_root: project.paths.root.clone(),
         candidate_root: candidate_root.to_owned(),
@@ -1988,13 +2068,27 @@ fn apply_plan(
                 "Choose another state ID or filename.",
             ));
         }
-        write_new(
-            &target,
-            &file.content,
-            RoundTripStage::Applying,
-            "create candidate state",
-        )?;
-        application.created_files_applied += 1;
+        // A lower-source Strategic Region edit is a *project* creation, but
+        // the temporary workspace deliberately contains its lower effective
+        // baseline for semantic reload. Replace only that temporary baseline;
+        // the real transaction still creates the project override.
+        if is_strategic_region_path(&file.path) && target.exists() {
+            write_existing(
+                &target,
+                &file.content,
+                RoundTripStage::Applying,
+                "materialize candidate Strategic Region override",
+            )?;
+            application.modified_files_applied += 1;
+        } else {
+            write_new(
+                &target,
+                &file.content,
+                RoundTripStage::Applying,
+                "create candidate state",
+            )?;
+            application.created_files_applied += 1;
+        }
     }
     for file in &plan.removed_files {
         check_cancelled(cancellation, RoundTripStage::Applying)?;
@@ -2916,6 +3010,11 @@ fn is_state_path(path: &Path) -> bool {
     key.starts_with("history/states/") && key.ends_with(".txt")
 }
 
+fn is_strategic_region_path(path: &Path) -> bool {
+    let key = path_key(path);
+    key.starts_with("map/strategicregions/") && key.ends_with(".txt")
+}
+
 fn pass_fail(value: bool) -> &'static str {
     if value { "passed" } else { "failed" }
 }
@@ -2947,10 +3046,18 @@ mod tests {
         let root = std::env::temp_dir().join(format!("phase4b-path-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("history/states")).unwrap();
+        fs::create_dir_all(root.join("map/strategicregions")).unwrap();
         assert!(resolve_candidate_path(&root, Path::new("../outside.txt")).is_err());
         assert!(resolve_candidate_path(&root, Path::new(r"C:\outside.txt")).is_err());
         assert!(resolve_candidate_path(&root, Path::new("history/states/1-Test.bin")).is_err());
         assert!(resolve_candidate_path(&root, Path::new("history/states/1-Test.txt")).is_ok());
+        assert!(
+            resolve_candidate_path(&root, Path::new("map/strategicregions/1-Test.txt")).is_ok()
+        );
+        assert!(
+            resolve_candidate_path(&root, Path::new("map/strategicregions/../outside.txt"))
+                .is_err()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

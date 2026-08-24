@@ -1218,6 +1218,15 @@ fn validate_plan_path(path: &Path) -> Result<(), String> {
         return Ok(());
     }
     let components = path.components().collect::<Vec<_>>();
+    if is_strategic_region_path(path) {
+        if components
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            return Err(format!("Unsafe Strategic Region path: {}", path.display()));
+        }
+        return Ok(());
+    }
     if components.len() != 3
         || !matches!(components[0], Component::Normal(value) if eq_ascii(value, "history"))
         || !matches!(components[1], Component::Normal(value) if eq_ascii(value, "states"))
@@ -1287,6 +1296,16 @@ fn is_province_map_path(path: &Path) -> bool {
         )
 }
 
+fn is_strategic_region_path(path: &Path) -> bool {
+    let components = path.components().collect::<Vec<_>>();
+    components.len() >= 3
+        && matches!(components[0], Component::Normal(value) if eq_ascii(value, "map"))
+        && matches!(components[1], Component::Normal(value) if eq_ascii(value, "strategicregions"))
+        && path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+}
+
 fn eq_ascii(value: &std::ffi::OsStr, expected: &str) -> bool {
     value.to_string_lossy().eq_ignore_ascii_case(expected)
 }
@@ -1302,6 +1321,31 @@ fn resolve_final_path(root: &Path, relative: &Path) -> Result<PathBuf, String> {
         if parent != canonical_map.as_path() {
             return Err(format!(
                 "Map path escaped map directory: {}",
+                relative.display()
+            ));
+        }
+        return Ok(final_path);
+    }
+    if is_strategic_region_path(relative) {
+        let directory = root.join("map").join("strategicregions");
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("Cannot create {}: {error}", directory.display()))?;
+        let canonical_directory = dunce::canonicalize(&directory)
+            .map_err(|error| format!("Cannot canonicalize {}: {error}", directory.display()))?;
+        let final_path = root.join(relative);
+        let parent = final_path.parent().ok_or_else(|| {
+            format!(
+                "Strategic Region path has no parent: {}",
+                relative.display()
+            )
+        })?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
+        let canonical_parent = dunce::canonicalize(parent)
+            .map_err(|error| format!("Cannot canonicalize {}: {error}", parent.display()))?;
+        if canonical_parent.strip_prefix(&canonical_directory).is_err() {
+            return Err(format!(
+                "Strategic Region path escaped map/strategicregions: {}",
                 relative.display()
             ));
         }
@@ -1454,16 +1498,23 @@ fn verify_source(project: &Hoi4Project, plan: &ProjectPatchPlan) -> Result<(), S
     for (source, fingerprint) in &plan.source_fingerprints {
         let canonical_source = dunce::canonicalize(source)
             .map_err(|error| format!("Cannot canonicalize {}: {error}", source.display()))?;
-        let relative = canonical_source.strip_prefix(&root).map_err(|_| {
-            format!(
-                "Planned source is outside project root: {}",
-                source.display()
-            )
-        })?;
-        validate_plan_path(relative)?;
-        if !planned_paths.contains(&normalized_path(relative).to_ascii_lowercase()) {
+        if let Ok(relative) = canonical_source.strip_prefix(&root) {
+            validate_plan_path(relative)?;
+            if !planned_paths.contains(&normalized_path(relative).to_ascii_lowercase()) {
+                return Err(format!(
+                    "Planned source is outside save plan: {}",
+                    source.display()
+                ));
+            }
+        } else if !project.strategic_regions.regions.iter().any(|region| {
+            region
+                .source
+                .filesystem_path()
+                .and_then(|path| dunce::canonicalize(path).ok())
+                .is_some_and(|path| path == canonical_source)
+        }) {
             return Err(format!(
-                "Planned source is outside save plan: {}",
+                "External source is not a resolved Strategic Region input: {}",
                 source.display()
             ));
         }
