@@ -98,6 +98,7 @@ pub(crate) enum ValidationDomainFilter {
     Definition,
     States,
     CrossDomain,
+    StrategicRegions,
 }
 
 impl ValidationDomainFilter {
@@ -107,7 +108,8 @@ impl ValidationDomainFilter {
             Self::ProvinceMap => Self::Definition,
             Self::Definition => Self::States,
             Self::States => Self::CrossDomain,
-            Self::CrossDomain => Self::All,
+            Self::CrossDomain => Self::StrategicRegions,
+            Self::StrategicRegions => Self::All,
         }
     }
 
@@ -124,6 +126,7 @@ impl ValidationDomainFilter {
                     | ProjectValidationDomain::Building
             ),
             Self::CrossDomain => domain == ProjectValidationDomain::CrossDomain,
+            Self::StrategicRegions => domain == ProjectValidationDomain::StrategicRegion,
         }
     }
 
@@ -134,6 +137,7 @@ impl ValidationDomainFilter {
             Self::Definition => "Definition",
             Self::States => "States",
             Self::CrossDomain => "Cross Domain",
+            Self::StrategicRegions => tr("strategic_regions.title"),
         }
     }
 }
@@ -160,6 +164,7 @@ pub(crate) struct ProjectProblemsController {
 pub(crate) enum ProblemsRequest {
     SelectProvince(u32),
     SelectState(u32),
+    GoToStrategicRegion(u32),
     FocusLocation([u32; 2]),
     OpenSource(PathBuf),
     RevealSource(PathBuf),
@@ -171,6 +176,7 @@ impl From<DiagnosticAction> for ProblemsRequest {
         match action {
             DiagnosticAction::GoToProvince(id) => Self::SelectProvince(id),
             DiagnosticAction::GoToState(id) => Self::SelectState(id),
+            DiagnosticAction::GoToStrategicRegion(id) => Self::GoToStrategicRegion(id),
             DiagnosticAction::GoToLocation(location) => Self::FocusLocation(location),
             DiagnosticAction::OpenSource(path) => Self::OpenSource(path),
             DiagnosticAction::RevealSource(path) => Self::RevealSource(path),
@@ -304,7 +310,7 @@ pub(crate) fn validation_problem_details(
     diagnostic: &ProjectValidationDiagnostic,
 ) -> String {
     format!(
-        "Source: {}\nSeverity: {:?}\nBlocks Save: {}\nDomain: {:?}\nCode: {}\nMessage: {}\nPath: {}\nProvince: {}\nRelated Provinces: {}\nState: {}\nMap coordinate: {}\nResolved source: {}",
+        "Source: {}\nSeverity: {:?}\nBlocks Save: {}\nDomain: {:?}\nCode: {}\nMessage: {}\nPath: {}\nProvince: {}\nRelated Provinces: {}\nState: {}\nStrategic Regions: {}\nMap coordinate: {}\nResolved source: {}",
         source.label(),
         diagnostic.severity,
         if diagnostic.blocks_save { "Yes" } else { "No" },
@@ -331,6 +337,16 @@ pub(crate) fn validation_problem_details(
         diagnostic
             .state_id
             .map_or_else(|| "-".to_owned(), |id| id.to_string()),
+        if diagnostic.strategic_region_ids.is_empty() {
+            "-".to_owned()
+        } else {
+            diagnostic
+                .strategic_region_ids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
         diagnostic
             .map_location
             .map_or_else(|| "-".to_owned(), |[x, y]| format!("{x},{y}")),
@@ -350,6 +366,7 @@ pub(crate) fn problems_request_label(request: &ProblemsRequest) -> &'static str 
     match request {
         ProblemsRequest::SelectProvince(_) => tr("project_validation.go_to_province"),
         ProblemsRequest::SelectState(_) => tr("project_validation.go_to_state"),
+        ProblemsRequest::GoToStrategicRegion(_) => tr("strategic_regions.open_strategic_region"),
         ProblemsRequest::FocusLocation(_) => tr("project_validation.go_to_location"),
         ProblemsRequest::OpenSource(_) => tr("project_validation.open_source_file"),
         ProblemsRequest::RevealSource(_) => tr("project_validation.reveal_source"),
@@ -486,6 +503,10 @@ mod tests {
         assert_eq!(
             ProblemsRequest::from(DiagnosticAction::GoToState(4)),
             ProblemsRequest::SelectState(4)
+        );
+        assert_eq!(
+            ProblemsRequest::from(DiagnosticAction::GoToStrategicRegion(7)),
+            ProblemsRequest::GoToStrategicRegion(7)
         );
         assert_eq!(
             ProblemsRequest::from(DiagnosticAction::GoToLocation([2, 3])),

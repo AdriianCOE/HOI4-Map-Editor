@@ -17,6 +17,7 @@ pub mod resources;
 pub(crate) mod save_ui;
 pub(crate) mod selection_navigation;
 pub mod state;
+pub(crate) mod strategic_regions_ui;
 
 use glutin::window::CursorIcon;
 use graphics::context::Context;
@@ -314,8 +315,9 @@ impl EventHandler for App {
         };
 
         let validation_results_scrolled = canvas.validation_results_scroll(y);
-        let inspector_scrolled =
-            !validation_results_scrolled && canvas.inspector_scroll(interface, cursor_pos, y);
+        let inspector_scrolled = !validation_results_scrolled
+            && (canvas.strategic_regions_scroll(interface, cursor_pos, y)
+                || canvas.inspector_scroll(interface, cursor_pos, y));
         let command = input::classify_wheel(
             RawWheelEvent {
                 delta_y: y,
@@ -1739,6 +1741,9 @@ impl App {
             (Some(canvas), ToolbarViewToggleStateInspector) => {
                 canvas.cycle_state_inspector_visibility(&mut self.alerts);
             }
+            (Some(canvas), ToolbarViewStrategicRegions) => {
+                canvas.open_strategic_regions(&mut self.alerts);
+            }
             (Some(canvas), ToolbarViewCycleProvinceLabels) => {
                 canvas.cycle_province_label_mode(&mut self.alerts);
             }
@@ -1850,8 +1855,11 @@ impl App {
                 open_source_with(&path, |path| open_file_default(path))
                     .map(|_| format!("Opened {}", path.display()))
             }
+            InspectorExternalRequest::RevealSource(path) => {
+                reveal_in_file_browser(&path).map(|_| format!("Revealed {}", path.display()))
+            }
             InspectorExternalRequest::CopyPath(path) => {
-                copy_text_to_clipboard(&path).map(|_| "Copied state source path".to_owned())
+                copy_text_to_clipboard(&path).map(|_| "Copied source path".to_owned())
             }
         };
         self.alerts

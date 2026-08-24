@@ -127,6 +127,25 @@ Diagnosticos de ausencia global so ocorrem com cobertura completa, enquanto
 contradicoes positivas (duplicidade, referencia inexistente, associacao
 multipla e State dividido) continuam reportaveis com cobertura parcial.
 
+### Strategic Regions inspector (Step 9B)
+
+`strategic_regions_ui::StrategicRegionsController` transforma somente o
+`StrategicRegionLoadResult` ja pertencente ao projeto em lista, filtro, detalhe
+e requests tipados. O fluxo e `StrategicRegionLoadResult →
+StrategicRegionsController → request → App/Canvas`; o controlador nao importa
+`Canvas` ou `App`, nao relê fontes e nao possui dados de dominio. O painel usa
+ordem crescente de ID, mostra chave de localizacao mesmo quando ha nome
+resolvido, preserva a ordem das Provincias e permite navegar somente membros
+existentes. Trocar a geracao limpa identidade, busca e selecao do projeto
+anterior.
+
+Maturidade atual: **DOMAIN: YES; VALIDATION: YES; REFERENCE INDEX: YES;
+INSPECTOR: YES; SOURCE NAVIGATION: YES; MAP PRESENTATION: NO; MAP SELECTION:
+NO; EDITING: NO; SAVE OWNERSHIP: NO.** O painel e Project Problems podem abrir
+fontes filesystem, revelar containers e copiar caminhos; entradas de archive
+nao recebem uma falsa acao de abrir. Nenhuma textura, overlay ou cache de
+`PresentationRuntime` e criado nesta etapa.
+
 `app::project` representa a raiz de um mod. `ProjectPaths::discover` valida
 `map/provinces.bmp`, `map/definition.csv` e `history/states/`; adjacencias e
 rios sao opcionais.

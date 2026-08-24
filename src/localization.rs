@@ -222,6 +222,7 @@ pub fn ui_literal(english: &'static str) -> &'static str {
         "Overlays: Opacity +10%" => "view.opacity_up",
         "Overlays: Clear Image" => "view.clear_image",
         "Panels: State Inspector" => "view.state_inspector",
+        "Panels: Strategic Regions" => "view.strategic_regions",
         "Panels: Developer Diagnostics" => "view.developer",
         "Base Game Data: Choose..." => "view.choose_definitions",
         "Base Game Data: Clear" => "view.clear_definitions",

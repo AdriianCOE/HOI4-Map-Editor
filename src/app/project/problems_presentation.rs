@@ -3,7 +3,7 @@
 //! Validators describe facts only. This module turns those facts into safe
 //! navigation/source actions and a compact spatial overlay model.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use super::{DiagnosticSeverity, ProjectValidationDiagnostic, ResolvedLocation, SourceGeneration};
@@ -12,6 +12,7 @@ use super::{DiagnosticSeverity, ProjectValidationDiagnostic, ResolvedLocation, S
 pub enum DiagnosticAction {
     GoToProvince(u32),
     GoToState(u32),
+    GoToStrategicRegion(u32),
     GoToLocation([u32; 2]),
     OpenSource(PathBuf),
     RevealSource(PathBuf),
@@ -44,6 +45,15 @@ pub fn diagnostic_actions(
             .map(DiagnosticAction::GoToProvince),
     );
     actions.extend(diagnostic.state_id.map(DiagnosticAction::GoToState));
+    actions.extend(
+        diagnostic
+            .strategic_region_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(DiagnosticAction::GoToStrategicRegion),
+    );
     actions.extend(diagnostic.map_location.map(DiagnosticAction::GoToLocation));
 
     if let Some(source) = &diagnostic.source {
@@ -189,6 +199,24 @@ mod tests {
                 DiagnosticAction::GoToState(10),
                 DiagnosticAction::GoToLocation([7, 3]),
             ]
+        );
+    }
+
+    #[test]
+    fn strategic_region_actions_are_sorted_and_preserve_state_navigation() {
+        let mut value = diagnostic();
+        value.strategic_region_ids = vec![500, 1, 42, 1];
+        let actions = diagnostic_actions(&value, SourceGeneration::new(1));
+        assert!(actions.contains(&DiagnosticAction::GoToState(10)));
+        assert_eq!(
+            actions
+                .into_iter()
+                .filter_map(|action| match action {
+                    DiagnosticAction::GoToStrategicRegion(id) => Some(id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [1, 42, 500]
         );
     }
 
