@@ -27,32 +27,8 @@ pub(crate) enum SelectionNavigationRequest {
     },
 }
 
-pub(crate) fn select_state_at(
-    screen_position: ScreenPosition,
-    toggle_province: bool,
-) -> SelectionNavigationRequest {
-    SelectionNavigationRequest::SelectStateAt {
-        screen_position,
-        toggle_province,
-    }
-}
-
 pub(crate) const fn clear_state_selection() -> SelectionNavigationRequest {
     SelectionNavigationRequest::ClearStateSelection
-}
-
-/// Maps the already-classified primary gesture only after the existing Canvas
-/// tool context has established that it is the State-selection path.
-pub(crate) fn request_from_state_selection_gesture(
-    command: PointerCommand,
-    toggle_province: bool,
-) -> Option<SelectionNavigationRequest> {
-    match command {
-        PointerCommand::BeginPrimaryGesture { position } => {
-            Some(select_state_at(position, toggle_province))
-        }
-        _ => None,
-    }
 }
 
 /// Maps already-classified navigation commands only. Primary clicks are mapped
@@ -136,7 +112,10 @@ mod tests {
     #[test]
     fn state_selection_keeps_screen_position_and_modifier_intent() {
         assert_eq!(
-            select_state_at([8.0, 9.0], true),
+            SelectionNavigationRequest::SelectStateAt {
+                screen_position: [8.0, 9.0],
+                toggle_province: true,
+            },
             SelectionNavigationRequest::SelectStateAt {
                 screen_position: [8.0, 9.0],
                 toggle_province: true,
@@ -149,26 +128,6 @@ mod tests {
         assert_eq!(
             clear_state_selection(),
             SelectionNavigationRequest::ClearStateSelection
-        );
-    }
-
-    #[test]
-    fn only_primary_selection_gestures_produce_selection_requests() {
-        assert_eq!(
-            request_from_state_selection_gesture(
-                PointerCommand::BeginPrimaryGesture {
-                    position: [8.0, 9.0],
-                },
-                true,
-            ),
-            Some(SelectionNavigationRequest::SelectStateAt {
-                screen_position: [8.0, 9.0],
-                toggle_province: true,
-            })
-        );
-        assert_eq!(
-            request_from_state_selection_gesture(PointerCommand::EndPrimaryGesture, false),
-            None
         );
     }
 }

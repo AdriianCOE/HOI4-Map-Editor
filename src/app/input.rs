@@ -418,8 +418,9 @@ pub(crate) fn classify_primary_click(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CursorContext {
     pub state_apply_dialog_open: bool,
-    pub state_brush_stroking: bool,
-    pub province_paint_drag_active: bool,
+    /// App-owned raw left-gesture state. Canvas remains responsible for
+    /// deciding whether a continued gesture has tool work to perform.
+    pub primary_gesture_active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -427,30 +428,17 @@ pub(crate) enum CursorCommand {
     CaptureByStateApplyDialog,
     UpdateInterface {
         position: ScreenPosition,
-        map_gesture: Option<MapGestureCommand>,
+        primary_gesture_active: bool,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum MapGestureCommand {
-    ContinueStateBrush { position: ScreenPosition },
-    ContinueProvincePaint { position: ScreenPosition },
 }
 
 pub(crate) fn classify_cursor(position: ScreenPosition, context: CursorContext) -> InputCommand {
     let command = if context.state_apply_dialog_open {
         CursorCommand::CaptureByStateApplyDialog
     } else {
-        let map_gesture = if context.state_brush_stroking {
-            Some(MapGestureCommand::ContinueStateBrush { position })
-        } else if context.province_paint_drag_active {
-            Some(MapGestureCommand::ContinueProvincePaint { position })
-        } else {
-            None
-        };
         CursorCommand::UpdateInterface {
             position,
-            map_gesture,
+            primary_gesture_active: context.primary_gesture_active,
         }
     };
     InputCommand::Cursor(command)
@@ -703,29 +691,27 @@ mod tests {
                 [3.0, 4.0],
                 CursorContext {
                     state_apply_dialog_open: false,
-                    state_brush_stroking: false,
-                    province_paint_drag_active: false,
+                    primary_gesture_active: false,
                 }
             ),
             InputCommand::Cursor(CursorCommand::UpdateInterface {
                 position: [3.0, 4.0],
-                map_gesture: None,
+                primary_gesture_active: false,
             })
         );
-        assert!(matches!(
+        assert_eq!(
             classify_cursor(
                 [3.0, 4.0],
                 CursorContext {
                     state_apply_dialog_open: false,
-                    state_brush_stroking: true,
-                    province_paint_drag_active: true,
+                    primary_gesture_active: true,
                 }
             ),
             InputCommand::Cursor(CursorCommand::UpdateInterface {
                 position: [3.0, 4.0],
-                map_gesture: Some(MapGestureCommand::ContinueStateBrush { .. })
+                primary_gesture_active: true,
             })
-        ));
+        );
     }
 
     #[test]
