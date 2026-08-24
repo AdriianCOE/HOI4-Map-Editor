@@ -468,6 +468,7 @@ mod tests {
             span: None,
             province_id: Some(501),
             state_id: Some(123),
+            strategic_region_ids: Vec::new(),
             map_location: Some([7, 3]),
             related_province_ids: vec![42],
             source: None,

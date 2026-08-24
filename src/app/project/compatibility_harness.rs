@@ -479,6 +479,23 @@ fn editor_rule(kind: ProjectDiagnosticKind) -> Option<&'static str> {
         ProjectDiagnosticKind::RailwayProvinceMissing => "railway.missing_province",
         ProjectDiagnosticKind::RailwaySegmentNotAdjacent => "railway.non_adjacent",
         ProjectDiagnosticKind::SupplyNodeProvinceMissing => "supply.missing_province",
+        ProjectDiagnosticKind::StrategicRegionDuplicateId => "strategic_region.duplicate_id",
+        ProjectDiagnosticKind::StrategicRegionProvinceMissing => {
+            "strategic_region.missing_province"
+        }
+        ProjectDiagnosticKind::StrategicRegionNoValidProvinces => {
+            "strategic_region.no_valid_provinces"
+        }
+        ProjectDiagnosticKind::StrategicRegionProvinceMultiple => {
+            "strategic_region.multiple_membership"
+        }
+        ProjectDiagnosticKind::StrategicRegionProvinceUnassigned => {
+            "strategic_region.unassigned_province"
+        }
+        ProjectDiagnosticKind::StateSplitAcrossStrategicRegions => "strategic_region.state_split",
+        ProjectDiagnosticKind::StrategicRegionNavalTerrainUndefined => {
+            "strategic_region.naval_terrain_undefined"
+        }
         _ => return None,
     })
 }
@@ -565,18 +582,15 @@ mod tests {
     }
 
     #[test]
-    fn strategic_regions_are_explicitly_unsupported_by_editor() {
+    fn strategic_regions_are_compared_when_the_editor_emits_a_supported_rule() {
         let comparison = compare_findings(
             "reference_domain",
             ["strategic_regions".to_owned()],
-            [],
+            [finding("strategic_region.missing_province")],
             [finding("strategic_region.missing_province")],
             [],
         );
-        assert_eq!(
-            comparison.differences[0].class,
-            ComparisonClass::UnsupportedByUs
-        );
+        assert_eq!(comparison.differences[0].class, ComparisonClass::Match);
     }
 
     #[test]
@@ -651,6 +665,7 @@ mod tests {
             span: None,
             province_id: Some(7),
             state_id: None,
+            strategic_region_ids: Vec::new(),
             map_location: Some([3, 2]),
             related_province_ids: vec![42, 1],
             source: None,

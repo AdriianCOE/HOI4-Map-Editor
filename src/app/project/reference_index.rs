@@ -22,6 +22,7 @@ pub enum ProvinceReferenceDomain {
     Adjacency,
     Railway,
     SupplyNode,
+    StrategicRegion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,6 +38,7 @@ pub enum ReferenceDomain {
     Adjacencies,
     Railways,
     SupplyNodes,
+    StrategicRegions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +115,10 @@ pub enum ProvinceReference {
         node_index: usize,
         source: Arc<ProvinceReferenceSource>,
     },
+    StrategicRegion {
+        region_id: u32,
+        source: Arc<ProvinceReferenceSource>,
+    },
 }
 
 impl ProvinceReference {
@@ -124,6 +130,7 @@ impl ProvinceReference {
             Self::Adjacency { .. } => ProvinceReferenceDomain::Adjacency,
             Self::Railway { .. } => ProvinceReferenceDomain::Railway,
             Self::SupplyNode { .. } => ProvinceReferenceDomain::SupplyNode,
+            Self::StrategicRegion { .. } => ProvinceReferenceDomain::StrategicRegion,
         }
     }
 }
@@ -136,6 +143,7 @@ pub struct ProvinceReferenceSummary {
     pub adjacencies: usize,
     pub railways: usize,
     pub supply_nodes: usize,
+    pub strategic_regions: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +204,7 @@ impl ProvinceReferenceIndex {
                     ProvinceReferenceDomain::Adjacency => summary.adjacencies += 1,
                     ProvinceReferenceDomain::Railway => summary.railways += 1,
                     ProvinceReferenceDomain::SupplyNode => summary.supply_nodes += 1,
+                    ProvinceReferenceDomain::StrategicRegion => summary.strategic_regions += 1,
                 }
                 summary
             },
@@ -221,6 +230,21 @@ pub fn build_province_reference_index(
     let mut statuses = BTreeMap::new();
 
     statuses.insert(ReferenceDomain::States, state_coverage(project));
+    statuses.insert(
+        ReferenceDomain::StrategicRegions,
+        strategic_region_coverage(project),
+    );
+    for region in &project.strategic_regions.regions {
+        let source = Arc::new(ProvinceReferenceSource::Resolved((*region.source).clone()));
+        for &province_id in &region.provinces {
+            references_by_province.entry(province_id).or_default().push(
+                ProvinceReference::StrategicRegion {
+                    region_id: region.id,
+                    source: source.clone(),
+                },
+            );
+        }
+    }
     if let Some(session) = state_edit_session {
         for &state_id in session.valid_state_ids() {
             let Some(data) = session.state_data(state_id) else {
@@ -374,6 +398,18 @@ fn state_coverage(project: &Hoi4Project) -> ReferenceCoverageStatus {
     }
 }
 
+fn strategic_region_coverage(project: &Hoi4Project) -> ReferenceCoverageStatus {
+    match project.strategic_regions.coverage {
+        super::StrategicRegionCoverage::Complete => ReferenceCoverageStatus::Complete,
+        super::StrategicRegionCoverage::NotPresent => ReferenceCoverageStatus::NotPresent,
+        super::StrategicRegionCoverage::Incomplete { files_failed, .. } => {
+            ReferenceCoverageStatus::Incomplete {
+                unavailable_inputs: files_failed,
+            }
+        }
+    }
+}
+
 fn logistics_coverage(present: bool, issues: usize) -> ReferenceCoverageStatus {
     if issues != 0 {
         ReferenceCoverageStatus::Incomplete {
@@ -489,6 +525,7 @@ fn reference_order(left: &ProvinceReference, right: &ProvinceReference) -> std::
             String::new(),
         ),
         SupplyNode { node_index, .. } => (5, *node_index as u64, 0, String::new()),
+        StrategicRegion { region_id, .. } => (6, *region_id as u64, 0, String::new()),
     };
     key(left).cmp(&key(right))
 }
@@ -507,7 +544,8 @@ mod tests {
     use crate::app::project::{
         LogisticsInput, LogisticsLoadIssue, LogisticsLoadResult, ProjectPaths, Railway,
         RailwayLoadResult, ResolvedLocation, ResolvedSource, SourceGeneration, SourceKind,
-        StateLoadFailure, StateLoadFailureStage, SupplyNode, SupplyNodeLoadResult,
+        StateLoadFailure, StateLoadFailureStage, StrategicRegion, StrategicRegionCoverage,
+        StrategicRegionLoadResult, SupplyNode, SupplyNodeLoadResult,
     };
     use crate::app::state::{StateData, StateDocument, StateHistory, VictoryPoint, parse_text};
     use crate::config::Config;
@@ -715,6 +753,7 @@ mod tests {
                 adjacencies: 1,
                 railways: 1,
                 supply_nodes: 0,
+                strategic_regions: 0,
             }
         );
         assert!(built.coverage.is_complete());
@@ -739,6 +778,42 @@ mod tests {
             [ProvinceReference::StateMembership { state_id: 10, source }]
                 if matches!(source.as_ref(), ProvinceReferenceSource::StateSession { document_path: Some(_), .. })
         ));
+    }
+
+    #[test]
+    fn indexes_strategic_regions_from_the_existing_loaded_result() {
+        let temp = TempProject::new();
+        let mut project = temp.project();
+        let source = Arc::new(source(
+            "map/strategicregions/500.txt",
+            SourceGeneration::default(),
+        ));
+        project.strategic_regions = StrategicRegionLoadResult {
+            regions: vec![StrategicRegion {
+                id: 500,
+                name_key: Some("STRATEGICREGION_500".to_owned()),
+                display_name: None,
+                has_provinces_field: true,
+                provinces: vec![42],
+                naval_terrain: None,
+                source,
+                span: Default::default(),
+            }],
+            issues: Vec::new(),
+            coverage: StrategicRegionCoverage::Complete,
+            files_seen: 1,
+            province_references: 1,
+            loading_ms: 0,
+        };
+        let built = build_province_reference_index(&project, &sparse_map(Vec::new()), None);
+        assert!(matches!(
+            built.index.references_to_province(42),
+            [ProvinceReference::StrategicRegion { region_id: 500, .. }]
+        ));
+        assert_eq!(
+            built.coverage.status(ReferenceDomain::StrategicRegions),
+            &ReferenceCoverageStatus::Complete
+        );
     }
 
     #[test]

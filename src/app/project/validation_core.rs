@@ -10,6 +10,7 @@ use super::province_geometry::ProvinceGeometryAnalysis;
 use super::river_topology::{IndexedRiverBitmap, RiverTopologyAnalysis};
 use super::{
     DiagnosticSeverity, Hoi4Project, ProjectDiagnostic, ProjectDiagnosticKind, ResolvedSource,
+    StrategicRegionCoverage,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +31,7 @@ pub enum ProjectValidationDomain {
     Building,
     CrossDomain,
     Session,
+    StrategicRegion,
     Transaction,
 }
 
@@ -55,6 +57,7 @@ pub struct ProjectValidationDiagnostic {
     pub span: Option<TextSpan>,
     pub province_id: Option<u32>,
     pub state_id: Option<u32>,
+    pub strategic_region_ids: Vec<u32>,
     pub map_location: Option<[u32; 2]>,
     pub related_province_ids: Vec<u32>,
     pub source: Option<ResolvedSource>,
@@ -97,6 +100,7 @@ pub fn validate_project(
     validate_adjacencies(bundle, project, &mut diagnostics);
     validate_river_topology(bundle, project, &mut diagnostics);
     validate_logistics(bundle, project, &mut diagnostics);
+    validate_strategic_regions(bundle, project, &mut diagnostics);
     sort_and_dedup(&mut diagnostics);
 
     let summary = summarize(&diagnostics);
@@ -330,6 +334,7 @@ impl ProjectValidationDiagnostic {
             state_id: diagnostic
                 .state_id
                 .or_else(|| extract_message_id(&diagnostic.message, "state")),
+            strategic_region_ids: Vec::new(),
             map_location: None,
             related_province_ids: Vec::new(),
             source: None,
@@ -364,6 +369,13 @@ impl ProjectValidationDiagnostic {
 
     fn with_state_id(mut self, state_id: Option<u32>) -> Self {
         self.state_id = state_id;
+        self
+    }
+
+    fn with_strategic_region_ids(mut self, mut ids: Vec<u32>) -> Self {
+        ids.sort_unstable();
+        ids.dedup();
+        self.strategic_region_ids = ids;
         self
     }
 
@@ -1237,6 +1249,218 @@ fn validate_river_topology(
     }
 }
 
+fn validate_strategic_regions(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+    diagnostics: &mut Vec<ProjectValidationDiagnostic>,
+) {
+    let loaded = &project.strategic_regions;
+    for issue in &loaded.issues {
+        let mut diagnostic = ProjectValidationDiagnostic::custom(
+            ProjectDiagnosticKind::StrategicRegionFileInvalid,
+            DiagnosticSeverity::Error,
+            None,
+            issue.message.clone(),
+        )
+        .with_domain(ProjectValidationDomain::StrategicRegion)
+        .with_blocks_save(false);
+        if let Some(source) = issue.source.clone() {
+            diagnostic = diagnostic.with_source(source);
+        }
+        if let Some(span) = issue.span {
+            diagnostic = diagnostic.with_span(span);
+        }
+        diagnostics.push(diagnostic);
+    }
+    if matches!(loaded.coverage, StrategicRegionCoverage::NotPresent) {
+        return;
+    }
+
+    let mut by_id = BTreeMap::<u32, Vec<_>>::new();
+    let mut regions_by_province = BTreeMap::<u32, BTreeSet<u32>>::new();
+    for region in &loaded.regions {
+        by_id.entry(region.id).or_default().push(region);
+        if region.name_key.is_none() {
+            diagnostics.push(strategic_diagnostic(
+                ProjectDiagnosticKind::StrategicRegionMissingName,
+                format!("Strategic Region {} is missing name", region.id),
+                region,
+                None,
+                Vec::new(),
+            ));
+        }
+        if !region.has_provinces_field {
+            diagnostics.push(strategic_diagnostic(
+                ProjectDiagnosticKind::StrategicRegionMissingProvinces,
+                format!("Strategic Region {} is missing provinces", region.id),
+                region,
+                None,
+                Vec::new(),
+            ));
+        }
+        let mut valid_provinces = 0usize;
+        for &province_id in &region.provinces {
+            if bundle.map.contains_province_id(province_id) {
+                valid_provinces += 1;
+                regions_by_province
+                    .entry(province_id)
+                    .or_default()
+                    .insert(region.id);
+            } else {
+                diagnostics.push(strategic_diagnostic(
+                    ProjectDiagnosticKind::StrategicRegionProvinceMissing,
+                    format!(
+                        "Strategic Region {} references missing province {province_id}",
+                        region.id
+                    ),
+                    region,
+                    Some(province_id),
+                    Vec::new(),
+                ));
+            }
+        }
+        if region.has_provinces_field && valid_provinces == 0 {
+            diagnostics.push(strategic_diagnostic(
+                ProjectDiagnosticKind::StrategicRegionNoValidProvinces,
+                format!("Strategic Region {} has no valid provinces", region.id),
+                region,
+                None,
+                Vec::new(),
+            ));
+        }
+    }
+
+    for (&id, regions) in &by_id {
+        if regions.len() > 1 {
+            let sources = regions
+                .iter()
+                .map(|region| region.source.logical_path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            diagnostics.push(strategic_diagnostic(
+                ProjectDiagnosticKind::StrategicRegionDuplicateId,
+                format!("Strategic Region id {id} is defined more than once: {sources}"),
+                regions[0],
+                None,
+                vec![id],
+            ));
+        }
+    }
+    for (&province_id, ids) in &regions_by_province {
+        if ids.len() > 1 {
+            let region = loaded
+                .regions
+                .iter()
+                .find(|region| region.id == *ids.first().expect("non-empty region IDs"))
+                .expect("region membership was built from loaded regions");
+            diagnostics.push(strategic_diagnostic(
+                ProjectDiagnosticKind::StrategicRegionProvinceMultiple,
+                format!(
+                    "Province {province_id} belongs to multiple Strategic Regions: {}",
+                    ids.iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                region,
+                Some(province_id),
+                ids.iter().copied().collect(),
+            ));
+        }
+    }
+    if loaded.coverage.is_complete() {
+        for province_id in bundle.map.province_ids() {
+            if !regions_by_province.contains_key(&province_id) {
+                diagnostics.push(
+                    ProjectValidationDiagnostic::custom(
+                        ProjectDiagnosticKind::StrategicRegionProvinceUnassigned,
+                        DiagnosticSeverity::Error,
+                        None,
+                        format!("Province {province_id} is not assigned to a Strategic Region"),
+                    )
+                    .with_domain(ProjectValidationDomain::StrategicRegion)
+                    .with_province_id(province_id)
+                    .with_blocks_save(false),
+                );
+            }
+        }
+    }
+    let mut state_regions = BTreeMap::<u32, (BTreeSet<u32>, Vec<u32>)>::new();
+    for (&province_id, &state_id) in &project.state_by_province {
+        let Some(region_ids) = regions_by_province.get(&province_id) else {
+            continue;
+        };
+        let entry = state_regions.entry(state_id).or_default();
+        entry.0.extend(region_ids);
+        entry.1.push(province_id);
+    }
+    for (state_id, (region_ids, provinces)) in state_regions {
+        if region_ids.len() > 1 {
+            let region = loaded
+                .regions
+                .iter()
+                .find(|region| region_ids.contains(&region.id))
+                .expect("state region IDs were built from loaded regions");
+            diagnostics.push(
+                strategic_diagnostic(
+                    ProjectDiagnosticKind::StateSplitAcrossStrategicRegions,
+                    format!(
+                        "State {state_id} is split across Strategic Regions: {}",
+                        region_ids
+                            .iter()
+                            .map(u32::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    region,
+                    None,
+                    region_ids.into_iter().collect(),
+                )
+                .with_state_id(Some(state_id))
+                .with_related_province_ids(provinces),
+            );
+        }
+    }
+    if let Ok(Some(terrains)) = terrain_catalog(bundle, project) {
+        for region in &loaded.regions {
+            if let Some(terrain) = region.naval_terrain.as_deref()
+                && !terrains.contains(terrain)
+            {
+                diagnostics.push(strategic_diagnostic(
+                    ProjectDiagnosticKind::StrategicRegionNavalTerrainUndefined,
+                    format!(
+                        "Strategic Region {} declares undefined naval terrain {terrain}",
+                        region.id
+                    ),
+                    region,
+                    None,
+                    Vec::new(),
+                ));
+            }
+        }
+    }
+}
+
+fn strategic_diagnostic(
+    kind: ProjectDiagnosticKind,
+    message: String,
+    region: &super::StrategicRegion,
+    province_id: Option<u32>,
+    region_ids: Vec<u32>,
+) -> ProjectValidationDiagnostic {
+    ProjectValidationDiagnostic::custom(kind, DiagnosticSeverity::Error, None, message)
+        .with_domain(ProjectValidationDomain::StrategicRegion)
+        .with_optional_province_id(province_id)
+        .with_strategic_region_ids(if region_ids.is_empty() {
+            vec![region.id]
+        } else {
+            region_ids
+        })
+        .with_source((*region.source).clone())
+        .with_span(region.span)
+        .with_blocks_save(false)
+}
+
 fn validate_logistics(
     bundle: &Bundle,
     project: &Hoi4Project,
@@ -1461,6 +1685,7 @@ fn same_identity(left: &ProjectValidationDiagnostic, right: &ProjectValidationDi
         && left.state_id == right.state_id
         && left.map_location == right.map_location
         && left.related_province_ids == right.related_province_ids
+        && left.strategic_region_ids == right.strategic_region_ids
         && source_identity(left.source.as_ref()) == source_identity(right.source.as_ref())
 }
 
@@ -1477,6 +1702,7 @@ struct DiagnosticIdentity {
     state_id: Option<u32>,
     map_location: Option<[u32; 2]>,
     related_province_ids: Vec<u32>,
+    strategic_region_ids: Vec<u32>,
     source: Option<(String, String, u64)>,
 }
 
@@ -1517,6 +1743,7 @@ fn identity(diagnostic: &ProjectValidationDiagnostic, root: &Path) -> Diagnostic
         state_id: diagnostic.state_id,
         map_location: diagnostic.map_location,
         related_province_ids: diagnostic.related_province_ids.clone(),
+        strategic_region_ids: diagnostic.strategic_region_ids.clone(),
         source: source_identity(diagnostic.source.as_ref()),
     }
 }
@@ -1563,7 +1790,11 @@ fn cmp_stable(
         left.path.as_ref(),
         left.state_id,
         left.province_id,
-        (left.map_location, &left.related_province_ids),
+        (
+            left.map_location,
+            &left.related_province_ids,
+            &left.strategic_region_ids,
+        ),
         span_key(left.span),
         left.kind,
         left.related_path.as_ref(),
@@ -1577,7 +1808,11 @@ fn cmp_stable(
             right.path.as_ref(),
             right.state_id,
             right.province_id,
-            (right.map_location, &right.related_province_ids),
+            (
+                right.map_location,
+                &right.related_province_ids,
+                &right.strategic_region_ids,
+            ),
             span_key(right.span),
             right.kind,
             right.related_path.as_ref(),
@@ -1625,7 +1860,7 @@ fn color_text([r, g, b]: Color) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::fs;
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -1634,7 +1869,10 @@ mod tests {
     use crate::app::format::{Adjacency, AdjacencyKind, Definition, DefinitionKind};
     use crate::app::map::{Bundle, construct_map_data_for_sparse_tests, write_rgb_bmp_image};
     use crate::app::project::load_logistics;
-    use crate::app::project::{ProjectPaths, SourceLookup};
+    use crate::app::project::{
+        ProjectPaths, ResolvedLocation, SourceGeneration, SourceKind, SourceLookup,
+        StrategicRegion, StrategicRegionCoverage, StrategicRegionLoadResult,
+    };
     use crate::app::state::{StateData, StateDocument, StateHistory, VictoryPoint, parse_text};
     use crate::config::Config;
     use crate::util::files::Location;
@@ -1718,6 +1956,79 @@ mod tests {
             "0;0;0;0;land;false;unknown;0\n1;1;0;0;land;true;plains;1\n",
             &[[1, 0, 0], [1, 0, 0]],
         )
+    }
+
+    #[test]
+    fn strategic_regions_report_positive_conflicts_but_keep_save_read_only() {
+        let temp = TempProject::new(
+            "strategic-regions",
+            "0;0;0;0;land;false;unknown;0\n1;1;0;0;land;false;plains;1\n",
+            &[[1, 0, 0]],
+        );
+        let bundle = sparse_bundle(Vec::new());
+        let mut project = project(&temp, Vec::new());
+        project.state_by_province = HashMap::from([(1, 10), (7, 10)]);
+        let source = Arc::new(ResolvedSource {
+            logical_path: PathBuf::from("map/strategicregions/test.txt"),
+            location: ResolvedLocation::Filesystem(temp.0.join("map/strategicregions/test.txt")),
+            source_kind: SourceKind::CurrentProject,
+            project_generation: SourceGeneration::new(3),
+        });
+        project.strategic_regions = StrategicRegionLoadResult {
+            regions: vec![
+                StrategicRegion {
+                    id: 100,
+                    name_key: Some("R100".into()),
+                    display_name: None,
+                    has_provinces_field: true,
+                    provinces: vec![1, 9999],
+                    naval_terrain: None,
+                    source: source.clone(),
+                    span: TextSpan::default(),
+                },
+                StrategicRegion {
+                    id: 200,
+                    name_key: Some("R200".into()),
+                    display_name: None,
+                    has_provinces_field: true,
+                    provinces: vec![7],
+                    naval_terrain: None,
+                    source: source.clone(),
+                    span: TextSpan::default(),
+                },
+                StrategicRegion {
+                    id: 300,
+                    name_key: Some("R300".into()),
+                    display_name: None,
+                    has_provinces_field: true,
+                    provinces: vec![1],
+                    naval_terrain: None,
+                    source,
+                    span: TextSpan::default(),
+                },
+            ],
+            issues: Vec::new(),
+            coverage: StrategicRegionCoverage::Complete,
+            files_seen: 1,
+            province_references: 4,
+            loading_ms: 0,
+        };
+        let report = validate_project(&bundle, &project, ProjectValidationTarget::CurrentProject);
+        let codes = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"STRATEGIC_REGION_PROVINCE_MISSING"));
+        assert!(codes.contains(&"STRATEGIC_REGION_PROVINCE_MULTIPLE"));
+        assert!(codes.contains(&"STATE_SPLIT_ACROSS_STRATEGIC_REGIONS"));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code.starts_with("STRATEGIC_REGION"))
+                .all(|diagnostic| !diagnostic.blocks_save)
+        );
     }
 
     fn sparse_bundle(adjacencies: Vec<Adjacency>) -> Bundle {

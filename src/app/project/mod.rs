@@ -20,6 +20,7 @@ mod save;
 mod save_plan;
 mod sources;
 mod state_fill;
+mod strategic_regions;
 mod validation;
 mod validation_core;
 mod view;
@@ -99,6 +100,11 @@ pub use state_fill::{
     ProvinceAdjacency, StateFillBlockedProvince, StateFillBlockedReason, StateFillMode,
     StateFillPreview, StateFillProvince, StateFillProvinceKind, plan_state_fill,
 };
+pub use strategic_regions::{
+    STRATEGIC_REGIONS_DIRECTORY, StrategicRegion, StrategicRegionCoverage,
+    StrategicRegionLoadIssue, StrategicRegionLoadIssueKind, StrategicRegionLoadResult,
+    load_strategic_regions,
+};
 pub use validation::{
     ByteComparisonResult, ByteDifference, CandidateApplicationResult,
     CombinedRoundTripValidationReport, DiagnosticComparison, FileFingerprint, ProjectReloadResult,
@@ -136,6 +142,7 @@ pub struct Hoi4Project {
     pub diagnostics: Vec<ProjectDiagnostic>,
     pub load_summary: StateLoadSummary,
     pub logistics: LogisticsLoadResult,
+    pub strategic_regions: StrategicRegionLoadResult,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -213,8 +220,10 @@ impl Hoi4Project {
             diagnostics: Vec::new(),
             load_summary: StateLoadSummary::default(),
             logistics: LogisticsLoadResult::default(),
+            strategic_regions: StrategicRegionLoadResult::default(),
         };
         project.load_logistics();
+        project.load_strategic_regions();
         project
     }
 
@@ -254,14 +263,20 @@ impl Hoi4Project {
         self.logistics = load_logistics(&self.paths.sources);
     }
 
+    pub fn load_strategic_regions(&mut self) {
+        self.strategic_regions = load_strategic_regions(&self.paths.sources);
+    }
+
     pub fn bind_project_generation(&mut self, generation: u64) {
         self.paths.bind_project_generation(generation);
         self.load_logistics();
+        self.load_strategic_regions();
     }
 
     pub fn set_validated_base_game_root(&mut self, root: Option<std::path::PathBuf>) {
         self.paths.set_validated_base_game_root(root);
         self.load_logistics();
+        self.load_strategic_regions();
     }
 
     pub fn load_summary_message(&self) -> String {

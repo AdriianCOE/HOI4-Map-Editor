@@ -90,9 +90,11 @@ records, and missing referenced files. Keep each fixture small and give it a
 single declared expectation so a difference is reviewable rather than a broad
 tool-level verdict.
 
-Strategic Region output from the reference is retained as
-`unsupported_by_us`; this step does not implement Strategic Regions. The
-internal `ProvinceReferenceIndex` is not a direct comparison target.
+Strategic Region rules now participate in normalized comparison for the
+read-only domain: duplicate region IDs, missing/duplicate/unassigned Province
+membership, State splits, and undefined naval terrain where supplied by a
+reference adapter. The internal `ProvinceReferenceIndex` remains a derived
+editor structure rather than a direct comparison target.
 
 Multiple DLC precedence, river marker direction/loop legality, duplicate supply
 nodes, repeated railway provinces, and special railway adjacency rules remain

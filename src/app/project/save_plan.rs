@@ -253,6 +253,7 @@ mod tests {
             diagnostics: Vec::new(),
             load_summary: Default::default(),
             logistics: crate::app::project::LogisticsLoadResult::default(),
+            strategic_regions: crate::app::project::StrategicRegionLoadResult::default(),
         }
     }
 

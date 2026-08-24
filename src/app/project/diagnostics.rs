@@ -110,6 +110,16 @@ pub enum ProjectDiagnosticKind {
     RailwaySegmentNotAdjacent,
     SupplyNodeParseError,
     SupplyNodeProvinceMissing,
+    StrategicRegionFileInvalid,
+    StrategicRegionMissingName,
+    StrategicRegionMissingProvinces,
+    StrategicRegionDuplicateId,
+    StrategicRegionProvinceMissing,
+    StrategicRegionNoValidProvinces,
+    StrategicRegionProvinceMultiple,
+    StrategicRegionProvinceUnassigned,
+    StateSplitAcrossStrategicRegions,
+    StrategicRegionNavalTerrainUndefined,
     CandidateMismatch,
     ExternalChange,
     TransactionFailure,
@@ -182,6 +192,18 @@ impl ProjectDiagnosticKind {
             Self::RailwaySegmentNotAdjacent => "RAILWAY_SEGMENT_NOT_ADJACENT",
             Self::SupplyNodeParseError => "SUPPLY_NODE_PARSE_ERROR",
             Self::SupplyNodeProvinceMissing => "SUPPLY_NODE_PROVINCE_MISSING",
+            Self::StrategicRegionFileInvalid => "STRATEGIC_REGION_FILE_INVALID",
+            Self::StrategicRegionMissingName => "STRATEGIC_REGION_MISSING_NAME",
+            Self::StrategicRegionMissingProvinces => "STRATEGIC_REGION_MISSING_PROVINCES",
+            Self::StrategicRegionDuplicateId => "STRATEGIC_REGION_DUPLICATE_ID",
+            Self::StrategicRegionProvinceMissing => "STRATEGIC_REGION_PROVINCE_MISSING",
+            Self::StrategicRegionNoValidProvinces => "STRATEGIC_REGION_NO_VALID_PROVINCES",
+            Self::StrategicRegionProvinceMultiple => "STRATEGIC_REGION_PROVINCE_MULTIPLE",
+            Self::StrategicRegionProvinceUnassigned => "STRATEGIC_REGION_PROVINCE_UNASSIGNED",
+            Self::StateSplitAcrossStrategicRegions => "STATE_SPLIT_ACROSS_STRATEGIC_REGIONS",
+            Self::StrategicRegionNavalTerrainUndefined => {
+                "STRATEGIC_REGION_NAVAL_TERRAIN_UNDEFINED"
+            }
             Self::CandidateMismatch => "project.candidate.mismatch",
             Self::ExternalChange => "transaction.external_change",
             Self::TransactionFailure => "transaction.failure",
@@ -234,6 +256,16 @@ impl ProjectDiagnosticKind {
             | Self::AdjacencyToProvinceMissing
             | Self::AdjacencyThroughProvinceMissing
             | Self::AdjacencyCoordinateOutOfBounds => DiagnosticDomain::CrossDomain,
+            Self::StrategicRegionFileInvalid
+            | Self::StrategicRegionMissingName
+            | Self::StrategicRegionMissingProvinces
+            | Self::StrategicRegionDuplicateId
+            | Self::StrategicRegionProvinceMissing
+            | Self::StrategicRegionNoValidProvinces
+            | Self::StrategicRegionProvinceMultiple
+            | Self::StrategicRegionProvinceUnassigned
+            | Self::StateSplitAcrossStrategicRegions
+            | Self::StrategicRegionNavalTerrainUndefined => DiagnosticDomain::CrossDomain,
             Self::ExternalChange | Self::TransactionFailure => DiagnosticDomain::Transaction,
             Self::CandidateMismatch => DiagnosticDomain::Project,
             _ => DiagnosticDomain::States,

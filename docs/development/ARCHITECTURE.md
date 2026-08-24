@@ -109,6 +109,24 @@ com o App e nao e clonado para um comando.
 
 ## Limites de projeto
 
+### Strategic Regions (Step 9A)
+
+`project::strategic_regions` e um dominio somente-leitura para
+`map/strategicregions/*.txt`. Ele usa exclusivamente `ProjectSources` para
+listar e ler os arquivos efetivos, portanto compartilha merge de diretorio,
+proveniencia, `replace_path` e precedencia projeto → DLC → DLC integrada →
+base. `default.map` nao configura esse diretorio. O resultado reutilizavel
+mantem IDs esparsos, token `name`, nome localizado opcional, provincias na
+ordem declarada, `naval_terrain`, fonte e span; falhas de arquivo tornam a
+cobertura parcial sem descartar arquivos validos.
+
+Strategic Regions sao **validados e indexados**, mas ainda **nao sao
+apresentados, selecionaveis, editaveis nem Save-owned**. A validacao e o
+`ProvinceReferenceIndex` consomem o mesmo resultado carregado; nao ha reparse.
+Diagnosticos de ausencia global so ocorrem com cobertura completa, enquanto
+contradicoes positivas (duplicidade, referencia inexistente, associacao
+multipla e State dividido) continuam reportaveis com cobertura parcial.
+
 `app::project` representa a raiz de um mod. `ProjectPaths::discover` valida
 `map/provinces.bmp`, `map/definition.csv` e `history/states/`; adjacencias e
 rios sao opcionais.
