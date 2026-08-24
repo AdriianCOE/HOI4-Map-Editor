@@ -17,7 +17,7 @@ use super::{
     DiagnosticSeverity, Hoi4Project, PatchSafety, ProjectDiagnosticKind, ProjectPatchPlan,
     ProjectPaths, ProjectValidationChange, ProjectValidationDiagnostic, ProjectValidationReport,
     ProjectValidationTarget, SourceFingerprint, StateEditSession, validate_project,
-    validate_project_against_baseline,
+    validate_project_against_baseline_with_strategic_region_context,
 };
 
 static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -840,6 +840,7 @@ impl RoundTripValidator {
             gate!(validate_map_candidate_paths(files));
         }
         let mut plan_sets = gate!(validate_plan(project, edit, plan, &self.policy));
+        gate!(verify_strategic_region_context_generation(project));
         if plan.files_len() == 0 && map_candidate_files.is_none() {
             report.status = RoundTripStatus::Passed;
             report.no_candidate_changes = true;
@@ -1038,12 +1039,13 @@ impl RoundTripValidator {
             project,
             ProjectValidationTarget::CurrentProject,
         );
-        let project_validation = validate_project_against_baseline(
+        let project_validation = validate_project_against_baseline_with_strategic_region_context(
             &candidate_bundle,
             &candidate_project,
             ProjectValidationTarget::PendingChanges,
             &baseline_validation,
             &project.paths.root,
+            project,
         );
         report.timings.diagnostic_comparison_ms = started.elapsed().as_millis();
         if project_validation.delta.blocks_save() {
@@ -1270,6 +1272,7 @@ struct PlanSets {
 #[derive(Debug)]
 struct SourceSnapshot {
     files: BTreeMap<PathBuf, FileFingerprint>,
+    strategic_region_sources: BTreeMap<String, FileFingerprint>,
 }
 
 #[derive(Debug)]
@@ -1554,7 +1557,93 @@ fn verify_source(
             ));
         }
     }
-    Ok(SourceSnapshot { files })
+    let strategic_region_sources = strategic_region_source_fingerprints(project)?;
+    Ok(SourceSnapshot {
+        files,
+        strategic_region_sources,
+    })
+}
+
+/// Strategic Regions remain external read-only validation context. Snapshot
+/// their effective resolved inputs for freshness only; they are deliberately
+/// neither copied into nor written from the candidate workspace.
+fn strategic_region_source_fingerprints(
+    project: &Hoi4Project,
+) -> Result<BTreeMap<String, FileFingerprint>, Failure> {
+    let listing = project
+        .paths
+        .sources
+        .list_files(Path::new("map/strategicregions"))
+        .map_err(|error| {
+            Failure::new(
+                RoundTripStage::SourceVerification,
+                None,
+                None,
+                format!("Cannot list Strategic Region sources: {error}"),
+                "Reload the project and regenerate the Save Project review.",
+            )
+        })?;
+    let mut fingerprints = BTreeMap::new();
+    for source in listing.files.into_iter().filter(|source| {
+        source
+            .logical_path
+            .extension()
+            .is_some_and(|extension| extension == "txt")
+    }) {
+        let bytes = project
+            .paths
+            .sources
+            .read_resolved(&source)
+            .map_err(|error| {
+                Failure::new(
+                    RoundTripStage::SourceVerification,
+                    source.filesystem_path().map(Path::to_path_buf),
+                    None,
+                    format!(
+                        "Cannot read resolved Strategic Region source {}: {error}",
+                        source.logical_path.display()
+                    ),
+                    "Reload the project and regenerate the Save Project review.",
+                )
+            })?;
+        let key = format!(
+            "{:?}|{}|{:?}",
+            source.source_kind,
+            source.logical_path.display(),
+            source.location
+        );
+        fingerprints.insert(key, FileFingerprint::from_bytes(&bytes));
+    }
+    Ok(fingerprints)
+}
+
+/// The source-aware Strategic Region snapshot is only safe for the active
+/// project generation that produced it. A candidate intentionally has no
+/// Strategic Region files, so this guard applies to the retained context
+/// before it is combined with candidate-owned State data.
+fn verify_strategic_region_context_generation(project: &Hoi4Project) -> Result<(), Failure> {
+    let generation = project.paths.sources.manifest().project_generation;
+    let regions_current = project
+        .strategic_regions
+        .regions
+        .iter()
+        .all(|region| region.source.project_generation == generation);
+    let issues_current = project.strategic_regions.issues.iter().all(|issue| {
+        issue
+            .source
+            .as_ref()
+            .is_none_or(|source| source.project_generation == generation)
+    });
+    if regions_current && issues_current {
+        return Ok(());
+    }
+    Err(Failure::new(
+        RoundTripStage::SourceVerification,
+        None,
+        None,
+        "The retained Strategic Region source context belongs to a different project generation.",
+        "Reload the project and regenerate the Save Project review.",
+    ))
 }
 
 fn enumerate_source_files(
@@ -2603,6 +2692,15 @@ fn verify_source_unchanged(
             ));
         }
     }
+    if strategic_region_source_fingerprints(project)? != snapshot.strategic_region_sources {
+        return Err(Failure::new(
+            RoundTripStage::SourceVerification,
+            None,
+            None,
+            "A resolved Strategic Region source changed after candidate preparation.",
+            "Reload the project and regenerate the Save Project review.",
+        ));
+    }
     Ok(())
 }
 
@@ -2969,6 +3067,7 @@ mod tests {
         let project = Hoi4Project::new(ProjectPaths::discover(&root).unwrap());
         let snapshot = SourceSnapshot {
             files: enumerate_source_files(&project).unwrap(),
+            strategic_region_sources: strategic_region_source_fingerprints(&project).unwrap(),
         };
         fs::write(
             root.join("map/default.map"),
@@ -2979,6 +3078,87 @@ mod tests {
         let failure = verify_source_unchanged(&project, &snapshot)
             .expect_err("default.map is authoritative and must be revalidated before save");
         assert!(failure.diagnostic.message.contains("source file changed"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn strategic_region_source_change_is_detected_before_candidate_result_is_accepted() {
+        let (root, mut project, _) = test_project("strategic-region-source-change");
+        fs::create_dir_all(root.join("map/strategicregions")).unwrap();
+        let region_path = root.join("map/strategicregions/regions.txt");
+        fs::write(
+            &region_path,
+            "strategic_region={id=1 name=ONE provinces={1}}",
+        )
+        .unwrap();
+        project.load_strategic_regions();
+        let snapshot = SourceSnapshot {
+            files: enumerate_source_files(&project).unwrap(),
+            strategic_region_sources: strategic_region_source_fingerprints(&project).unwrap(),
+        };
+        fs::write(
+            &region_path,
+            "strategic_region={id=1 name=CHANGED provinces={1}}",
+        )
+        .unwrap();
+
+        let failure = verify_source_unchanged(&project, &snapshot)
+            .expect_err("effective read-only Strategic Region inputs must stay fresh");
+        assert!(
+            failure
+                .diagnostic
+                .message
+                .contains("Strategic Region source changed")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_strategic_region_context_generation_is_rejected() {
+        let (root, mut project, _) = test_project("strategic-region-generation");
+        fs::create_dir_all(root.join("map/strategicregions")).unwrap();
+        fs::write(
+            root.join("map/strategicregions/regions.txt"),
+            "strategic_region={id=1 name=ONE provinces={1}}",
+        )
+        .unwrap();
+        project.load_strategic_regions();
+        project.paths.bind_project_generation(1);
+
+        let failure = verify_strategic_region_context_generation(&project)
+            .expect_err("a retained source snapshot cannot cross project generations");
+        assert!(
+            failure
+                .diagnostic
+                .message
+                .contains("different project generation")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn candidate_without_source_strategic_regions_keeps_not_present_semantics() {
+        let (root, project, mut edit) = test_project("strategic-region-not-present");
+        let mut properties = EditableStateProperties::from_state(
+            project.state_document(1).unwrap().data.as_ref().unwrap(),
+        );
+        properties.manpower = Some(9);
+        assert!(edit.update_state_properties(1, properties).unwrap());
+        let plan = plan_state_patches(&project, &edit);
+        let combined = RoundTripValidator::default().validate_combined(
+            &project,
+            &edit,
+            &plan,
+            None,
+            |_| Ok(()),
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        let validation = combined.project_validation.expect("candidate validation");
+        assert!(!validation.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.starts_with("STRATEGIC_REGION")
+                || diagnostic.code == "STATE_SPLIT_ACROSS_STRATEGIC_REGIONS"
+        }));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3214,6 +3394,261 @@ mod tests {
             fs::read(&source_definition_path).unwrap(),
             source_definition_before
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn strategic_region_state_split_uses_unsaved_state_session_candidate() {
+        let root = std::env::temp_dir().join(format!(
+            "strategic-region-session-split-{}-{}",
+            std::process::id(),
+            WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("map/strategicregions")).unwrap();
+        fs::create_dir_all(root.join("history/states")).unwrap();
+        let image = image::RgbImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                image::Rgb([1, 2, 3])
+            } else {
+                image::Rgb([4, 5, 6])
+            }
+        });
+        let mut bmp = Vec::new();
+        crate::app::map::write_rgb_bmp_image(&mut bmp, &image).unwrap();
+        fs::write(root.join("map/provinces.bmp"), bmp).unwrap();
+        fs::write(root.join("map/definition.csv"), "0;0;0;0;land;false;unknown;0\n1;1;2;3;land;false;plains;1\n7;4;5;6;land;false;plains;1\n").unwrap();
+        fs::write(
+            root.join("history/states/10-A.txt"),
+            "state={id=10 state_category=rural provinces={1} history={owner=TAG}}",
+        )
+        .unwrap();
+        fs::write(
+            root.join("history/states/20-B.txt"),
+            "state={id=20 state_category=rural provinces={7} history={owner=TAG}}",
+        )
+        .unwrap();
+        let strategic_regions_path = root.join("map/strategicregions/regions.txt");
+        fs::write(&strategic_regions_path, "strategic_region={id=100 name=ONE provinces={1}}\nstrategic_region={id=200 name=TWO provinces={7}}").unwrap();
+
+        let paths = ProjectPaths::discover(&root).unwrap();
+        let bundle = Bundle::load(
+            &Location::Directory(paths.map_directory.clone()),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let valid = bundle.map.province_ids().collect::<BTreeSet<_>>();
+        let mut project = Hoi4Project::new(paths);
+        project.load_states(&valid, &valid);
+        let mut edit = StateEditSession::new(&project, &bundle.map);
+        edit.reassign_provinces(&[7], Some(10)).unwrap();
+        let plan = plan_state_patches(&project, &edit);
+        assert!(
+            plan.modified_files
+                .iter()
+                .map(|file| &file.path)
+                .chain(plan.created_files.iter().map(|file| &file.path))
+                .chain(plan.removed_files.iter().map(|file| &file.path))
+                .all(|path| !path.starts_with("map/strategicregions"))
+        );
+        let map_candidate = BTreeMap::from([(
+            PathBuf::from("definition.csv"),
+            fs::read(root.join("map/definition.csv")).unwrap(),
+        )]);
+        let combined = RoundTripValidator::default().validate_combined(
+            &project,
+            &edit,
+            &plan,
+            Some(&map_candidate),
+            |candidate_map| {
+                (!candidate_map.join("strategicregions").exists())
+                    .then_some(())
+                    .ok_or_else(|| {
+                        "Strategic Regions must not be copied into the candidate".to_owned()
+                    })
+            },
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        let validation = combined.project_validation.expect("candidate validation");
+        let split = validation
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == "STATE_SPLIT_ACROSS_STRATEGIC_REGIONS"
+                    && diagnostic.state_id == Some(10)
+                    && diagnostic.strategic_region_ids == [100, 200]
+            })
+            .expect("candidate validation must use its reloaded State data");
+        assert_eq!(
+            split
+                .source
+                .as_ref()
+                .and_then(|source| source.filesystem_path()),
+            Some(strategic_regions_path.as_path()),
+            "candidate diagnostics must retain original Strategic Region provenance"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn strategic_region_candidate_uses_reloaded_states_to_resolve_a_disk_split() {
+        let root = std::env::temp_dir().join(format!(
+            "strategic-region-session-resolve-{}-{}",
+            std::process::id(),
+            WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("map/strategicregions")).unwrap();
+        fs::create_dir_all(root.join("history/states")).unwrap();
+        let image = image::RgbImage::from_fn(3, 1, |x, _| match x {
+            0 => image::Rgb([1, 2, 3]),
+            1 => image::Rgb([4, 5, 6]),
+            _ => image::Rgb([7, 8, 9]),
+        });
+        let mut bmp = Vec::new();
+        crate::app::map::write_rgb_bmp_image(&mut bmp, &image).unwrap();
+        fs::write(root.join("map/provinces.bmp"), bmp).unwrap();
+        fs::write(root.join("map/definition.csv"), "0;0;0;0;land;false;unknown;0\n1;1;2;3;land;false;plains;1\n7;4;5;6;land;false;plains;1\n8;7;8;9;land;false;plains;1\n").unwrap();
+        fs::write(
+            root.join("history/states/10-A.txt"),
+            "state={id=10 state_category=rural provinces={1 7} history={owner=TAG}}",
+        )
+        .unwrap();
+        fs::write(
+            root.join("history/states/20-B.txt"),
+            "state={id=20 state_category=rural provinces={8} history={owner=TAG}}",
+        )
+        .unwrap();
+        fs::write(root.join("map/strategicregions/regions.txt"), "strategic_region={id=100 name=ONE provinces={1}}\nstrategic_region={id=200 name=TWO provinces={7}}\nstrategic_region={id=300 name=THREE provinces={8}}").unwrap();
+
+        let paths = ProjectPaths::discover(&root).unwrap();
+        let bundle = Bundle::load(
+            &Location::Directory(paths.map_directory.clone()),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let valid = bundle.map.province_ids().collect::<BTreeSet<_>>();
+        let mut project = Hoi4Project::new(paths);
+        project.load_states(&valid, &valid);
+        assert!(
+            validate_project(&bundle, &project, ProjectValidationTarget::CurrentProject)
+                .diagnostics
+                .iter()
+                .any(
+                    |diagnostic| diagnostic.code == "STATE_SPLIT_ACROSS_STRATEGIC_REGIONS"
+                        && diagnostic.state_id == Some(10)
+                )
+        );
+
+        let mut edit = StateEditSession::new(&project, &bundle.map);
+        edit.reassign_provinces(&[7], Some(20)).unwrap();
+        let plan = plan_state_patches(&project, &edit);
+        let combined = RoundTripValidator::default().validate_combined(
+            &project,
+            &edit,
+            &plan,
+            None,
+            |_| Ok(()),
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        let validation = combined.project_validation.expect("candidate validation");
+        assert!(
+            !validation.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "STATE_SPLIT_ACROSS_STRATEGIC_REGIONS"
+                    && diagnostic.state_id == Some(10)
+            }),
+            "candidate validation retained a split from the disk State model: {:#?}",
+            validation.diagnostics
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn candidate_keeps_incomplete_strategic_region_coverage_without_unassigned_cascade() {
+        let root = std::env::temp_dir().join(format!(
+            "strategic-region-partial-candidate-{}-{}",
+            std::process::id(),
+            WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("map/strategicregions")).unwrap();
+        fs::create_dir_all(root.join("history/states")).unwrap();
+        let image = image::RgbImage::from_fn(3, 1, |x, _| match x {
+            0 => image::Rgb([1, 2, 3]),
+            1 => image::Rgb([4, 5, 6]),
+            _ => image::Rgb([7, 8, 9]),
+        });
+        let mut bmp = Vec::new();
+        crate::app::map::write_rgb_bmp_image(&mut bmp, &image).unwrap();
+        fs::write(root.join("map/provinces.bmp"), bmp).unwrap();
+        fs::write(root.join("map/definition.csv"), "0;0;0;0;land;false;unknown;0\n1;1;2;3;land;false;plains;1\n7;4;5;6;land;false;plains;1\n8;7;8;9;land;false;plains;1\n").unwrap();
+        fs::write(
+            root.join("history/states/10-A.txt"),
+            "state={id=10 state_category=rural provinces={1} history={owner=TAG}}",
+        )
+        .unwrap();
+        fs::write(
+            root.join("history/states/20-B.txt"),
+            "state={id=20 state_category=rural provinces={7} history={owner=TAG}}",
+        )
+        .unwrap();
+        fs::write(
+            root.join("history/states/30-C.txt"),
+            "state={id=30 state_category=rural provinces={8} history={owner=TAG}}",
+        )
+        .unwrap();
+        fs::write(root.join("map/strategicregions/valid.txt"), "strategic_region={id=100 name=ONE provinces={1}}\nstrategic_region={id=200 name=TWO provinces={7}}").unwrap();
+        fs::write(
+            root.join("map/strategicregions/malformed.txt"),
+            "strategic_region={id=",
+        )
+        .unwrap();
+
+        let paths = ProjectPaths::discover(&root).unwrap();
+        let bundle = Bundle::load(
+            &Location::Directory(paths.map_directory.clone()),
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let valid = bundle.map.province_ids().collect::<BTreeSet<_>>();
+        let mut project = Hoi4Project::new(paths);
+        project.load_states(&valid, &valid);
+        assert!(matches!(
+            project.strategic_regions.coverage,
+            crate::app::project::StrategicRegionCoverage::Incomplete { .. }
+        ));
+        let mut edit = StateEditSession::new(&project, &bundle.map);
+        edit.reassign_provinces(&[7], Some(10)).unwrap();
+        let plan = plan_state_patches(&project, &edit);
+        let combined = RoundTripValidator::default().validate_combined(
+            &project,
+            &edit,
+            &plan,
+            None,
+            |_| Ok(()),
+            &RoundTripCancellation::default(),
+            |_| {},
+        );
+        let validation = combined.project_validation.expect("candidate validation");
+        assert!(validation.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "STATE_SPLIT_ACROSS_STRATEGIC_REGIONS"
+                && diagnostic.state_id == Some(10)
+        }));
+        assert!(!validation.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "STRATEGIC_REGION_PROVINCE_UNASSIGNED"
+                && diagnostic.province_id == Some(8)
+        }));
         fs::remove_dir_all(root).unwrap();
     }
 

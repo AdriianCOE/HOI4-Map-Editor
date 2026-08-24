@@ -20,3 +20,21 @@ Strategic Region duplicate Province IDs within one region and any engine
 requirement that IDs be sequential remain `needs_hoi4_engine_test`. The editor
 retains raw membership and accepts sparse IDs for safe inspection; this is not
 an engine compatibility claim.
+
+## Candidate validation source boundaries
+
+Save candidate validation combines two deliberately different classes of data:
+candidate-owned, round-tripped map and State outputs are serialized into the
+temporary workspace and parsed again, while external read-only source context
+stays in the active `ProjectSources` graph. Strategic Regions (and their
+source-aware terrain lookup) belong to the latter class: they are not
+Save-owned and are never copied, backed up, journaled, or committed merely for
+validation.
+
+Cross-domain Strategic Region checks combine the retained,
+generation-current `StrategicRegionLoadResult` with candidate-reloaded State
+data. This preserves lower-layer, DLC, archive, `replace_path`, and provenance
+semantics without making a temporary workspace a synthetic source root. The
+normal source-freshness gate fingerprints effective Strategic Region inputs
+before and after candidate validation; changed sources or a stale generation
+require a fresh candidate review.

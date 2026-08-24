@@ -85,6 +85,19 @@ pub fn validate_project(
     project: &Hoi4Project,
     target: ProjectValidationTarget,
 ) -> ProjectValidationReport {
+    validate_project_with_strategic_region_context(bundle, project, target, project)
+}
+
+/// Validates a reloaded editable candidate while retaining the active
+/// project-owned Strategic Region source context. Strategic Regions are
+/// read-only and intentionally absent from Save candidate writes; State and
+/// map facts still come exclusively from `project` and `bundle`.
+pub fn validate_project_with_strategic_region_context(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+    target: ProjectValidationTarget,
+    strategic_region_context: &Hoi4Project,
+) -> ProjectValidationReport {
     let mut diagnostics = project
         .diagnostics
         .iter()
@@ -100,7 +113,13 @@ pub fn validate_project(
     validate_adjacencies(bundle, project, &mut diagnostics);
     validate_river_topology(bundle, project, &mut diagnostics);
     validate_logistics(bundle, project, &mut diagnostics);
-    validate_strategic_regions(bundle, project, &mut diagnostics);
+    validate_strategic_regions(
+        bundle,
+        project,
+        &strategic_region_context.strategic_regions,
+        strategic_region_context,
+        &mut diagnostics,
+    );
     sort_and_dedup(&mut diagnostics);
 
     let summary = summarize(&diagnostics);
@@ -133,7 +152,30 @@ pub fn validate_project_against_baseline(
     baseline: &ProjectValidationReport,
     baseline_root: &Path,
 ) -> ProjectValidationReport {
-    let mut report = validate_project(bundle, project, target);
+    validate_project_against_baseline_with_strategic_region_context(
+        bundle,
+        project,
+        target,
+        baseline,
+        baseline_root,
+        project,
+    )
+}
+
+pub fn validate_project_against_baseline_with_strategic_region_context(
+    bundle: &Bundle,
+    project: &Hoi4Project,
+    target: ProjectValidationTarget,
+    baseline: &ProjectValidationReport,
+    baseline_root: &Path,
+    strategic_region_context: &Hoi4Project,
+) -> ProjectValidationReport {
+    let mut report = validate_project_with_strategic_region_context(
+        bundle,
+        project,
+        target,
+        strategic_region_context,
+    );
     report.baseline_summary = Some(baseline.summary.clone());
     report.delta = ProjectValidationDelta::new(
         &baseline.diagnostics,
@@ -1252,9 +1294,10 @@ fn validate_river_topology(
 fn validate_strategic_regions(
     bundle: &Bundle,
     project: &Hoi4Project,
+    loaded: &super::StrategicRegionLoadResult,
+    terrain_context: &Hoi4Project,
     diagnostics: &mut Vec<ProjectValidationDiagnostic>,
 ) {
-    let loaded = &project.strategic_regions;
     for issue in &loaded.issues {
         let mut diagnostic = ProjectValidationDiagnostic::custom(
             ProjectDiagnosticKind::StrategicRegionFileInvalid,
@@ -1421,7 +1464,7 @@ fn validate_strategic_regions(
             );
         }
     }
-    if let Ok(Some(terrains)) = terrain_catalog(bundle, project) {
+    if let Ok(Some(terrains)) = terrain_catalog(bundle, terrain_context) {
         for region in &loaded.regions {
             if let Some(terrain) = region.naval_terrain.as_deref()
                 && !terrains.contains(terrain)

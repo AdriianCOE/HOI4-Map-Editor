@@ -117,6 +117,8 @@ pub use validation_core::{
     ProjectValidationChange, ProjectValidationDelta, ProjectValidationDiagnostic,
     ProjectValidationDomain, ProjectValidationReport, ProjectValidationSummary,
     ProjectValidationTarget, validate_project, validate_project_against_baseline,
+    validate_project_against_baseline_with_strategic_region_context,
+    validate_project_with_strategic_region_context,
 };
 pub use view::{
     AMBIGUOUS_PROVINCE_COLOR, MapViewMode, SELECTED_STATE_COLOR, STATE_BOUNDARY_COLOR,
