@@ -1,6 +1,8 @@
 use std::cmp::Ordering;
 
-pub const INSPECTOR_EXPANDED_WIDTH: f64 = 420.0;
+/// A full inspector keeps its editable tag rows and inline actions readable
+/// while `inspector_drawer_width` still yields to a narrow map viewport.
+pub const INSPECTOR_EXPANDED_WIDTH: f64 = 440.0;
 pub const INSPECTOR_COLLAPSED_WIDTH: f64 = 48.0;
 const INSPECTOR_MIN_MAP_WIDTH: f64 = 220.0;
 
@@ -149,12 +151,12 @@ impl InspectorIcon {
 }
 
 pub const INSPECTOR_ICONS: &[InspectorIcon] = &[
-    InspectorIcon::new(InspectorSection::Overview, "General", Some('1')),
-    InspectorIcon::new(InspectorSection::History, "Politics", Some('2')),
+    InspectorIcon::new(InspectorSection::Overview, "State", Some('1')),
+    InspectorIcon::new(InspectorSection::History, "History", Some('2')),
     InspectorIcon::new(InspectorSection::Provinces, "Provinces", Some('3')),
     InspectorIcon::new(InspectorSection::Buildings, "Buildings", Some('4')),
     InspectorIcon::new(InspectorSection::Resources, "Resources", Some('5')),
-    InspectorIcon::new(InspectorSection::Diagnostics, "Diagnostics", Some('6')),
+    InspectorIcon::new(InspectorSection::Diagnostics, "Problems", Some('6')),
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -597,7 +599,7 @@ mod tests {
     fn visibility_reserves_only_session_panel_width() {
         assert_eq!(StateInspectorVisibility::Hidden.reserved_width(), 0.0);
         assert_eq!(StateInspectorVisibility::Collapsed.reserved_width(), 48.0);
-        assert_eq!(StateInspectorVisibility::Expanded.reserved_width(), 420.0);
+        assert_eq!(StateInspectorVisibility::Expanded.reserved_width(), 440.0);
     }
 
     #[test]
@@ -626,7 +628,7 @@ mod tests {
         );
         assert_eq!(
             layout.inspector_viewport,
-            Some(MapViewport::new(780.0, 28.0, 420.0, 772.0))
+            Some(MapViewport::new(760.0, 28.0, 440.0, 772.0))
         );
         assert_eq!(layout.hit_test([35.0, 100.0]), InspectorHit::Chrome);
         assert_eq!(layout.hit_test([100.0, 27.0]), InspectorHit::Chrome);
@@ -636,8 +638,8 @@ mod tests {
 
     #[test]
     fn drawer_width_preserves_useful_map_space_in_small_windows() {
-        assert_eq!(inspector_drawer_width(1280.0, 36.0, 420.0), 420.0);
-        assert_eq!(inspector_drawer_width(384.0, 36.0, 420.0), 128.0);
+        assert_eq!(inspector_drawer_width(1280.0, 36.0, 440.0), 440.0);
+        assert_eq!(inspector_drawer_width(384.0, 36.0, 440.0), 128.0);
         assert_eq!(inspector_drawer_width(384.0, 36.0, 48.0), 48.0);
     }
 

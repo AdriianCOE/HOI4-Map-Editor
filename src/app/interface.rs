@@ -95,6 +95,7 @@ pub struct Interface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TooltipKey {
     Button(ButtonId),
+    ToolbarMenu(usize),
     MapViewSelector,
     OverlaysSelector,
 }
@@ -252,7 +253,7 @@ impl Interface {
             } else if compact {
                 "Layers          "
             } else {
-                "Overlays: Province Borders, State Borders   "
+                "Overlays: Province Borders, Country Borders   "
             };
             let base =
                 ButtonBase::new_fit_width(placeholder, [bar_x, bar_y], &PALETTE_BUTTON_TOOLBAR);
@@ -707,9 +708,8 @@ impl Interface {
             .map(|button| button.base.plate().pos[0])
             .fold(self.viewport.window_size[0], f64::min)
             - 8.0;
-        let full_status = workspace_status_text(ictx.province_modified, ictx.pending_states, false);
-        let compact_status =
-            workspace_status_text(ictx.province_modified, ictx.pending_states, true);
+        let full_status = workspace_context_status(ictx, false);
+        let compact_status = workspace_context_status(ictx, true);
         let available = (status_right - status_left).max(0.0);
         let status = if font::get_width_metric_str(&full_status) <= available {
             Some(full_status)
@@ -771,6 +771,15 @@ impl Interface {
         pos: Vector2<f64>,
         ictx: InterfaceDrawContext,
     ) -> Option<TooltipCandidate> {
+        for (index, button) in self.toolbar_buttons.iter().enumerate() {
+            if button.base.test(pos) {
+                return Some(TooltipCandidate {
+                    key: TooltipKey::ToolbarMenu(index),
+                    text: toolbar_menu_tooltip(index).to_owned(),
+                    source: button.base.rect(),
+                });
+            }
+        }
         for button in &self.workspace_buttons {
             if button.base.test(pos)
                 && let Some(text) = button.tooltip(ictx.view_mode)
@@ -1530,6 +1539,65 @@ fn workspace_status_text(province_modified: bool, pending_states: usize, compact
     }
 }
 
+fn workspace_context_status(ictx: InterfaceDrawContext, compact: bool) -> String {
+    let domain = if ictx.state_actions.state_view {
+        "States"
+    } else {
+        "Provinces"
+    };
+    let tool = if ictx.state_actions.state_view {
+        ["Select", "Pan", "Lasso", "Brush", "Fill"]
+            .get(ictx.state_tool.unwrap_or_default())
+            .copied()
+            .unwrap_or("Select")
+    } else {
+        match ictx.selected_tool {
+            Some(0) => "Paint",
+            Some(1) => "Fill",
+            Some(2) => "Lasso",
+            _ => "Inspect",
+        }
+    };
+    let focus = if let Some(state_id) = ictx.active_state_id {
+        if ictx.selected_state_provinces > 1 {
+            format!(
+                " · State {state_id} · {} selected",
+                ictx.selected_state_provinces
+            )
+        } else {
+            format!(" · State {state_id}")
+        }
+    } else if let Some(province_id) = ictx.active_province_id {
+        format!(" · Province {province_id}")
+    } else {
+        String::new()
+    };
+    let safety = if ictx.dated_history_protected {
+        " · dated history protected"
+    } else {
+        ""
+    };
+    let dirty = workspace_status_text(ictx.province_modified, ictx.pending_states, compact);
+    if compact {
+        format!("{domain} · {tool} | {dirty}")
+    } else {
+        format!("{domain} · {tool}{focus}{safety} | {dirty}")
+    }
+}
+
+fn toolbar_menu_tooltip(index: usize) -> &'static str {
+    [
+        "File\nOpen projects, save reviewed changes, and export province maps.",
+        "Edit\nUndo, redo, selection, and the tools for the active workspace.",
+        "View\nChoose a base map, toggle overlays, open panels, and reset the camera.",
+        "Tools\nRun validation and configure the optional base-game definition source.",
+        "Help\nVersion, logs, licensing, and support information.",
+    ]
+    .get(index)
+    .copied()
+    .unwrap_or("Application commands")
+}
+
 fn draw_chevron(ctx: Context, plate: &PlateComponent, open: bool, gl: &mut GlGraphics) {
     let center = [
         plate.pos[0] + plate.size[0] - 11.0,
@@ -1649,6 +1717,7 @@ pub enum ButtonId {
     ToolbarViewToggleImageOverlay,
     ToolbarViewImageOverlayPanel,
     ToolbarViewToggleStateBoundaries,
+    ToolbarViewToggleCountryBorders,
     ToolbarViewToggleProvinceIds,
     ToolbarViewToggleProvinceBoundaries,
     ToolbarViewToggleRiverOverlay,
@@ -1719,7 +1788,7 @@ fn map_view_button_active(id: ButtonId, view: Option<MapViewMode>) -> bool {
     )
 }
 
-fn overlay_button_active(id: ButtonId, enabled: [bool; 9]) -> bool {
+fn overlay_button_active(id: ButtonId, enabled: [bool; 10]) -> bool {
     let index = match id {
         ButtonId::ToolbarViewToggleRiverOverlay => 0,
         ButtonId::ToolbarViewToggleAdjacencies => 1,
@@ -1730,12 +1799,13 @@ fn overlay_button_active(id: ButtonId, enabled: [bool; 9]) -> bool {
         ButtonId::ToolbarViewToggleResourcesOverlay => 6,
         ButtonId::ToolbarViewToggleVictoryPointsOverlay => 7,
         ButtonId::ToolbarViewToggleDmzOverlay => 8,
+        ButtonId::ToolbarViewToggleCountryBorders => 9,
         _ => return false,
     };
     enabled[index]
 }
 
-fn overlay_summary(enabled: [bool; 9]) -> String {
+fn overlay_summary(enabled: [bool; 10]) -> String {
     let labels = [
         "Rivers",
         "Adjacencies",
@@ -1746,6 +1816,7 @@ fn overlay_summary(enabled: [bool; 9]) -> String {
         "Resources",
         "Victory Points",
         "Demilitarized Zones",
+        "Country Borders",
     ];
     let active = labels
         .into_iter()
@@ -2041,6 +2112,11 @@ const WORKSPACE_DROPDOWNS: &[(&str, &[(&str, &str, ButtonId)], bool, bool)] = &[
                 "",
                 ButtonId::ToolbarViewToggleStateBoundaries,
             ),
+            (
+                "Country Borders",
+                "",
+                ButtonId::ToolbarViewToggleCountryBorders,
+            ),
             ("Resources", "", ButtonId::ToolbarViewToggleResourcesOverlay),
             (
                 "Victory Points",
@@ -2261,6 +2337,11 @@ const TOOLBAR_PRIMITIVE: ToolbarPrimitive<'static> = &[
                 ButtonId::ToolbarViewToggleStateBoundaries,
             ),
             (
+                "Country Borders",
+                "",
+                ButtonId::ToolbarViewToggleCountryBorders,
+            ),
+            (
                 "Panels: Image Overlay",
                 "",
                 ButtonId::ToolbarViewImageOverlayPanel,
@@ -2447,8 +2528,8 @@ mod tests {
             view_mode: Some(ViewMode::Color),
             selected_tool: Some(0),
             state_tool: None,
-            enabled_options: [false; 9],
-            available_options: [true; 9],
+            enabled_options: [false; 10],
+            available_options: [true; 10],
             states_available: true,
             state_actions: StateActionAvailability {
                 state_view,
@@ -2457,6 +2538,10 @@ mod tests {
             blocks_tooltips: false,
             province_modified: false,
             pending_states: 0,
+            active_state_id: None,
+            active_province_id: None,
+            selected_state_provinces: 0,
+            dated_history_protected: false,
         }
     }
 
@@ -2604,6 +2689,32 @@ mod tests {
     }
 
     #[test]
+    fn workspace_context_names_the_domain_tool_focus_and_history_limit() {
+        let mut ictx = context(true);
+        ictx.state_tool = Some(3);
+        ictx.active_state_id = Some(42);
+        ictx.selected_state_provinces = 3;
+        ictx.dated_history_protected = true;
+        ictx.pending_states = 1;
+
+        let status = workspace_context_status(ictx, false);
+        assert!(status.contains("States · Brush · State 42 · 3 selected"));
+        assert!(status.contains("dated history protected"));
+        assert!(status.contains("States: 1 pending changes"));
+        assert_eq!(
+            workspace_context_status(ictx, true),
+            "States · Brush | Map: Saved | States: 1"
+        );
+    }
+
+    #[test]
+    fn toolbar_menu_tooltips_explain_the_five_product_groups() {
+        assert!(toolbar_menu_tooltip(0).contains("Open projects"));
+        assert!(toolbar_menu_tooltip(2).contains("overlays"));
+        assert!(toolbar_menu_tooltip(99).contains("Application commands"));
+    }
+
+    #[test]
     fn open_menu_owns_overlapping_clicks_and_outside_close() {
         let mut interface = interface();
         let ictx = context(true);
@@ -2637,7 +2748,9 @@ mod tests {
 
     #[test]
     fn view_menu_reflects_independent_overlay_states() {
-        let enabled = [true, false, true, false, true, true, false, false, false];
+        let enabled = [
+            true, false, true, false, true, true, false, false, false, false,
+        ];
 
         assert!(overlay_button_active(
             ButtonId::ToolbarViewToggleRiverOverlay,
@@ -2677,10 +2790,12 @@ mod tests {
     #[test]
     fn compact_overlay_summary_lists_only_enabled_layers() {
         assert_eq!(
-            overlay_summary([true, false, false, false, true, false, false, false, false]),
+            overlay_summary([
+                true, false, false, false, true, false, false, false, false, false
+            ]),
             "Rivers, State Borders"
         );
-        assert_eq!(overlay_summary([false; 9]), "None");
+        assert_eq!(overlay_summary([false; 10]), "None");
     }
 
     #[test]

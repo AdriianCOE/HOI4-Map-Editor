@@ -1,6 +1,6 @@
 use super::{
-    DatedHistoryBlock, PdxBlock, PdxDocument, PdxEntry, PdxScalar, PdxScalarKind, PdxValue,
-    StateData, SyntaxDiagnosticKind, VictoryPoint,
+    DatedHistoryBlock, Hoi4Date, PdxBlock, PdxDocument, PdxEntry, PdxScalar, PdxScalarKind,
+    PdxValue, StateData, StateHistoryDelta, SyntaxDiagnosticKind, VictoryPoint,
 };
 use crate::app::project::{DiagnosticSeverity, ProjectDiagnostic, ProjectDiagnosticKind};
 
@@ -326,10 +326,24 @@ impl<'a> Extractor<'a> {
                 }
                 Some("victory_points") => self.extract_victory_points(entry, state),
                 Some("buildings") => self.extract_buildings(entry, state),
-                Some(date) if is_date(date) => state.history.dated_blocks.push(DatedHistoryBlock {
-                    date: date.to_string(),
-                    span: entry.span,
-                }),
+                Some(date) if Hoi4Date::parse(date).is_some() => {
+                    let Some(dated_history) = entry.value.as_block() else {
+                        self.push(
+                            ProjectDiagnosticKind::InvalidField,
+                            DiagnosticSeverity::Error,
+                            Some(entry.span),
+                            "dated history must be a block",
+                        );
+                        continue;
+                    };
+                    let mut dated_state = StateData::default();
+                    self.extract_history(dated_history, &mut dated_state);
+                    state.history.dated_blocks.push(DatedHistoryBlock {
+                        date: Hoi4Date::parse(date).expect("date was checked above"),
+                        span: entry.span,
+                        changes: history_delta(dated_state.history),
+                    });
+                }
                 _ => {}
             }
         }
@@ -657,20 +671,18 @@ fn parse_f64(text: &str) -> Option<f64> {
     text.parse::<f64>().ok().filter(|value| value.is_finite())
 }
 
-fn is_date(text: &str) -> bool {
-    let mut parts = text.split('.');
-    let (Some(year), Some(month), Some(day), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
-    };
-
-    !year.is_empty()
-        && !month.is_empty()
-        && !day.is_empty()
-        && year.chars().all(|ch| ch.is_ascii_digit())
-        && month.chars().all(|ch| ch.is_ascii_digit())
-        && day.chars().all(|ch| ch.is_ascii_digit())
+fn history_delta(history: super::StateHistory) -> StateHistoryDelta {
+    StateHistoryDelta {
+        owner: history.owner,
+        controller: history.controller,
+        added_cores: history.cores,
+        removed_cores: history.removed_cores,
+        added_claims: history.claims,
+        removed_claims: history.removed_claims,
+        victory_points: history.victory_points,
+        state_buildings: history.state_buildings,
+        province_buildings: history.province_buildings,
+    }
 }
 
 #[cfg(test)]
@@ -822,7 +834,31 @@ mod tests {
         let state = result.data.expect("state data");
         assert!(result.diagnostics.is_empty());
         assert_eq!(state.history.dated_blocks.len(), 1);
-        assert_eq!(state.history.dated_blocks[0].date, "1939.1.1");
+        assert_eq!(state.history.dated_blocks[0].date.to_string(), "1939.1.1");
+        assert!(
+            state.history.dated_blocks[0]
+                .changes
+                .added_cores
+                .contains("ABC")
+        );
+        assert_eq!(
+            state.history.dated_blocks[0].changes.state_buildings["infrastructure"],
+            1
+        );
+    }
+
+    #[test]
+    fn parses_four_part_dated_history_and_its_supported_changes() {
+        let result = extract_state(&parse_text(
+            "dated.txt",
+            "state={ id=2 provinces={ 2 } history={ owner=TAG 1924.1.1.12={ controller=KOZ remove_core_of=TAG add_claim_by=KOZ victory_points={ 2 8 } } } }",
+        ));
+        let dated = &result.data.unwrap().history.dated_blocks[0];
+        assert_eq!(dated.date.to_string(), "1924.1.1.12");
+        assert_eq!(dated.changes.controller.as_deref(), Some("KOZ"));
+        assert!(dated.changes.removed_cores.contains("TAG"));
+        assert!(dated.changes.added_claims.contains("KOZ"));
+        assert_eq!(dated.changes.victory_points[0].value, 8);
     }
 
     #[test]

@@ -465,12 +465,13 @@ pub fn plan_state_patches(project: &Hoi4Project, edit: &StateEditSession) -> Pro
                     document.path.clone(),
                     SourceFingerprint::from_bytes(document.original_bytes()),
                 );
+                let effective_baseline = project.effective_state_history(baseline).data;
                 let modification = plan_modification(
                     project,
                     edit,
                     document,
                     state_id,
-                    baseline,
+                    &effective_baseline,
                     &working,
                     &mut phase_timings,
                 );
@@ -1227,7 +1228,25 @@ fn plan_history(
         || baseline.history.controller != working.history.controller
         || baseline.history.cores != working.history.cores
         || baseline.history.claims != working.history.claims;
-    if political_changed && !baseline.history.dated_blocks.is_empty() {
+    let victory_points_changed = !victory_points_equal(
+        &baseline.history.victory_points,
+        &working.history.victory_points,
+    );
+    let buildings_changed = baseline.history.state_buildings != working.history.state_buildings
+        || baseline.history.province_buildings != working.history.province_buildings;
+    if (political_changed || victory_points_changed || buildings_changed)
+        && !baseline.history.dated_blocks.is_empty()
+    {
+        let mut fields = Vec::new();
+        if political_changed {
+            fields.push("Political");
+        }
+        if victory_points_changed {
+            fields.push("Victory Points");
+        }
+        if buildings_changed {
+            fields.push("Buildings");
+        }
         builder.diagnostic(
             PatchDiagnosticKind::DatedHistoryConflict,
             PatchSafety::Blocked,
@@ -1237,41 +1256,45 @@ fn plan_history(
                 .dated_blocks
                 .first()
                 .map(|block| block.span),
-            "Political edits cannot be proven safe while dated history blocks are present.",
+            format!(
+                "{} edits cannot be proven safe while dated history blocks are present. \
+                 The displayed effective values may come from dated history and cannot be rewritten safely.",
+                fields.join(", ")
+            ),
             "Edit dated history explicitly in a later phase.",
         );
-    } else {
-        plan_optional_scalar(
-            builder,
-            history,
-            "owner",
-            baseline.history.owner.as_deref(),
-            working.history.owner.as_deref(),
-            str::to_owned,
-        );
-        plan_optional_scalar(
-            builder,
-            history,
-            "controller",
-            baseline.history.controller.as_deref(),
-            working.history.controller.as_deref(),
-            str::to_owned,
-        );
-        plan_tag_set(
-            builder,
-            history,
-            "add_core_of",
-            &baseline.history.cores,
-            &working.history.cores,
-        );
-        plan_tag_set(
-            builder,
-            history,
-            "add_claim_by",
-            &baseline.history.claims,
-            &working.history.claims,
-        );
+        return;
     }
+    plan_optional_scalar(
+        builder,
+        history,
+        "owner",
+        baseline.history.owner.as_deref(),
+        working.history.owner.as_deref(),
+        str::to_owned,
+    );
+    plan_optional_scalar(
+        builder,
+        history,
+        "controller",
+        baseline.history.controller.as_deref(),
+        working.history.controller.as_deref(),
+        str::to_owned,
+    );
+    plan_tag_set(
+        builder,
+        history,
+        "add_core_of",
+        &baseline.history.cores,
+        &working.history.cores,
+    );
+    plan_tag_set(
+        builder,
+        history,
+        "add_claim_by",
+        &baseline.history.claims,
+        &working.history.claims,
+    );
     plan_victory_points(builder, project, edit, history, baseline, working);
     plan_buildings(builder, project, edit, history, baseline, working);
 }
@@ -2734,6 +2757,49 @@ mod tests {
             String::from_utf8(after).unwrap(),
             text.replace("142000", "150000")
         );
+    }
+
+    #[test]
+    fn core_and_claim_removal_delete_loaded_history_entries() {
+        let text = "state={ id=1 provinces={ 1 } history={ add_core_of=GER add_claim_by=ITA } }";
+        let syntax = parse_text("fixture.txt", text);
+        let data = extract_state(&syntax).data;
+        let document = StateDocument {
+            path: PathBuf::from("fixture.txt"),
+            original_bytes: Arc::from(text.as_bytes()),
+            exact_utf8: true,
+            syntax,
+            data,
+            diagnostics: Vec::new(),
+            modified: false,
+        };
+        let mut builder = FileBuilder::new(&document, 1);
+        let history =
+            as_block(entries(root_state_block(&document.syntax).unwrap(), "history")[0]).unwrap();
+        plan_tag_set(
+            &mut builder,
+            history,
+            "add_core_of",
+            &BTreeSet::from(["GER".to_owned()]),
+            &BTreeSet::new(),
+        );
+        plan_tag_set(
+            &mut builder,
+            history,
+            "add_claim_by",
+            &BTreeSet::from(["ITA".to_owned()]),
+            &BTreeSet::new(),
+        );
+
+        let after = apply_operations(text.as_bytes(), &builder.operations).unwrap();
+        let reloaded = extract_state(&parse_text(
+            "fixture.txt",
+            String::from_utf8(after).unwrap(),
+        ))
+        .data
+        .unwrap();
+        assert!(reloaded.history.cores.is_empty());
+        assert!(reloaded.history.claims.is_empty());
     }
 
     #[test]

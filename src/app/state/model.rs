@@ -5,6 +5,53 @@ use std::sync::Arc;
 use super::{PdxDocument, TextSpan};
 use crate::app::project::ProjectDiagnostic;
 
+/// A calendar instant used by HOI4 history and bookmark scripts.
+///
+/// The engine commonly writes dates as `year.month.day.hour`; state history
+/// usually omits the hour.  Keeping a parsed value avoids accidental lexical
+/// ordering (`1939.10.1` before `1939.2.1`) and gives omitted hours the
+/// deterministic value zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Hoi4Date {
+    pub year: u32,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+}
+
+impl Hoi4Date {
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split('.');
+        let year = parts.next()?.parse().ok()?;
+        let month = parts.next()?.parse().ok()?;
+        let day = parts.next()?.parse().ok()?;
+        let hour = match parts.next() {
+            Some(value) => value.parse().ok()?,
+            None => 0,
+        };
+        (parts.next().is_none()
+            && (1..=12).contains(&month)
+            && (1..=31).contains(&day)
+            && hour <= 23)
+            .then_some(Self {
+                year,
+                month,
+                day,
+                hour,
+            })
+    }
+}
+
+impl std::fmt::Display for Hoi4Date {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.hour == 0 {
+            write!(f, "{}.{}.{}", self.year, self.month, self.day)
+        } else {
+            write!(f, "{}.{}.{}.{}", self.year, self.month, self.day, self.hour)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StateDocument {
     pub path: PathBuf,
@@ -64,13 +111,40 @@ pub struct VictoryPoint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatedHistoryBlock {
-    pub date: String,
+    pub date: Hoi4Date,
     pub span: TextSpan,
+    pub changes: StateHistoryDelta,
+}
+
+/// Supported operations declared inside one dated state-history block.
+/// Unknown script remains in the parsed source document and is deliberately
+/// not represented here; this is a read model, not a script rewriter.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StateHistoryDelta {
+    pub owner: Option<String>,
+    pub controller: Option<String>,
+    pub added_cores: BTreeSet<String>,
+    pub removed_cores: BTreeSet<String>,
+    pub added_claims: BTreeSet<String>,
+    pub removed_claims: BTreeSet<String>,
+    pub victory_points: Vec<VictoryPoint>,
+    pub state_buildings: BTreeMap<String, i64>,
+    pub province_buildings: BTreeMap<u32, BTreeMap<String, i64>>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{StateData, VictoryPoint};
+    use super::{Hoi4Date, StateData, VictoryPoint};
+
+    #[test]
+    fn parses_and_orders_calendar_dates_numerically() {
+        assert_eq!(Hoi4Date::parse("1924.1.1.12").unwrap().hour, 12);
+        assert_eq!(Hoi4Date::parse("1939.1.1").unwrap().hour, 0);
+        assert!(Hoi4Date::parse("1939.10.1").unwrap() > Hoi4Date::parse("1939.2.1").unwrap());
+        assert!(Hoi4Date::parse("1939.1").is_none());
+        assert!(Hoi4Date::parse("1939.1.1.0.1").is_none());
+        assert!(Hoi4Date::parse("1939.13.1").is_none());
+    }
 
     #[test]
     fn state_model_keeps_open_ended_names_and_large_values() {

@@ -332,6 +332,9 @@ mod tests {
             load_summary: Default::default(),
             logistics: crate::app::project::LogisticsLoadResult::default(),
             strategic_regions: crate::app::project::StrategicRegionLoadResult::default(),
+            effective_history_date: crate::app::project::EffectiveHistoryDate::Unavailable {
+                reason: "test fixture".to_owned(),
+            },
         }
     }
 

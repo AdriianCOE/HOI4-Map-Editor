@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.0-preview.4 - Unreleased
+## v0.1.0-preview.5 - 2026-09-01
 
 ### Added
 
@@ -26,6 +26,17 @@
   current diagnostics without saving.
 - Province assignment to States before first Save, including stable new
   Province IDs and unambiguous split inheritance.
+- Individual Core and Claim removal in the State Inspector. Changes remain
+  transactional, undoable, and are saved through the existing source-aware
+  State patch flow.
+- Country Borders, a read-only overlay that marks land-province boundaries
+  whose effective State owners differ.
+- Initial-bookmark State-history resolution. The Inspector now evaluates
+  supported dated owner/controller, core/claim, building, and victory-point
+  changes through the earliest source-resolved bookmark date, and identifies
+  declared, dated, and implicit controller values.
+- Conservative save protection for effective Victory Point and building values
+  from dated State history; they remain readable but are not rewritten.
 
 ### Changed
 
@@ -42,6 +53,15 @@
 - Project switching replaces project-scoped map/session/cache state instead of
   reusing data from a previously opened project.
 - Resources is presented as an overlay rather than as a standalone Map View.
+- The State Inspector is wider and uses concise State, History, and Problems
+  sections so tag actions and provenance remain readable in a map-first layout.
+- The editor shell now separates global commands, workspace context, map tools,
+  map views, overlays, and project actions more clearly. Its status area shows
+  the active domain/tool, focused State or Province, selection count, and
+  pending changes when space permits; collection tags and validation severity
+  accents improve scanability without changing edit behavior.
+- Dated-history protection is now visible before save review in the Inspector
+  and when opening an affected State or Province draft.
 - Cross-platform paths, clipboard handling, system-font fallback discovery, and
   Unix Save Project durability barriers were tightened for preview use.
 
@@ -76,9 +96,9 @@
   assumptions; it does not guarantee every arbitrary map configuration is valid
   in-game.
 - Adjacencies can be inspected and preserved but do not yet have an editing UI.
-- Merge Brush, direct resource painting, Country editing, Strategic Regions,
-  rivers, heightmaps, supply networks, and tree maps do not yet have complete
-  dedicated editing support.
+- Merge Brush, direct resource painting, Country editing, Strategic Region
+  creation/deletion/property editing, rivers, heightmaps, supply networks, and
+  tree maps do not yet have complete dedicated editing support.
 
 ## v0.1.0-preview.2 - Unreleased
 

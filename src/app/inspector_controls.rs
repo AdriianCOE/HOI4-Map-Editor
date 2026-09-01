@@ -48,7 +48,7 @@ pub enum InspectorControlId {
     Decrement(InspectorValueTarget),
     Increment(InspectorValueTarget),
     Select(InspectorPickTarget),
-    Remove(InspectorPickTarget),
+    Remove(InspectorPickTarget, usize),
     RemoveValue(InspectorValueTarget),
     Add(InspectorPickTarget),
     MapPick(MapTagPickTarget),

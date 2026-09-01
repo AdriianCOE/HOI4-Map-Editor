@@ -26,12 +26,15 @@ not modify the game itself.
   and backed up before the mod's files are replaced.
 - State creation, removal, and province assignment via Brush, Lasso, and
   Fill.
-- State Inspector for owner, controller, colors, cores, claims, resources,
-  buildings, and victory points.
+- State Inspector for owner, controller, colors, cores, claims (including
+  individual tag removal), resources, buildings, and victory points. Supported
+  dated State history is resolved at the project's initial bookmark, with
+  declared/dated/implicit controller provenance shown in the History tab.
 - Political View with country colors, localized names, and flags resolved from
   the user's local mod/base-game files.
 - Read-only Resources overlay with State resource quantities and runtime icon
   fallback.
+- Read-only Country Borders overlay, based on effective State ownership.
 - Review Project Changes -> validate in a temporary workspace -> Save Project
   with backup, rollback, and interrupted-save recovery.
 - Contextual search with focused map navigation.
@@ -82,6 +85,7 @@ Copy the matching release section from `CHANGELOG.md` at publish time.
       the Inspector visible.
 - [ ] States workspace, Political View, a state with owner/controller/cores
       set, State Inspector open.
+- [ ] Country Borders overlay over neighboring States with different owners.
 - [ ] Resources overlay enabled over a base map, with a test state showing
       resource quantities.
 - [ ] Review Project Changes / Save Project dialog mid-flow.

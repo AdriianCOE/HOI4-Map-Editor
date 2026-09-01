@@ -161,6 +161,8 @@ pub struct MapLayerState {
     pub show_province_ids: bool,
     pub show_province_boundaries: bool,
     pub show_state_boundaries: bool,
+    /// Read-only borders between adjacent land States with different owners.
+    pub show_country_borders: bool,
     /// Resource labels are a presentation layer over the selected base map.
     pub show_resources: bool,
     /// Read-only markers derived from the latest validation report.
@@ -183,6 +185,7 @@ impl Default for MapLayerState {
             show_province_ids: false,
             show_province_boundaries: false,
             show_state_boundaries: true,
+            show_country_borders: false,
             show_resources: false,
             show_problems: false,
             show_victory_points: false,

@@ -12,6 +12,16 @@ A Workspace chooses what you edit. A Map View changes only the rendered base
 map. Borders, labels, rivers, adjacencies, and Image Overlay are independent
 visual layers and never mark a project as modified.
 
+The shell keeps these decisions separate: the top menu contains global
+commands, the workspace bar shows the active domain, tool, selection, and
+unsaved-work summary, the left rail contains the current domain's tools, and
+the Inspector and Problems panels remain supporting views over the map. Hover
+controls for a short explanation and any available shortcut.
+
+**Country Borders** is a read-only overlay. It highlights boundaries between
+adjacent land provinces when their effective State owners differ. It changes no
+selection, project data, dirty state, or save behavior.
+
 **Political** is a read-only Map View. It uses country colors, localized names,
 and flags resolved from the local mod/base-game installation when available.
 
@@ -61,7 +71,21 @@ never change the current project or its modified indicator.
 ## States workspace
 
 Select a state from the map or Inspector. Use the Inspector for properties,
-owner/controller, cores, claims, resources, buildings, and victory points.
+owner/controller, cores, claims, resources, buildings, and victory points. Use
+the remove control beside a Core or Claim tag to remove that individual tag;
+the change remains undoable until Save Project.
+
+The **History** tab uses the earliest valid bookmark date found through the
+active project source graph (mod, then compatible lower sources). It applies
+the editor-supported dated history commands only up to that initial date and
+labels owner/controller as declared, dated, or implicit from owner. If no
+bookmark can be resolved, the Inspector explicitly reports the direct-history
+fallback and does not guess a date. Dated source blocks are never flattened;
+political, Victory Point, and building edits to such a State remain blocked at
+save preview until dedicated dated-history editing exists. The Inspector marks
+the selected State as dated-history protected and opening a State or Province
+draft explains that the displayed values may be effective dated values the
+editor cannot safely rewrite.
 Brush, Lasso, and Fill preview province-level changes in memory. `Esc` cancels;
 `Enter` confirms an applicable preview.
 

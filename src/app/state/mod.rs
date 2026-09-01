@@ -5,7 +5,10 @@ mod syntax;
 
 pub use extractor::{ExtractStateResult, extract_state};
 pub use loader::{StateLoadBatch, load_state_documents};
-pub use model::{DatedHistoryBlock, StateData, StateDocument, StateHistory, VictoryPoint};
+pub use model::{
+    DatedHistoryBlock, Hoi4Date, StateData, StateDocument, StateHistory, StateHistoryDelta,
+    VictoryPoint,
+};
 pub use syntax::{
     NewlineStyle, ParseOptions, PdxBlock, PdxDocument, PdxEntry, PdxScalar, PdxScalarKind,
     PdxValue, SourceText, SyntaxDiagnostic, SyntaxDiagnosticKind, TextSpan, Token, TokenKind, lex,

@@ -1660,7 +1660,12 @@ impl StateEditSession {
         }
     }
 
-    fn state_has_dated_history(&self, state_id: u32) -> bool {
+    /// Returns whether the loaded source for a State contains dated history.
+    ///
+    /// This is intentionally baseline-backed: UI may use it to explain the
+    /// patch safety limitation, while the patch planner remains the authority
+    /// that blocks an unsafe write.
+    pub fn state_has_dated_history(&self, state_id: u32) -> bool {
         self.baseline.dated_history_states.contains(&state_id)
     }
 }
@@ -1764,10 +1769,12 @@ impl StateWorkingSet {
             else {
                 continue;
             };
-            properties_by_state.insert(state_id, EditableStateProperties::from_state(data));
-            victory_points_by_state.insert(state_id, data.history.victory_points.clone());
-            province_buildings_by_state.insert(state_id, data.history.province_buildings.clone());
-            demilitarized_zone_by_state.insert(state_id, data.demilitarized_zone);
+            let effective = project.effective_state_history(data).data;
+            properties_by_state.insert(state_id, EditableStateProperties::from_state(&effective));
+            victory_points_by_state.insert(state_id, effective.history.victory_points.clone());
+            province_buildings_by_state
+                .insert(state_id, effective.history.province_buildings.clone());
+            demilitarized_zone_by_state.insert(state_id, effective.demilitarized_zone);
             if !data.history.dated_blocks.is_empty() {
                 dated_history_states.insert(state_id);
             }
@@ -2122,7 +2129,9 @@ mod tests {
         ProjectPaths, RoundTripCancellation, RoundTripStatus, RoundTripValidator, StateLoadSummary,
         plan_state_patches,
     };
-    use crate::app::state::{StateDocument, parse_text};
+    use crate::app::state::{
+        DatedHistoryBlock, Hoi4Date, StateDocument, StateHistoryDelta, TextSpan, parse_text,
+    };
     use crate::config::Config;
     use crate::util::files::Location;
     use std::path::PathBuf;
@@ -2167,6 +2176,9 @@ mod tests {
             load_summary: StateLoadSummary::default(),
             logistics: crate::app::project::LogisticsLoadResult::default(),
             strategic_regions: crate::app::project::StrategicRegionLoadResult::default(),
+            effective_history_date: crate::app::project::EffectiveHistoryDate::Unavailable {
+                reason: "test fixture".to_owned(),
+            },
         };
         project.states[0]
             .data
@@ -2229,6 +2241,76 @@ mod tests {
             last_changed_provinces: BTreeSet::new(),
             revision: 0,
         }
+    }
+
+    #[test]
+    fn working_set_uses_the_project_initial_bookmark_for_political_values() {
+        let sources = crate::app::project::ProjectSources::for_test_placeholder();
+        let bookmark_source = sources.source_files().definition_csv.clone();
+        let mut state = StateData {
+            id: Some(1),
+            ..Default::default()
+        };
+        state.provinces.insert(10);
+        state.history.owner = Some("TOL".to_owned());
+        state.history.dated_blocks = vec![
+            DatedHistoryBlock {
+                date: Hoi4Date::parse("1924.1.1.12").unwrap(),
+                span: TextSpan::default(),
+                changes: StateHistoryDelta {
+                    controller: Some("KOZ".to_owned()),
+                    ..Default::default()
+                },
+            },
+            DatedHistoryBlock {
+                date: Hoi4Date::parse("1925.1.1.12").unwrap(),
+                span: TextSpan::default(),
+                changes: StateHistoryDelta {
+                    owner: Some("LATER".to_owned()),
+                    ..Default::default()
+                },
+            },
+        ];
+        let project = Hoi4Project {
+            paths: ProjectPaths {
+                root: PathBuf::new(),
+                map_directory: PathBuf::new(),
+                provinces_bmp: PathBuf::new(),
+                definition_csv: PathBuf::new(),
+                adjacencies_csv: None,
+                rivers_bmp: None,
+                continent_txt: None,
+                history_directory: PathBuf::new(),
+                states_directory: PathBuf::new(),
+                sources,
+            },
+            states: vec![StateDocument {
+                path: PathBuf::from("1.txt"),
+                original_bytes: Vec::new().into(),
+                exact_utf8: true,
+                syntax: parse_text("1.txt", ""),
+                data: Some(state),
+                diagnostics: Vec::new(),
+                modified: false,
+            }],
+            states_by_id: BTreeMap::from([(1, 0)]),
+            state_by_province: HashMap::from([(10, 1)]),
+            ambiguous_provinces: BTreeMap::new(),
+            unassigned_land_provinces: BTreeSet::new(),
+            diagnostics: Vec::new(),
+            load_summary: StateLoadSummary::default(),
+            logistics: crate::app::project::LogisticsLoadResult::default(),
+            strategic_regions: crate::app::project::StrategicRegionLoadResult::default(),
+            effective_history_date: crate::app::project::EffectiveHistoryDate::Resolved {
+                date: Hoi4Date::parse("1924.1.1.12").unwrap(),
+                source: bookmark_source,
+            },
+        };
+        let working =
+            StateWorkingSet::from_project(&project, &BTreeMap::from([(10, ProvinceKind::Land)]));
+        let data = working.state_data(1);
+        assert_eq!(data.history.owner.as_deref(), Some("TOL"));
+        assert_eq!(data.history.controller.as_deref(), Some("KOZ"));
     }
 
     #[test]
@@ -2296,6 +2378,39 @@ mod tests {
         assert!(edit.redo());
         assert!(edit.redo());
         assert_eq!(edit.state_data(2).unwrap().manpower, Some(150_000));
+    }
+
+    #[test]
+    fn core_and_claim_changes_are_dirty_and_undoable() {
+        let mut edit = session();
+        for working_set in [&mut edit.baseline, &mut edit.working] {
+            let properties = working_set.properties_by_state.get_mut(&1).unwrap();
+            properties.cores = BTreeSet::from(["GER".to_owned(), "POL".to_owned()]);
+            properties.claims = BTreeSet::from(["ITA".to_owned()]);
+        }
+
+        let mut after = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+        after.cores.remove("POL");
+        after.claims.clear();
+        assert!(edit.update_state_properties(1, after).unwrap());
+        assert!(edit.is_state_dirty(1));
+        assert_eq!(
+            edit.state_data(1).unwrap().history.cores,
+            BTreeSet::from(["GER".to_owned()])
+        );
+        assert!(edit.state_data(1).unwrap().history.claims.is_empty());
+
+        assert!(edit.undo());
+        assert_eq!(
+            edit.state_data(1).unwrap().history.cores,
+            BTreeSet::from(["GER".to_owned(), "POL".to_owned()])
+        );
+        assert_eq!(
+            edit.state_data(1).unwrap().history.claims,
+            BTreeSet::from(["ITA".to_owned()])
+        );
+        assert!(edit.redo());
+        assert!(edit.state_data(1).unwrap().history.claims.is_empty());
     }
 
     #[test]

@@ -304,6 +304,14 @@ impl StatePropertyDraft {
         parse_named_integer_field("State buildings", &self.state_buildings)
     }
 
+    pub fn core_values(&self) -> Result<BTreeSet<String>, Vec<PropertyValidationError>> {
+        parse_identifier_values("Cores", &self.cores)
+    }
+
+    pub fn claim_values(&self) -> Result<BTreeSet<String>, Vec<PropertyValidationError>> {
+        parse_identifier_values("Claims", &self.claims)
+    }
+
     pub fn set_resource(
         &mut self,
         name: &str,
@@ -343,6 +351,20 @@ impl StatePropertyDraft {
         Ok(())
     }
 
+    pub fn remove_core(&mut self, tag: &str) -> Result<(), Vec<PropertyValidationError>> {
+        let mut values = self.core_values()?;
+        values.remove(tag);
+        self.cores = values.into_iter().collect::<Vec<_>>().join(", ");
+        Ok(())
+    }
+
+    pub fn remove_claim(&mut self, tag: &str) -> Result<(), Vec<PropertyValidationError>> {
+        let mut values = self.claim_values()?;
+        values.remove(tag);
+        self.claims = values.into_iter().collect::<Vec<_>>().join(", ");
+        Ok(())
+    }
+
     fn fields(&self) -> [&str; Self::TEXT_FIELD_COUNT] {
         [
             &self.name,
@@ -373,6 +395,19 @@ fn parse_named_integer_field(
 ) -> Result<BTreeMap<String, i64>, Vec<PropertyValidationError>> {
     let mut errors = Vec::new();
     let values = parse_named_integers(field, value, &mut errors);
+    if errors.is_empty() {
+        Ok(values)
+    } else {
+        Err(errors)
+    }
+}
+
+fn parse_identifier_values(
+    field: &'static str,
+    value: &str,
+) -> Result<BTreeSet<String>, Vec<PropertyValidationError>> {
+    let mut errors = Vec::new();
+    let values = parse_identifier_set(field, value, &mut errors);
     if errors.is_empty() {
         Ok(values)
     } else {
@@ -894,5 +929,30 @@ mod tests {
             BTreeMap::from([("infrastructure".to_owned(), 5)])
         );
         assert_eq!(draft.validate().unwrap().resources["steel"], 12);
+    }
+
+    #[test]
+    fn core_and_claim_removal_preserve_a_canonical_net_zero_draft() {
+        let mut draft = StatePropertyDraft::new(
+            269,
+            &EditableStateProperties {
+                cores: BTreeSet::from(["GER".to_owned(), "POL".to_owned()]),
+                claims: BTreeSet::from(["ITA".to_owned()]),
+                ..Default::default()
+            },
+        );
+
+        draft.remove_core("POL").unwrap();
+        draft.remove_claim("ITA").unwrap();
+        assert_eq!(
+            draft.core_values().unwrap(),
+            BTreeSet::from(["GER".to_owned()])
+        );
+        assert!(draft.claim_values().unwrap().is_empty());
+        assert!(draft.is_modified());
+
+        draft.cores = "GER, POL".to_owned();
+        draft.claims = "ITA".to_owned();
+        assert!(!draft.is_modified());
     }
 }

@@ -1364,6 +1364,10 @@ impl App {
                     blocks_tooltips: canvas.blocks_interface_tooltips(),
                     province_modified,
                     pending_states,
+                    active_state_id: canvas.active_state_id(),
+                    active_province_id: canvas.active_province_id(),
+                    selected_state_provinces: canvas.state_selection_count(),
+                    dated_history_protected: canvas.active_state_has_dated_history(),
                 }
             }
             None => InterfaceDrawContext {
@@ -1371,13 +1375,17 @@ impl App {
                 view_mode: None,
                 selected_tool: None,
                 state_tool: None,
-                enabled_options: [false; 9],
-                available_options: [false; 9],
+                enabled_options: [false; 10],
+                available_options: [false; 10],
                 states_available: false,
                 state_actions: StateActionAvailability::default(),
                 blocks_tooltips: false,
                 province_modified: false,
                 pending_states: 0,
+                active_state_id: None,
+                active_province_id: None,
+                selected_state_provinces: 0,
+                dated_history_protected: false,
             },
         }
     }
@@ -1771,6 +1779,9 @@ impl App {
             (Some(canvas), ToolbarImageClear) => canvas.clear_image_overlay(&mut self.alerts),
             (Some(canvas), ToolbarViewToggleStateBoundaries | SidebarOptionStateBoundaries) => {
                 canvas.toggle_state_boundaries(&mut self.alerts)
+            }
+            (Some(canvas), ToolbarViewToggleCountryBorders) => {
+                canvas.toggle_country_borders(&mut self.alerts)
             }
             (Some(canvas), ToolbarViewToggleProvinceIds | SidebarOptionProvinceIds) => {
                 canvas.toggle_province_ids()
@@ -2505,13 +2516,17 @@ pub struct InterfaceDrawContext {
     pub view_mode: Option<ViewMode>,
     pub selected_tool: Option<usize>,
     pub state_tool: Option<usize>,
-    pub enabled_options: [bool; 9],
-    pub available_options: [bool; 9],
+    pub enabled_options: [bool; 10],
+    pub available_options: [bool; 10],
     pub states_available: bool,
     pub state_actions: StateActionAvailability,
     pub blocks_tooltips: bool,
     pub province_modified: bool,
     pub pending_states: usize,
+    pub active_state_id: Option<u32>,
+    pub active_province_id: Option<u32>,
+    pub selected_state_provinces: usize,
+    pub dated_history_protected: bool,
 }
 
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};

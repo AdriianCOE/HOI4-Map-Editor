@@ -339,8 +339,30 @@ pub fn collect_state_boundaries_for(
         .collect()
 }
 
+/// Returns only land boundaries whose adjacent States have distinct effective owners.
+pub fn collect_country_boundaries_for(
+    map: &Map,
+    state_by_province: &HashMap<u32, u32>,
+    owners_by_state: &HashMap<u32, String>,
+) -> Vec<UOrd<Vector2<u32>>> {
+    map.iter_boundaries()
+        .filter_map(|(boundary, _)| {
+            let [a, b] = boundary.into_array();
+            is_country_boundary(
+                country_at_pos(map, state_by_province, owners_by_state, a),
+                country_at_pos(map, state_by_province, owners_by_state, b),
+            )
+            .then_some(boundary)
+        })
+        .collect()
+}
+
 pub fn is_state_boundary(left: Option<u32>, right: Option<u32>) -> bool {
     left.is_some() && right.is_some() && left != right
+}
+
+pub fn is_country_boundary(left: Option<&str>, right: Option<&str>) -> bool {
+    matches!((left, right), (Some(left), Some(right)) if !left.eq_ignore_ascii_case(right))
 }
 
 fn selected_state_id(selection: Option<&StateSelection>) -> Option<u32> {
@@ -371,6 +393,21 @@ fn state_at_pos(
         .and_then(|province_id| state_by_province.get(&province_id).copied())
 }
 
+fn country_at_pos<'a>(
+    map: &Map,
+    state_by_province: &HashMap<u32, u32>,
+    owners_by_state: &'a HashMap<u32, String>,
+    pos: Vector2<u32>,
+) -> Option<&'a str> {
+    let province = map.get_province_at(pos);
+    (province.kind == ProvinceKind::Land)
+        .then_some(province.preserved_id)
+        .flatten()
+        .and_then(|province_id| state_by_province.get(&province_id))
+        .and_then(|state_id| owners_by_state.get(state_id))
+        .map(String::as_str)
+}
+
 fn transparent_selection_buffer(width: u32, height: u32) -> RgbaImage {
     RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]))
 }
@@ -385,7 +422,11 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::app::format::{Definition, DefinitionKind};
+    use crate::app::map::construct_map_data_for_sparse_tests;
     use crate::app::project::{ProjectPaths, StateLoadSummary};
+    use crate::config::Config;
+    use image::{Rgb, RgbImage};
 
     fn project() -> Hoi4Project {
         Hoi4Project {
@@ -410,6 +451,9 @@ mod tests {
             load_summary: StateLoadSummary::default(),
             logistics: crate::app::project::LogisticsLoadResult::default(),
             strategic_regions: crate::app::project::StrategicRegionLoadResult::default(),
+            effective_history_date: crate::app::project::EffectiveHistoryDate::Unavailable {
+                reason: "test fixture".to_owned(),
+            },
         }
     }
 
@@ -527,6 +571,59 @@ mod tests {
         assert!(!is_state_boundary(Some(1), None));
         assert!(!is_state_boundary(None, Some(2)));
         assert!(!is_state_boundary(None, None));
+    }
+
+    #[test]
+    fn country_boundary_rule_requires_distinct_known_owners() {
+        assert!(is_country_boundary(Some("GER"), Some("POL")));
+        assert!(!is_country_boundary(Some("GER"), Some("ger")));
+        assert!(!is_country_boundary(Some("GER"), None));
+        assert!(!is_country_boundary(None, Some("POL")));
+        assert!(!is_country_boundary(None, None));
+    }
+
+    #[test]
+    fn country_boundaries_only_include_land_provinces_with_different_owners() {
+        let colors = [[20, 30, 40], [50, 60, 70], [80, 90, 100], [110, 120, 130]];
+        let map = construct_map_data_for_sparse_tests(
+            RgbImage::from_fn(4, 1, |x, _| Rgb(colors[x as usize])),
+            colors
+                .into_iter()
+                .enumerate()
+                .map(|(index, rgb)| Definition {
+                    id: index as u32 + 1,
+                    rgb,
+                    kind: if index == 3 {
+                        DefinitionKind::Sea
+                    } else {
+                        DefinitionKind::Land
+                    },
+                    coastal: false,
+                    terrain: "plains".to_owned(),
+                    continent: 1,
+                })
+                .collect(),
+            Vec::new(),
+            None,
+            Config {
+                preserve_ids: true,
+                ..Config::default()
+            },
+        )
+        .unwrap()
+        .map;
+        let boundaries = collect_country_boundaries_for(
+            &map,
+            &HashMap::from([(1, 10), (2, 20), (3, 30), (4, 40)]),
+            &HashMap::from([
+                (10, "GER".to_owned()),
+                (20, "POL".to_owned()),
+                (30, "POL".to_owned()),
+                (40, "FRA".to_owned()),
+            ]),
+        );
+
+        assert_eq!(boundaries.len(), 1);
     }
 
     #[test]

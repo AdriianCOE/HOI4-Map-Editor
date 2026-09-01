@@ -40,24 +40,24 @@ use super::problems_ui::{
 };
 use super::project::{
     BrushProvinceClassification, BuildingScope, CombinedRoundTripValidationReport,
-    DiagnosticSeverity, EditableProvinceData, EditableStateProperties, GameDefinitionCatalog,
-    Hoi4Project, LassoSelectionMode, MapViewMode, ProjectGeneration, ProjectPatchPlan,
-    ProjectSavePlan, ProjectValidationReport, ProjectValidationTarget, ProvinceAdjacency,
-    ProvinceDataDraft, ProvinceDataValidationError, ProvinceInclusionMode, ProvinceRemovalPolicy,
-    RecoveryInfo, RoundTripCancellation, RoundTripStage, RoundTripStatus,
-    RoundTripValidationPolicy, RoundTripValidationReport, RoundTripValidator, SaveTransactionState,
-    SourceGeneration, StateBrushMode, StateEditSession, StateFillMode, StateFillPreview,
-    StateFillProvince, StateFillProvinceKind, StateLassoPhase, StatePropertyDraft,
-    StateRemovalPolicy, StateSaveCancellation, StateSaveConditions, StateSaveFault,
-    StateSaveOutcome, StateSaveReport, StateSelection, StrategicRegionEditSession,
+    DiagnosticSeverity, EditableProvinceData, EditableStateProperties, EffectiveHistoryOrigin,
+    GameDefinitionCatalog, Hoi4Project, LassoSelectionMode, MapViewMode, PatchDiagnosticKind,
+    ProjectGeneration, ProjectPatchPlan, ProjectSavePlan, ProjectValidationReport,
+    ProjectValidationTarget, ProvinceAdjacency, ProvinceDataDraft, ProvinceDataValidationError,
+    ProvinceInclusionMode, ProvinceRemovalPolicy, RecoveryInfo, RoundTripCancellation,
+    RoundTripStage, RoundTripStatus, RoundTripValidationPolicy, RoundTripValidationReport,
+    RoundTripValidator, SaveTransactionState, SourceGeneration, StateBrushMode, StateEditSession,
+    StateFillMode, StateFillPreview, StateFillProvince, StateFillProvinceKind, StateLassoPhase,
+    StatePropertyDraft, StateRemovalPolicy, StateSaveCancellation, StateSaveConditions,
+    StateSaveFault, StateSaveOutcome, StateSaveReport, StateSelection, StrategicRegionEditSession,
     StrategicRegionProvinceMembership, WorkingStateOrigin, boundaries_for_state,
-    classify_state_lasso, detect_state_save_recovery, execute_project_save, execute_state_save,
-    format_integer_pt_br, generate_state_view, generate_state_view_for,
-    generate_state_view_region_for, parse_grouped_nonnegative_integer, plan_state_fill,
-    plan_state_patches, plan_strategic_region_patches, recover_interrupted_state_save,
-    sample_segment, save_confirmation_text, select_state_at_for as resolve_state_at_for,
-    selection_overlay_for, state_save_eligibility, validate_project_with_working_context,
-    working_load_result,
+    classify_state_lasso, collect_country_boundaries_for, detect_state_save_recovery,
+    execute_project_save, execute_state_save, format_integer_pt_br, generate_state_view,
+    generate_state_view_for, generate_state_view_region_for, parse_grouped_nonnegative_integer,
+    plan_state_fill, plan_state_patches, plan_strategic_region_patches,
+    recover_interrupted_state_save, sample_segment, save_confirmation_text,
+    select_state_at_for as resolve_state_at_for, selection_overlay_for, state_save_eligibility,
+    validate_project_with_working_context, working_load_result,
 };
 use super::resources::{
     ResourceIconResolver, ResourceMapState, prepare_resource_labels_with_index,
@@ -155,6 +155,8 @@ pub struct Canvas {
     image_overlay_texture: Option<Texture>,
     image_overlay_status: String,
     state_boundaries: Vec<UOrd<Vector2<u32>>>,
+    country_boundaries: Vec<UOrd<Vector2<u32>>>,
+    country_boundaries_revision: Option<u64>,
     province_boundaries: BTreeMap<u32, Vec<UOrd<Vector2<u32>>>>,
     selected_state_boundaries: Vec<UOrd<Vector2<u32>>>,
     selected_province_boundaries: Vec<UOrd<Vector2<u32>>>,
@@ -770,6 +772,8 @@ impl Canvas {
             image_overlay_texture,
             image_overlay_status,
             state_boundaries,
+            country_boundaries: Vec::new(),
+            country_boundaries_revision: None,
             province_boundaries,
             selected_state_boundaries: Vec::new(),
             selected_province_boundaries: Vec::new(),
@@ -905,6 +909,28 @@ impl Canvas {
 
     pub fn map_view_mode(&self) -> MapViewMode {
         self.map_layers.base_view
+    }
+
+    pub fn active_state_id(&self) -> Option<u32> {
+        self.active_state_id
+    }
+
+    pub fn active_province_id(&self) -> Option<u32> {
+        self.active_province_id
+    }
+
+    pub fn state_selection_count(&self) -> usize {
+        self.state_edit_session
+            .as_ref()
+            .map_or(0, |edit| edit.selected_provinces().len())
+    }
+
+    pub fn active_state_has_dated_history(&self) -> bool {
+        self.active_state_id.is_some_and(|state_id| {
+            self.state_edit_session
+                .as_ref()
+                .is_some_and(|edit| edit.state_has_dated_history(state_id))
+        })
     }
 
     pub fn workspace_mode(&self) -> WorkspaceMode {
@@ -1512,9 +1538,17 @@ impl Canvas {
         self.property_editor_field = 0;
         self.property_editor_replace_field = false;
         self.refresh_state_information();
-        alerts.push(Ok(format!(
-            "Editing State {state_id} properties in a temporary draft"
-        )));
+        if self
+            .state_edit_session
+            .as_ref()
+            .is_some_and(|edit| edit.state_has_dated_history(state_id))
+        {
+            alerts.push(Ok(dated_history_editing_notice(state_id)));
+        } else {
+            alerts.push(Ok(format!(
+                "Editing State {state_id} properties in a temporary draft"
+            )));
+        }
     }
 
     pub fn open_new_state_editor(&mut self, alerts: &mut Alerts) {
@@ -1806,9 +1840,17 @@ impl Canvas {
         self.property_editor_replace_field = false;
         self.province_editor_page = 0;
         self.refresh_state_information();
-        alerts.push(Ok(format!(
-            "Editing Province {province_id} data in a temporary draft"
-        )));
+        if self
+            .state_edit_session
+            .as_ref()
+            .is_some_and(|edit| edit.state_has_dated_history(state_id))
+        {
+            alerts.push(Ok(dated_history_editing_notice(state_id)));
+        } else {
+            alerts.push(Ok(format!(
+                "Editing Province {province_id} data in a temporary draft"
+            )));
+        }
     }
 
     fn selected_province_position(&self, province_id: u32) -> Option<(usize, usize)> {
@@ -1912,7 +1954,7 @@ impl Canvas {
             Ok(changed) => {
                 self.state_property_draft = None;
                 self.property_editor_replace_field = false;
-                self.refresh_state_information();
+                self.refresh_state_visuals();
                 alerts.push(Ok(if changed {
                     format!("Applied State {state_id} properties to the in-memory session")
                 } else {
@@ -2720,7 +2762,19 @@ impl Canvas {
                         }
                         None
                     }
-                    super::inspector::InspectorSection::History if row < 4 => Some(5 + row),
+                    super::inspector::InspectorSection::History => {
+                        let core_count = self
+                            .state_property_draft
+                            .as_ref()
+                            .and_then(|draft| draft.core_values().ok())
+                            .map_or(0, |values| values.len());
+                        match row {
+                            1 => Some(5),
+                            2 => Some(6),
+                            row if row <= core_count + 4 => Some(7),
+                            _ => Some(8),
+                        }
+                    }
                     super::inspector::InspectorSection::Resources => Some(9),
                     super::inspector::InspectorSection::Buildings => Some(10),
                     _ => None,
@@ -2753,14 +2807,12 @@ impl Canvas {
             }
             super::inspector::InspectorSection::History => {
                 for (row, target, map_target) in [
-                    (0, InspectorPickTarget::Owner, MapTagPickTarget::Owner),
+                    (1, InspectorPickTarget::Owner, MapTagPickTarget::Owner),
                     (
-                        1,
+                        2,
                         InspectorPickTarget::Controller,
                         MapTagPickTarget::Controller,
                     ),
-                    (2, InspectorPickTarget::Core, MapTagPickTarget::Core),
-                    (3, InspectorPickTarget::Claim, MapTagPickTarget::Claim),
                 ] {
                     controls.push(control_layout.body_control(
                         InspectorControlId::Select(target),
@@ -2777,6 +2829,60 @@ impl Canvas {
                         16.0,
                     ));
                 }
+                let Some(draft) = self.state_property_draft.as_ref() else {
+                    return controls;
+                };
+                let core_count = draft.core_values().map_or(0, |values| values.len());
+                for index in 0..core_count {
+                    controls.push(control_layout.body_control(
+                        InspectorControlId::Remove(InspectorPickTarget::Core, index),
+                        4 + index,
+                        layout.body[2] - 31.0,
+                        26.0,
+                        16.0,
+                    ));
+                }
+                let add_core_row = 4 + core_count;
+                controls.push(control_layout.body_control(
+                    InspectorControlId::Add(InspectorPickTarget::Core),
+                    add_core_row,
+                    layout.body[2] - 190.0,
+                    96.0,
+                    16.0,
+                ));
+                controls.push(control_layout.body_control(
+                    InspectorControlId::MapPick(MapTagPickTarget::Core),
+                    add_core_row,
+                    layout.body[2] - 88.0,
+                    83.0,
+                    16.0,
+                ));
+                let claim_count = draft.claim_values().map_or(0, |values| values.len());
+                let claim_start = add_core_row + 2;
+                for index in 0..claim_count {
+                    controls.push(control_layout.body_control(
+                        InspectorControlId::Remove(InspectorPickTarget::Claim, index),
+                        claim_start + index,
+                        layout.body[2] - 31.0,
+                        26.0,
+                        16.0,
+                    ));
+                }
+                let add_claim_row = claim_start + claim_count;
+                controls.push(control_layout.body_control(
+                    InspectorControlId::Add(InspectorPickTarget::Claim),
+                    add_claim_row,
+                    layout.body[2] - 190.0,
+                    96.0,
+                    16.0,
+                ));
+                controls.push(control_layout.body_control(
+                    InspectorControlId::MapPick(MapTagPickTarget::Claim),
+                    add_claim_row,
+                    layout.body[2] - 88.0,
+                    83.0,
+                    16.0,
+                ));
             }
             super::inspector::InspectorSection::Resources => {
                 let count = self
@@ -2859,6 +2965,27 @@ impl Canvas {
             InspectorControlId::Decrement(target) | InspectorControlId::Increment(target) => {
                 let increment = matches!(id, InspectorControlId::Increment(_));
                 self.adjust_inspector_value(target, increment, alerts);
+            }
+            InspectorControlId::Remove(target, index) => {
+                let Some(draft) = self.state_property_draft.as_mut() else {
+                    return;
+                };
+                let result = match target {
+                    InspectorPickTarget::Core => draft
+                        .core_values()
+                        .ok()
+                        .and_then(|values| values.into_iter().nth(index))
+                        .map_or(Ok(()), |tag| draft.remove_core(&tag)),
+                    InspectorPickTarget::Claim => draft
+                        .claim_values()
+                        .ok()
+                        .and_then(|values| values.into_iter().nth(index))
+                        .map_or(Ok(()), |tag| draft.remove_claim(&tag)),
+                    _ => Ok(()),
+                };
+                if let Err(errors) = result {
+                    alerts.push(Err(errors[0].message.clone()));
+                }
             }
             InspectorControlId::RemoveValue(target) => {
                 let Some(draft) = self.state_property_draft.as_mut() else {
@@ -2977,6 +3104,11 @@ impl Canvas {
             let index =
                 StateSearchIndex::new(edit.valid_state_ids().iter().filter_map(|state_id| {
                     let data = edit.state_data(*state_id)?;
+                    let effective_controller = data
+                        .history
+                        .controller
+                        .clone()
+                        .or_else(|| data.history.owner.clone());
                     Some(
                         StateSearchEntry::new(
                             *state_id,
@@ -2984,7 +3116,7 @@ impl Canvas {
                         )
                         .with_context(
                             data.history.owner,
-                            data.history.controller,
+                            effective_controller,
                             data.provinces,
                         ),
                     )
@@ -3757,6 +3889,17 @@ impl Canvas {
         if self.camera.scale_factor() > 1.0 && self.map_layers.show_province_boundaries {
             self.draw_boundaries(ctx, interface, gl);
         }
+        if self.map_layers.show_country_borders {
+            self.ensure_country_boundaries();
+            self.draw_boundary_set(
+                ctx,
+                interface,
+                &self.country_boundaries,
+                [0.02, 0.02, 0.02, 0.95],
+                2.0,
+                gl,
+            );
+        }
         if self.map_layers.show_province_ids
             && self.map_layers.province_label_mode != ProvinceLabelMode::Off
             && (self.map_layers.province_label_mode != ProvinceLabelMode::All
@@ -3979,20 +4122,31 @@ impl Canvas {
                     presentation.lines,
                 )
             }
-            StateApplyDialog::Blocked => (
-                "CHANGES CANNOT BE APPLIED",
-                "View Problems",
-                "View Details",
-                "Close",
-                vec![
+            StateApplyDialog::Blocked => {
+                let mut lines = vec![
                     format!(
                         "{} blocking problems were found.",
                         plan.map_or(0, |plan| plan.summary.blocked_files)
                     ),
                     "Unsafe file operations cannot continue.".to_owned(),
                     "Resolve the reported diagnostics and regenerate the preview.".to_owned(),
-                ],
-            ),
+                ];
+                if let Some(diagnostic) = plan.and_then(|plan| {
+                    plan.diagnostics
+                        .iter()
+                        .find(|diagnostic| diagnostic.kind == PatchDiagnosticKind::DatedHistoryConflict)
+                }) {
+                    lines.push(diagnostic.message.clone());
+                    lines.push(diagnostic.action.clone());
+                }
+                (
+                    "CHANGES CANNOT BE APPLIED",
+                    "View Problems",
+                    "View Details",
+                    "Close",
+                    lines,
+                )
+            }
             StateApplyDialog::Progress => {
                 let status = self
                     .state_save_status
@@ -4127,7 +4281,7 @@ impl Canvas {
             ctx,
             glyph_cache,
             gl,
-            colors::WHITE,
+            dialog_title_color(dialog),
             [layout.panel[0] + 16.0, layout.panel[1] + 27.0],
             title,
         );
@@ -4227,12 +4381,18 @@ impl Canvas {
                     ctx.transform,
                     gl,
                 );
+                graphics::rectangle(
+                    problem_severity_color(diagnostic.severity),
+                    [row[0], row[1], 4.0, row[3]],
+                    ctx.transform,
+                    gl,
+                );
                 draw_canvas_text(
                     ctx,
                     glyph_cache,
                     gl,
                     colors::WHITE,
-                    [row[0] + 6.0, row[1] + 17.0],
+                    [row[0] + 11.0, row[1] + 17.0],
                     &fit_editor_text(
                         &validation_problem_summary(source, diagnostic),
                         row[2] - 12.0,
@@ -5095,17 +5255,43 @@ impl Canvas {
             let reserved_for_controls = self.state_property_draft.is_some()
                 && match self.inspector.active_section {
                     super::inspector::InspectorSection::Overview => line_index == 2,
-                    super::inspector::InspectorSection::History => line_index < 4,
+                    super::inspector::InspectorSection::History => !line.starts_with("  "),
                     super::inspector::InspectorSection::Resources
                     | super::inspector::InspectorSection::Buildings => line_index > 0,
                     _ => false,
                 };
+            let tag = self.state_property_draft.is_some()
+                && self.inspector.active_section == super::inspector::InspectorSection::History
+                && line.starts_with("  ");
+            if tag {
+                draw_inspector_tag(
+                    ctx,
+                    glyph_cache,
+                    gl,
+                    [layout.body[0] + 8.0, y - 15.0],
+                    line.trim(),
+                    (layout.body[2] - 42.0).max(0.0),
+                );
+                continue;
+            }
             draw_canvas_text(
                 ctx,
                 glyph_cache,
                 gl,
                 if line.starts_with('!') {
                     colors::PROBLEM
+                } else if self.inspector.active_section
+                    == super::inspector::InspectorSection::History
+                    && (line.starts_with("Initial bookmark:")
+                        || line.starts_with("History source unavailable"))
+                {
+                    colors::WARNING
+                } else if line.starts_with("Cores")
+                    || line.starts_with("Claims")
+                    || line.starts_with("Resources")
+                    || line.starts_with("State buildings")
+                {
+                    colors::WHITE_T
                 } else {
                     colors::WHITE
                 },
@@ -5133,6 +5319,10 @@ impl Canvas {
                 }
                 InspectorControlId::Select(_) => "Select",
                 InspectorControlId::MapPick(_) => "Pick map",
+                InspectorControlId::Add(InspectorPickTarget::Core) => "Add core",
+                InspectorControlId::Add(InspectorPickTarget::Claim) => "Add claim",
+                InspectorControlId::Remove(InspectorPickTarget::Core, _)
+                | InspectorControlId::Remove(InspectorPickTarget::Claim, _) => "×",
                 InspectorControlId::Add(InspectorPickTarget::Resource) => "Add resource",
                 InspectorControlId::Add(InspectorPickTarget::StateBuilding) => "Add building",
                 InspectorControlId::RemoveValue(_) => "Remove",
@@ -5705,11 +5895,28 @@ impl Canvas {
             Some(WorkingStateOrigin::CreatedInSession) => ("created in session", None),
             None => ("invalid/read-only", None),
         };
+        let history_safety = if edit.is_some_and(|edit| edit.state_has_dated_history(state_id)) {
+            " · dated-history protected"
+        } else {
+            ""
+        };
+        let foreign_control = if data.as_ref().is_some_and(|history| {
+            history
+                .history
+                .owner
+                .as_deref()
+                .zip(history.history.controller.as_deref())
+                .is_some_and(|(owner, controller)| owner != controller)
+        }) {
+            " · foreign controlled"
+        } else {
+            ""
+        };
         (
             format!("STATE {state_id} — {name}"),
             format!(
-                "{} · {provinces} provinces · {origin}",
-                if dirty { "Modified" } else { "Clean" }
+                "{} · {provinces} provinces · {origin}{foreign_control}{history_safety}",
+                if dirty { "Modified" } else { "Clean" },
             ),
             source,
         )
@@ -5729,6 +5936,24 @@ impl Canvas {
         else {
             return vec!["!State data is invalid or unavailable (read-only).".to_owned()];
         };
+        let effective_history = matches!(
+            self.inspector.active_section,
+            super::inspector::InspectorSection::History
+        )
+        .then(|| {
+            self.project.as_ref().and_then(|project| {
+                project
+                    .state_document(state_id)
+                    .and_then(|document| document.data.as_ref())
+                    .map(|source| {
+                        (
+                            project.effective_history_date_label(),
+                            project.effective_state_history(source),
+                        )
+                    })
+            })
+        })
+        .flatten();
         if let Some(draft) = self
             .state_property_draft
             .as_ref()
@@ -5779,12 +6004,65 @@ impl Canvas {
                     ];
                 }
                 super::inspector::InspectorSection::History => {
-                    return vec![
-                        format!("Owner: {}", draft.owner),
-                        format!("Controller: {}", draft.controller),
-                        format!("Cores: [{}]", draft.cores),
-                        format!("Claims: [{}]", draft.claims),
+                    let (
+                        date_label,
+                        owner_origin,
+                        controller_origin,
+                        controller_value,
+                        controller_is_implicit,
+                    ) = effective_history
+                        .as_ref()
+                        .map(|(date, history)| {
+                            (
+                                date.clone(),
+                                history.owner_origin.label(),
+                                history.controller_origin.label(),
+                                history.controller_value.clone(),
+                                matches!(
+                                    history.controller_origin,
+                                    EffectiveHistoryOrigin::ImplicitOwner
+                                ),
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            (
+                                "History source unavailable".to_owned(),
+                                "session value".to_owned(),
+                                "session value".to_owned(),
+                                None,
+                                false,
+                            )
+                        });
+                    let controller = if draft.controller.is_empty() && controller_is_implicit {
+                        format!(
+                            "<implicit: {}>",
+                            controller_value.as_deref().unwrap_or("<unknown>")
+                        )
+                    } else {
+                        draft.controller.clone()
+                    };
+                    let mut lines = vec![
+                        date_label,
+                        format!("Owner: {} ({owner_origin})", draft.owner),
+                        format!("Controller: {controller} ({controller_origin})"),
+                        "Cores".to_owned(),
                     ];
+                    match draft.core_values() {
+                        Ok(values) => {
+                            lines.extend(values.into_iter().map(|tag| format!("  {tag}")))
+                        }
+                        Err(errors) => lines.push(format!("!{}", errors[0].message)),
+                    }
+                    lines.push("+ Add core".to_owned());
+                    lines.push("Claims".to_owned());
+                    match draft.claim_values() {
+                        Ok(values) => {
+                            lines.extend(values.into_iter().map(|tag| format!("  {tag}")))
+                        }
+                        Err(errors) => lines.push(format!("!{}", errors[0].message)),
+                    }
+                    lines.push("+ Add claim".to_owned());
+                    return lines;
                 }
                 super::inspector::InspectorSection::Resources => {
                     let mut lines = vec!["Resources".to_owned()];
@@ -5878,18 +6156,48 @@ impl Canvas {
                 format!("Cores: {}", data.history.cores.len()),
                 format!("Claims: {}", data.history.claims.len()),
             ],
-            super::inspector::InspectorSection::History => vec![
-                format!(
-                    "Owner: {}",
-                    data.history.owner.as_deref().unwrap_or("<none>")
-                ),
-                format!(
-                    "Controller: {}",
-                    data.history.controller.as_deref().unwrap_or("<none>")
-                ),
-                format!("Cores: {}", data.history.cores.iter().join(", ")),
-                format!("Claims: {}", data.history.claims.iter().join(", ")),
-            ],
+            super::inspector::InspectorSection::History => {
+                let (date_label, owner_origin, controller_origin, controller_value) =
+                    effective_history
+                        .as_ref()
+                        .map(|(date, history)| {
+                            (
+                                date.clone(),
+                                history.owner_origin.label(),
+                                history.controller_origin.label(),
+                                history.controller_value.clone(),
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            (
+                                "History source unavailable".to_owned(),
+                                "session value".to_owned(),
+                                "session value".to_owned(),
+                                None,
+                            )
+                        });
+                let mut lines = vec![
+                    date_label,
+                    format!(
+                        "Owner: {} ({owner_origin})",
+                        data.history.owner.as_deref().unwrap_or("<none>")
+                    ),
+                    format!(
+                        "Controller: {} ({controller_origin})",
+                        data.history
+                            .controller
+                            .as_deref()
+                            .or(controller_value.as_deref())
+                            .unwrap_or("<none>")
+                    ),
+                    format!("Cores: {}", data.history.cores.iter().join(", ")),
+                    format!("Claims: {}", data.history.claims.iter().join(", ")),
+                ];
+                if self.active_state_has_dated_history() {
+                    lines.push(format!("!{}", dated_history_editing_notice(state_id)));
+                }
+                lines
+            }
             super::inspector::InspectorSection::Resources => {
                 let mut lines = vec!["State resources:".to_owned()];
                 lines.extend(
@@ -5904,6 +6212,9 @@ impl Canvas {
             }
             super::inspector::InspectorSection::Buildings => {
                 let mut lines = vec!["State buildings:".to_owned()];
+                if self.active_state_has_dated_history() {
+                    lines.push(format!("!{}", dated_history_editing_notice(state_id)));
+                }
                 lines.extend(
                     data.history
                         .state_buildings
@@ -5923,6 +6234,9 @@ impl Canvas {
                     format!("Provinces ({})", data.provinces.len()),
                     format!("Victory points ({})", data.history.victory_points.len()),
                 ];
+                if self.active_state_has_dated_history() {
+                    lines.push(format!("!{}", dated_history_editing_notice(state_id)));
+                }
                 lines.extend(
                     data.history
                         .victory_points
@@ -7411,6 +7725,24 @@ impl Canvas {
         self.map_layers.show_province_boundaries = !self.map_layers.show_province_boundaries;
     }
 
+    pub fn toggle_country_borders(&mut self, alerts: &mut Alerts) {
+        if self.state_edit_session.is_none() {
+            alerts.push(Err(
+                "Country Borders overlay is available only for loaded HOI4 state projects",
+            ));
+            return;
+        }
+        self.map_layers.show_country_borders = !self.map_layers.show_country_borders;
+        alerts.push(Ok(format!(
+            "Country Borders: {}",
+            if self.map_layers.show_country_borders {
+                "shown"
+            } else {
+                "hidden"
+            }
+        )));
+    }
+
     pub fn toggle_river_overlay(&mut self) -> bool {
         if !self.map_layers.show_rivers && self.bundle.map.get_rivers_overlay().is_none() {
             return true;
@@ -7532,7 +7864,7 @@ impl Canvas {
         self.diagnostic_navigation_marker = Some(location);
     }
 
-    pub fn enabled_options(&self) -> [bool; 9] {
+    pub fn enabled_options(&self) -> [bool; 10] {
         [
             self.map_layers.show_rivers,
             self.map_layers.show_adjacencies,
@@ -7543,10 +7875,11 @@ impl Canvas {
             self.map_layers.show_resources,
             self.map_layers.show_victory_points,
             self.map_layers.show_dmz,
+            self.map_layers.show_country_borders,
         ]
     }
 
-    pub fn available_options(&self) -> [bool; 9] {
+    pub fn available_options(&self) -> [bool; 10] {
         [
             self.bundle.map.get_rivers_overlay().is_some(),
             self.bundle.map.connections_count() > 0,
@@ -7558,6 +7891,7 @@ impl Canvas {
                 .as_ref()
                 .is_some_and(Hoi4Project::state_load_is_complete)
                 && self.state_edit_session.is_some(),
+            self.state_edit_session.is_some(),
             self.state_edit_session.is_some(),
             self.state_edit_session.is_some(),
         ]
@@ -11202,6 +11536,34 @@ impl Canvas {
         }
     }
 
+    fn ensure_country_boundaries(&mut self) {
+        let Some(edit) = self.state_edit_session.as_ref() else {
+            self.country_boundaries.clear();
+            self.country_boundaries_revision = None;
+            return;
+        };
+        let revision = edit.revision();
+        if self.country_boundaries_revision == Some(revision) {
+            return;
+        }
+        let state_by_province = edit.state_by_province().clone();
+        let owners_by_state = edit
+            .valid_state_ids()
+            .iter()
+            .filter_map(|state_id| {
+                let owner = edit
+                    .state_data(*state_id)?
+                    .history
+                    .owner
+                    .filter(|owner| !owner.trim().is_empty())?;
+                Some((*state_id, owner))
+            })
+            .collect();
+        self.country_boundaries =
+            collect_country_boundaries_for(&self.bundle.map, &state_by_province, &owners_by_state);
+        self.country_boundaries_revision = Some(revision);
+    }
+
     fn refresh_state_visuals_full(&mut self, changed_count: usize) {
         let Some(project) = self.project.as_ref() else {
             return;
@@ -12664,6 +13026,7 @@ impl Canvas {
     }
 
     fn refresh(&mut self) {
+        self.country_boundaries_revision = None;
         let buffer = match self.view_mode {
             ViewMode::Color => self.bundle.texture_buffer_color(),
             ViewMode::Kind => self.bundle.texture_buffer_kind(),
@@ -12763,6 +13126,9 @@ impl Canvas {
         }
         if self.map_layers.show_state_boundaries && self.is_state_workspace() {
             overlays.push("State Borders".to_owned());
+        }
+        if self.map_layers.show_country_borders {
+            overlays.push("Country Borders".to_owned());
         }
         if self.map_layers.image_overlay.enabled {
             overlays.push(format!(
@@ -13597,6 +13963,61 @@ fn draw_editor_button(
     );
 }
 
+/// Draw a compact, text-labelled collection chip.  The Inspector keeps the
+/// remove action as a separate, keyboard-independent hit target to preserve
+/// the existing edit flow while making Cores and Claims scan as collections.
+fn draw_inspector_tag(
+    ctx: Context,
+    glyph_cache: &mut FontGlyphCache,
+    gl: &mut GlGraphics,
+    pos: Vector2<f64>,
+    label: &str,
+    max_width: f64,
+) {
+    let text = fit_editor_text(label, (max_width - 14.0).max(0.0));
+    let width = (font::get_width_metric_str(&text) + 14.0)
+        .min(max_width)
+        .max(0.0);
+    graphics::rectangle(
+        [0.12, 0.22, 0.34, 1.0],
+        [pos[0], pos[1], width, 17.0],
+        ctx.transform,
+        gl,
+    );
+    draw_canvas_text(
+        ctx,
+        glyph_cache,
+        gl,
+        colors::WHITE,
+        [pos[0] + 7.0, pos[1] + 14.0],
+        &text,
+    );
+}
+
+fn dated_history_editing_notice(state_id: u32) -> String {
+    format!(
+        "State {state_id} has dated history. Political, Victory Point, and Building values may be effective values from dated blocks; the editor cannot rewrite those blocks safely."
+    )
+}
+
+fn dialog_title_color(dialog: StateApplyDialog) -> DrawColor {
+    match dialog {
+        StateApplyDialog::Blocked | StateApplyDialog::IntegrityProblem => colors::PROBLEM,
+        StateApplyDialog::AdditionalValidation | StateApplyDialog::ProvinceRemoval => {
+            colors::WARNING
+        }
+        _ => colors::WHITE,
+    }
+}
+
+fn problem_severity_color(severity: DiagnosticSeverity) -> DrawColor {
+    match severity {
+        DiagnosticSeverity::Error => colors::PROBLEM,
+        DiagnosticSeverity::Warning => colors::WARNING,
+        DiagnosticSeverity::Information => [0.30, 0.65, 1.0, 1.0],
+    }
+}
+
 fn fit_editor_text(text: &str, max_width: f64) -> String {
     if font::get_width_metric_str(text) <= max_width {
         return text.to_owned();
@@ -14303,6 +14724,7 @@ impl fmt::Debug for Canvas {
             .field("texture", &format_args!("..."))
             .field("state_texture", &self.state_texture.as_ref().map(|_| "..."))
             .field("state_boundaries", &self.state_boundaries.len())
+            .field("country_boundaries", &self.country_boundaries.len())
             .field(
                 "selected_state_boundaries",
                 &self.selected_state_boundaries.len(),

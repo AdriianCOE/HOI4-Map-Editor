@@ -46,13 +46,21 @@ HOI4 Map Editor is based on [ScottyThePilot's HOI4 Province Editor](https://gith
   - name and category;
   - manpower and local supplies;
   - owner and controller;
-  - cores and claims;
+  - cores and claims, including individual tag removal;
   - resources;
   - state buildings;
   - victory points;
   - province buildings.
 - Keep changes in memory until they are reviewed and applied.
 - Undo, redo, or discard state changes.
+- The Inspector resolves supported dated State-history commands at the earliest
+  bookmark provided by the active mod/base-game source graph. It shows whether
+  owner/controller is declared, dated, or implicitly inherited from owner;
+  unsupported dated script remains untouched. Political, Victory Point, and
+  building edits to a State with dated history stay conservatively blocked from
+  Save Project. The workspace status and Inspector identify the selected State
+  as dated-history protected, and opening an affected draft explains why those
+  effective values cannot yet be rewritten.
 
 ### Map views
 
@@ -92,7 +100,12 @@ Optional overlays include:
 - Province IDs
 - Province Borders
 - State Borders
+- Country Borders
 - Custom Image Overlay
+
+Country Borders is a read-only presentation layer. It highlights land borders
+between adjacent provinces whose effective State owners differ; it does not
+change selection, project data, dirty state, or Save Project.
 
 Resources is a read-only overlay for fully loaded State projects. It shows the
 current working State resource quantities, including unsaved edits. Icons are

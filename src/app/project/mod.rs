@@ -5,6 +5,7 @@ mod compatibility_harness;
 mod diagnostics;
 mod edit;
 mod generation;
+mod history;
 mod indexes;
 mod lasso;
 mod logistics;
@@ -50,6 +51,10 @@ pub use edit::{
     StateRemovalPolicy, WorkingStateLifecycle, WorkingStateOrigin,
 };
 pub(crate) use generation::ProjectGeneration;
+pub use history::{
+    BOOKMARKS_DIRECTORY, EffectiveHistoryDate, EffectiveHistoryOrigin, EffectiveStateHistory,
+    effective_state_history, resolve_effective_history_date,
+};
 pub use indexes::{StateIndexes, index_state_documents};
 pub use lasso::{
     LassoCandidateSet, LassoSelectionMode, ProvinceInclusionMode, StateLassoError, StateLassoPhase,
@@ -138,9 +143,9 @@ pub use validation_core::{
 pub use view::{
     AMBIGUOUS_PROVINCE_COLOR, MapViewMode, SELECTED_STATE_COLOR, STATE_BOUNDARY_COLOR,
     StateMapRegionData, StateMapViewData, StateSelection, UNASSIGNED_LAND_COLOR,
-    UNKNOWN_PROVINCE_COLOR, boundaries_for_state, generate_state_view, generate_state_view_for,
-    generate_state_view_region_for, select_state_at, select_state_at_for, selection_overlay,
-    selection_overlay_for, state_color,
+    UNKNOWN_PROVINCE_COLOR, boundaries_for_state, collect_country_boundaries_for,
+    generate_state_view, generate_state_view_for, generate_state_view_region_for, select_state_at,
+    select_state_at_for, selection_overlay, selection_overlay_for, state_color,
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -160,6 +165,7 @@ pub struct Hoi4Project {
     pub load_summary: StateLoadSummary,
     pub logistics: LogisticsLoadResult,
     pub strategic_regions: StrategicRegionLoadResult,
+    pub effective_history_date: EffectiveHistoryDate,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -227,6 +233,7 @@ impl StateLoadFailureStage {
 
 impl Hoi4Project {
     pub fn new(paths: ProjectPaths) -> Self {
+        let effective_history_date = resolve_effective_history_date(&paths.sources);
         let mut project = Self {
             paths,
             states: Vec::new(),
@@ -238,6 +245,7 @@ impl Hoi4Project {
             load_summary: StateLoadSummary::default(),
             logistics: LogisticsLoadResult::default(),
             strategic_regions: StrategicRegionLoadResult::default(),
+            effective_history_date,
         };
         project.load_logistics();
         project.load_strategic_regions();
@@ -284,16 +292,29 @@ impl Hoi4Project {
         self.strategic_regions = load_strategic_regions(&self.paths.sources);
     }
 
+    pub fn effective_state_history(
+        &self,
+        data: &crate::app::state::StateData,
+    ) -> EffectiveStateHistory {
+        effective_state_history(data, self.effective_history_date.date())
+    }
+
+    pub fn effective_history_date_label(&self) -> String {
+        self.effective_history_date.label()
+    }
+
     pub fn bind_project_generation(&mut self, generation: u64) {
         self.paths.bind_project_generation(generation);
         self.load_logistics();
         self.load_strategic_regions();
+        self.effective_history_date = resolve_effective_history_date(&self.paths.sources);
     }
 
     pub fn set_validated_base_game_root(&mut self, root: Option<std::path::PathBuf>) {
         self.paths.set_validated_base_game_root(root);
         self.load_logistics();
         self.load_strategic_regions();
+        self.effective_history_date = resolve_effective_history_date(&self.paths.sources);
     }
 
     pub fn load_summary_message(&self) -> String {

@@ -2817,9 +2817,9 @@ mod tests {
         validate_province_map_candidate, write_rgb_bmp_image,
     };
     use crate::app::project::{
-        EditableProvinceData, EditableStateProperties, ProjectPaths, RoundTripCancellation,
-        RoundTripValidationPolicy, RoundTripValidator, StateEditSession, StateRemovalPolicy,
-        plan_state_patches,
+        EditableProvinceData, EditableStateProperties, PatchDiagnosticKind, ProjectPaths,
+        RoundTripCancellation, RoundTripValidationPolicy, RoundTripValidator, StateEditSession,
+        StateRemovalPolicy, plan_state_patches,
     };
     use crate::config::Config;
     use crate::util::files::Location;
@@ -3095,6 +3095,91 @@ mod tests {
         assert_eq!(
             reloaded_edit.province_data(1).unwrap().victory_point,
             Some(5)
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn dated_history_blocks_victory_point_edits() {
+        let (root, project, mut edit) = dated_history_project("dated-victory-points");
+        edit.update_province_data(
+            1,
+            1,
+            EditableProvinceData {
+                victory_point: Some(10),
+                buildings: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        assert_dated_history_blocked(&plan_state_patches(&project, &edit), "Victory Points");
+        cleanup(&root);
+    }
+
+    #[test]
+    fn dated_history_blocks_state_building_edits() {
+        let (root, project, mut edit) = dated_history_project("dated-state-buildings");
+        let mut properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+        properties
+            .state_buildings
+            .insert("infrastructure".to_owned(), 3);
+        edit.update_state_properties(1, properties).unwrap();
+
+        assert_dated_history_blocked(&plan_state_patches(&project, &edit), "Buildings");
+        cleanup(&root);
+    }
+
+    #[test]
+    fn dated_history_blocks_province_building_edits() {
+        let (root, project, mut edit) = dated_history_project("dated-province-buildings");
+        edit.update_province_data(
+            1,
+            1,
+            EditableProvinceData {
+                victory_point: None,
+                buildings: BTreeMap::from([("bunker".to_owned(), 2)]),
+            },
+        )
+        .unwrap();
+
+        assert_dated_history_blocked(&plan_state_patches(&project, &edit), "Buildings");
+        cleanup(&root);
+    }
+
+    #[test]
+    fn dated_history_keeps_political_edits_blocked() {
+        let (root, project, mut edit) = dated_history_project("dated-political");
+        let mut properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+        properties.owner = Some("ALT".to_owned());
+        edit.update_state_properties(1, properties).unwrap();
+
+        assert_dated_history_blocked(&plan_state_patches(&project, &edit), "Political");
+        cleanup(&root);
+    }
+
+    #[test]
+    fn undated_victory_points_and_buildings_remain_saveable() {
+        let (root, project, mut edit) = test_project("undated-history-fields");
+        let mut properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+        properties
+            .state_buildings
+            .insert("infrastructure".to_owned(), 3);
+        edit.update_state_properties(1, properties).unwrap();
+        edit.update_province_data(
+            1,
+            1,
+            EditableProvinceData {
+                victory_point: Some(10),
+                buildings: BTreeMap::from([("bunker".to_owned(), 2)]),
+            },
+        )
+        .unwrap();
+
+        let plan = plan_state_patches(&project, &edit);
+        assert_eq!(plan.summary.blocked_files, 0, "{}", plan.summary_text());
+        assert_eq!(
+            save_real(&project, &edit, StateSaveFault::None).outcome,
+            StateSaveOutcome::Completed
         );
         cleanup(&root);
     }
@@ -4528,6 +4613,29 @@ mod tests {
         );
         properties.manpower = Some(manpower);
         assert!(edit.update_state_properties(1, properties).unwrap());
+    }
+
+    fn dated_history_project(name: &str) -> (PathBuf, Hoi4Project, StateEditSession) {
+        let (root, _, _) = test_project(name);
+        fs::write(
+            root.join("history/states/1-Test.txt"),
+            "state={id=1 state_category=rural provinces={1} manpower=1 history={owner=TAG 1924.1.1={victory_points={1 5} buildings={infrastructure=1 1={bunker=1}}}}}",
+        )
+        .unwrap();
+        let (project, edit) = load_real_project(&root);
+        (root, project, edit)
+    }
+
+    fn assert_dated_history_blocked(plan: &ProjectPatchPlan, field: &str) {
+        assert_eq!(plan.summary.blocked_files, 1, "{}", plan.summary_text());
+        assert!(plan.modified_files[0].operations.is_empty());
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == PatchDiagnosticKind::DatedHistoryConflict
+                && diagnostic.message.contains(field)
+                && diagnostic
+                    .message
+                    .contains("displayed effective values may come from dated history")
+        }));
     }
 
     fn validate(
