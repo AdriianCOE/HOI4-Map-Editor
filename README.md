@@ -56,11 +56,14 @@ HOI4 Map Editor is based on [ScottyThePilot's HOI4 Province Editor](https://gith
 - The Inspector resolves supported dated State-history commands at the earliest
   bookmark provided by the active mod/base-game source graph. It shows whether
   owner/controller is declared, dated, or implicitly inherited from owner;
-  unsupported dated script remains untouched. Political, Victory Point, and
-  building edits to a State with dated history stay conservatively blocked from
-  Save Project. The workspace status and Inspector identify the selected State
-  as dated-history protected, and opening an affected draft explains why those
-  effective values cannot yet be rewritten.
+  unsupported dated script remains untouched. The save planner protects only
+  values affected by applicable dated history: Owner and Controller, Cores and
+  Claims by tag, Victory Points by Province, and buildings by their State or
+  Province key. Unrelated direct values remain editable. When no bookmark can
+  be resolved, it conservatively tracks every dated operation rather than
+  guessing a timeline position. The workspace status and Inspector identify a
+  selected State with dated history, and affected edits explain why their
+  temporal meaning cannot yet be rewritten.
 
 ### Map views
 

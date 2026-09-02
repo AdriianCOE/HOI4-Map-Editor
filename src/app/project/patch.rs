@@ -756,7 +756,9 @@ fn finish_modification(
         match apply_result {
             Ok(bytes) => {
                 let validation_started = Instant::now();
-                if let Err(message) = validate_preview(&builder.document.path, &bytes, working) {
+                if let Err(message) =
+                    validate_preview(&builder.document.path, &bytes, Some(project), working)
+                {
                     builder.diagnostic(
                         if message.starts_with("semantic") {
                             PatchDiagnosticKind::SemanticMismatch
@@ -1224,27 +1226,65 @@ fn plan_history(
         );
         return;
     };
-    let political_changed = baseline.history.owner != working.history.owner
-        || baseline.history.controller != working.history.controller
-        || baseline.history.cores != working.history.cores
-        || baseline.history.claims != working.history.claims;
-    let victory_points_changed = !victory_points_equal(
+    let owner_changed = baseline.history.owner != working.history.owner;
+    let controller_changed = baseline.history.controller != working.history.controller;
+    let dated_impact = project.dated_history_impact(baseline);
+    let blocked_owner = dated_impact.owner_has_dated_effects && owner_changed;
+    let blocked_controller = dated_impact.controller_has_dated_effects && controller_changed;
+    let blocked_cores = changed_tags(&baseline.history.cores, &working.history.cores)
+        .iter()
+        .any(|tag| dated_impact.cores.contains(tag));
+    let blocked_claims = changed_tags(&baseline.history.claims, &working.history.claims)
+        .iter()
+        .any(|tag| dated_impact.claims.contains(tag));
+    let blocked_victory_points = changed_victory_point_ids(
         &baseline.history.victory_points,
         &working.history.victory_points,
-    );
-    let buildings_changed = baseline.history.state_buildings != working.history.state_buildings
-        || baseline.history.province_buildings != working.history.province_buildings;
-    if (political_changed || victory_points_changed || buildings_changed)
-        && !baseline.history.dated_blocks.is_empty()
+    )
+    .iter()
+    .any(|province_id| dated_impact.victory_points.contains(province_id));
+    let blocked_state_buildings = changed_building_names(
+        &baseline.history.state_buildings,
+        &working.history.state_buildings,
+    )
+    .iter()
+    .any(|building| dated_impact.state_buildings.contains(building));
+    let blocked_province_buildings = changed_province_buildings(
+        &baseline.history.province_buildings,
+        &working.history.province_buildings,
+    )
+    .iter()
+    .any(|(province_id, building)| {
+        dated_impact
+            .province_buildings
+            .get(province_id)
+            .is_some_and(|buildings| buildings.contains(building))
+    });
+    let blocked_buildings = blocked_state_buildings || blocked_province_buildings;
+    if blocked_owner
+        || blocked_controller
+        || blocked_cores
+        || blocked_claims
+        || blocked_victory_points
+        || blocked_buildings
     {
         let mut fields = Vec::new();
-        if political_changed {
-            fields.push("Political");
+        if blocked_owner {
+            fields.push("Owner");
         }
-        if victory_points_changed {
+        if blocked_controller {
+            fields.push("Controller");
+        }
+        if blocked_cores {
+            fields.push("Cores");
+        }
+        if blocked_claims {
+            fields.push("Claims");
+        }
+        if blocked_victory_points {
             fields.push("Victory Points");
         }
-        if buildings_changed {
+        if blocked_buildings {
             fields.push("Buildings");
         }
         builder.diagnostic(
@@ -1257,8 +1297,8 @@ fn plan_history(
                 .first()
                 .map(|block| block.span),
             format!(
-                "{} edits cannot be proven safe while dated history blocks are present. \
-                 The displayed effective values may come from dated history and cannot be rewritten safely.",
+                "{} edits change values affected by applicable dated history. \
+                 The displayed effective values cannot be rewritten safely.",
                 fields.join(", ")
             ),
             "Edit dated history explicitly in a later phase.",
@@ -1338,13 +1378,15 @@ fn plan_tag_set(
     }
     for tag in before.difference(after) {
         match bindings.get(tag).map(Vec::as_slice) {
-            Some([entry]) => {
-                builder.delete(
-                    field,
-                    entry.span,
-                    format!("Remove {field} {tag}"),
-                    comment_safety(builder.document, entry.span),
-                );
+            Some(entries) if !entries.is_empty() => {
+                for entry in entries {
+                    builder.delete(
+                        field,
+                        entry.span,
+                        format!("Remove {field} {tag}"),
+                        comment_safety(builder.document, entry.span),
+                    );
+                }
                 builder.changes.push(format!("{field}: remove {tag}"));
             }
             _ => builder.diagnostic(
@@ -1368,6 +1410,58 @@ fn plan_tag_set(
         );
         builder.changes.push(format!("{field}: add {tag}"));
     }
+}
+
+fn changed_tags(left: &BTreeSet<String>, right: &BTreeSet<String>) -> BTreeSet<String> {
+    left.symmetric_difference(right).cloned().collect()
+}
+
+fn changed_victory_point_ids(left: &[VictoryPoint], right: &[VictoryPoint]) -> BTreeSet<u32> {
+    let left = victory_point_map(left);
+    let right = victory_point_map(right);
+    left.keys()
+        .chain(right.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|province_id| left.get(province_id) != right.get(province_id))
+        .collect()
+}
+
+fn changed_building_names(
+    left: &BTreeMap<String, i64>,
+    right: &BTreeMap<String, i64>,
+) -> BTreeSet<String> {
+    left.keys()
+        .chain(right.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|building| left.get(building) != right.get(building))
+        .collect()
+}
+
+fn changed_province_buildings(
+    left: &BTreeMap<u32, BTreeMap<String, i64>>,
+    right: &BTreeMap<u32, BTreeMap<String, i64>>,
+) -> BTreeSet<(u32, String)> {
+    let mut changed = BTreeSet::new();
+    let province_ids = left
+        .keys()
+        .chain(right.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for province_id in province_ids {
+        let empty = BTreeMap::new();
+        let before = left.get(&province_id).unwrap_or(&empty);
+        let after = right.get(&province_id).unwrap_or(&empty);
+        changed.extend(
+            changed_building_names(before, after)
+                .into_iter()
+                .map(|building| (province_id, building)),
+        );
+    }
+    changed
 }
 
 fn plan_victory_points(
@@ -1822,7 +1916,7 @@ fn plan_creation(
     let (line_ending, bom) = canonical_document_style(project);
     let content = render_new_state(working, line_ending, bom);
     let validation_started = Instant::now();
-    let validation = validate_preview(&relative, &content, working);
+    let validation = validate_preview(&relative, &content, Some(project), working);
     timings.preview_validation_ms += validation_started.elapsed().as_millis();
     if let Err(message) = validation {
         diagnostics.push(PatchDiagnostic {
@@ -2487,7 +2581,12 @@ fn render_new_state(data: &StateData, style: NewlineStyle, bom: bool) -> Vec<u8>
     .into_bytes()
 }
 
-fn validate_preview(path: &Path, bytes: &[u8], working: &StateData) -> Result<(), String> {
+fn validate_preview(
+    path: &Path,
+    bytes: &[u8],
+    project: Option<&Hoi4Project>,
+    working: &StateData,
+) -> Result<(), String> {
     let text =
         String::from_utf8(bytes.to_vec()).map_err(|_| "preview is not valid UTF-8".to_owned())?;
     let document = parse(SourceText::new(path, text));
@@ -2500,6 +2599,11 @@ fn validate_preview(path: &Path, bytes: &[u8], working: &StateData) -> Result<()
     let extracted = extract_state(&document);
     let Some(data) = extracted.data else {
         return Err("preview parse failed: missing root state block".to_owned());
+    };
+    let data = if let Some(project) = project {
+        project.effective_state_history(&data).data
+    } else {
+        data
     };
     semantic_match(&data, working)
         .then_some(())
@@ -2733,7 +2837,7 @@ mod tests {
         };
         state.provinces.insert(5144);
         let rendered = render_new_state(&state, NewlineStyle::Crlf, false);
-        validate_preview(Path::new("512-State_512.txt"), &rendered, &state).unwrap();
+        validate_preview(Path::new("512-State_512.txt"), &rendered, None, &state).unwrap();
     }
 
     #[test]

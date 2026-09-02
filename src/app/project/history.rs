@@ -4,6 +4,8 @@
 //! module derives a session-facing model from the subset of history commands
 //! that the editor already understands; it never rewrites dated blocks.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::app::state::{
     Hoi4Date, PdxBlock, PdxEntry, PdxValue, StateData, VictoryPoint, parse_text,
 };
@@ -67,6 +69,61 @@ pub struct EffectiveStateHistory {
     /// source declares one; otherwise it is inherited from the effective
     /// owner without manufacturing a serializable `controller = ...` field.
     pub controller_value: Option<String>,
+}
+
+/// Exact editable State-history values affected by dated blocks at the active
+/// initial bookmark.
+///
+/// Without a resolved bookmark, the impact includes every dated operation in
+/// the source rather than guessing which point in the timeline an edit targets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DatedHistoryImpact {
+    pub owner_has_dated_effects: bool,
+    pub controller_has_dated_effects: bool,
+    pub cores: BTreeSet<String>,
+    pub claims: BTreeSet<String>,
+    pub victory_points: BTreeSet<u32>,
+    pub state_buildings: BTreeSet<String>,
+    pub province_buildings: BTreeMap<u32, BTreeSet<String>>,
+}
+
+pub fn dated_history_impact(
+    data: &StateData,
+    effective_date: Option<Hoi4Date>,
+) -> DatedHistoryImpact {
+    if data.history.dated_blocks.is_empty() {
+        return DatedHistoryImpact::default();
+    }
+
+    let mut impact = DatedHistoryImpact::default();
+    for block in data
+        .history
+        .dated_blocks
+        .iter()
+        .filter(|block| effective_date.is_none_or(|date| block.date <= date))
+    {
+        let changes = &block.changes;
+        impact.owner_has_dated_effects |= changes.owner.is_some();
+        impact.controller_has_dated_effects |= changes.controller.is_some();
+        impact.cores.extend(changes.added_cores.iter().cloned());
+        impact.cores.extend(changes.removed_cores.iter().cloned());
+        impact.claims.extend(changes.added_claims.iter().cloned());
+        impact.claims.extend(changes.removed_claims.iter().cloned());
+        impact
+            .victory_points
+            .extend(changes.victory_points.iter().map(|point| point.province_id));
+        impact
+            .state_buildings
+            .extend(changes.state_buildings.keys().cloned());
+        for (province_id, buildings) in &changes.province_buildings {
+            impact
+                .province_buildings
+                .entry(*province_id)
+                .or_default()
+                .extend(buildings.keys().cloned());
+        }
+    }
+    impact
 }
 
 pub fn resolve_effective_history_date(sources: &ProjectSources) -> EffectiveHistoryDate {
@@ -384,6 +441,63 @@ mod tests {
         assert_eq!(
             implicit.controller_origin,
             EffectiveHistoryOrigin::ImplicitOwner
+        );
+    }
+
+    #[test]
+    fn dated_history_impact_tracks_only_values_effective_at_the_bookmark() {
+        let mut data = StateData::default();
+        data.history.dated_blocks = vec![
+            DatedHistoryBlock {
+                date: Hoi4Date::parse("1924.1.1").unwrap(),
+                span: TextSpan::default(),
+                changes: StateHistoryDelta {
+                    controller: Some("KOZ".to_owned()),
+                    added_cores: BTreeSet::from(["GER".to_owned()]),
+                    removed_claims: BTreeSet::from(["ITA".to_owned()]),
+                    victory_points: vec![VictoryPoint {
+                        province_id: 1234,
+                        value: 5,
+                    }],
+                    state_buildings: BTreeMap::from([("arms_factory".to_owned(), 1)]),
+                    province_buildings: BTreeMap::from([(
+                        5678,
+                        BTreeMap::from([("bunker".to_owned(), 1)]),
+                    )]),
+                    ..Default::default()
+                },
+            },
+            DatedHistoryBlock {
+                date: Hoi4Date::parse("1925.1.1").unwrap(),
+                span: TextSpan::default(),
+                changes: StateHistoryDelta {
+                    owner: Some("LATER".to_owned()),
+                    added_cores: BTreeSet::from(["FRA".to_owned()]),
+                    ..Default::default()
+                },
+            },
+        ];
+
+        let initial = dated_history_impact(&data, Some(Hoi4Date::parse("1924.1.1.12").unwrap()));
+        assert!(!initial.owner_has_dated_effects);
+        assert!(initial.controller_has_dated_effects);
+        assert_eq!(initial.cores, BTreeSet::from(["GER".to_owned()]));
+        assert_eq!(initial.claims, BTreeSet::from(["ITA".to_owned()]));
+        assert_eq!(initial.victory_points, BTreeSet::from([1234]));
+        assert_eq!(
+            initial.state_buildings,
+            BTreeSet::from(["arms_factory".to_owned()])
+        );
+        assert_eq!(
+            initial.province_buildings,
+            BTreeMap::from([(5678, BTreeSet::from(["bunker".to_owned()]),)])
+        );
+
+        let unknown_date = dated_history_impact(&data, None);
+        assert!(unknown_date.owner_has_dated_effects);
+        assert_eq!(
+            unknown_date.cores,
+            BTreeSet::from(["FRA".to_owned(), "GER".to_owned()])
         );
     }
 

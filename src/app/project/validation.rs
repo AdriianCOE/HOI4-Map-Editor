@@ -1272,6 +1272,7 @@ struct PlanSets {
 #[derive(Debug)]
 struct SourceSnapshot {
     files: BTreeMap<PathBuf, FileFingerprint>,
+    external_files: BTreeMap<PathBuf, FileFingerprint>,
     strategic_region_sources: BTreeMap<String, FileFingerprint>,
 }
 
@@ -1581,11 +1582,35 @@ fn verify_source(
             ));
         }
     }
+    let external_files = external_source_fingerprints(project)?;
     let strategic_region_sources = strategic_region_source_fingerprints(project)?;
     Ok(SourceSnapshot {
         files,
+        external_files,
         strategic_region_sources,
     })
+}
+
+/// Descriptor metadata affects source resolution, but is not an editor output
+/// and must never be copied into the restricted candidate workspace.
+fn external_source_fingerprints(
+    project: &Hoi4Project,
+) -> Result<BTreeMap<PathBuf, FileFingerprint>, Failure> {
+    let Some(source) = project.paths.sources.manifest().descriptor.as_ref() else {
+        return Ok(BTreeMap::new());
+    };
+    let path = source
+        .filesystem_path()
+        .expect("project descriptor is a filesystem path");
+    let bytes = read(
+        path,
+        RoundTripStage::SourceVerification,
+        "read project descriptor",
+    )?;
+    Ok(BTreeMap::from([(
+        path.to_owned(),
+        FileFingerprint::from_bytes(&bytes),
+    )]))
 }
 
 /// Strategic Regions remain external read-only validation context. Snapshot
@@ -1688,13 +1713,6 @@ fn enumerate_source_files(
             .expect("core project map source is a filesystem path"),
     ];
     if let Some(source) = &manifest.default_map {
-        source_paths.push(
-            source
-                .filesystem_path()
-                .expect("core project map source is a filesystem path"),
-        );
-    }
-    if let Some(source) = &manifest.descriptor {
         source_paths.push(
             source
                 .filesystem_path()
@@ -1925,6 +1943,63 @@ fn copy_source(
                 "Candidate baseline bytes differ from the source immediately after copy.",
                 "Discard the workspace and retry after checking the filesystem.",
             ));
+        }
+    }
+    // State edits are compared at the effective initial bookmark. Materialize
+    // the resolved bookmark catalog in the isolated workspace so the reload
+    // evaluates the same date without copying or writing the source graph.
+    let bookmarks = project
+        .paths
+        .sources
+        .list_files(Path::new("common/bookmarks"))
+        .map_err(|error| {
+            Failure::new(
+                RoundTripStage::Copying,
+                None,
+                None,
+                format!("Cannot list bookmark sources for candidate: {error}"),
+                "Reload the project and regenerate the Save Project review.",
+            )
+        })?;
+    for source in bookmarks.files.into_iter().filter(|source| {
+        source
+            .logical_path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+    }) {
+        check_cancelled(cancellation, RoundTripStage::Copying)?;
+        let bytes = project
+            .paths
+            .sources
+            .read_resolved(&source)
+            .map_err(|error| {
+                Failure::new(
+                    RoundTripStage::Copying,
+                    source.filesystem_path().map(Path::to_path_buf),
+                    None,
+                    format!(
+                        "Cannot read resolved bookmark source {}: {error}",
+                        source.logical_path.display()
+                    ),
+                    "Reload the project and regenerate the Save Project review.",
+                )
+            })?;
+        let target = candidate_root.join(&source.logical_path);
+        if !target.exists() {
+            fs::create_dir_all(target.parent().unwrap_or(candidate_root)).map_err(|error| {
+                Failure::io(
+                    RoundTripStage::Copying,
+                    "create candidate bookmark parent",
+                    &target,
+                    error,
+                )
+            })?;
+            write_new(
+                &target,
+                &bytes,
+                RoundTripStage::Copying,
+                "copy effective bookmark source",
+            )?;
         }
     }
     // Lower-priority Strategic Region files are not below the mod root. For
@@ -2301,13 +2376,10 @@ fn compare_semantics(
                 .and_then(|document| document.data.clone())
         });
         let Some(expected) = expected else { continue };
-        let Some(actual) = candidate
-            .state_document(state_id)
-            .and_then(|document| document.data.as_ref())
-        else {
+        let Some(actual) = effective_state_data(candidate, state_id) else {
             continue;
         };
-        let state_differences = compare_state(state_id, &expected, actual);
+        let state_differences = compare_state(state_id, &expected, &actual);
         victory_points_match &= !state_differences.iter().any(|difference| {
       matches!(difference, SemanticDifference::PropertyMismatch { property, .. } if property == "victory_points")
     });
@@ -2399,13 +2471,10 @@ fn compare_semantics(
             let Some(expected) = expected else {
                 return false;
             };
-            let Some(actual) = candidate
-                .state_document(*state_id)
-                .and_then(|document| document.data.as_ref())
-            else {
+            let Some(actual) = effective_state_data(candidate, *state_id) else {
                 return false;
             };
-            compare_state(*state_id, &expected, actual).is_empty()
+            compare_state(*state_id, &expected, &actual).is_empty()
         })
         && created_states_match
         && removed_states_match;
@@ -2420,6 +2489,13 @@ fn compare_semantics(
         removed_states_match,
         differences,
     }
+}
+
+fn effective_state_data(project: &Hoi4Project, state_id: u32) -> Option<StateData> {
+    project
+        .state_document(state_id)
+        .and_then(|document| document.data.as_ref())
+        .map(|data| project.effective_state_history(data).data)
 }
 
 pub(crate) fn compare_project_for_save(
@@ -2782,6 +2858,22 @@ fn verify_source_unchanged(
                 Some(path),
                 None,
                 "A source file changed during temporary validation.",
+                "Discard the result and regenerate the patch preview from the current source.",
+            ));
+        }
+    }
+    for (path, fingerprint) in &snapshot.external_files {
+        let bytes = read(
+            path,
+            RoundTripStage::SourceVerification,
+            "re-read external source after validation",
+        )?;
+        if FileFingerprint::from_bytes(&bytes) != *fingerprint {
+            return Err(Failure::new(
+                RoundTripStage::SourceVerification,
+                Some(path.clone()),
+                None,
+                "An external source file changed during temporary validation.",
                 "Discard the result and regenerate the patch preview from the current source.",
             ));
         }
@@ -3174,6 +3266,7 @@ mod tests {
         let project = Hoi4Project::new(ProjectPaths::discover(&root).unwrap());
         let snapshot = SourceSnapshot {
             files: enumerate_source_files(&project).unwrap(),
+            external_files: external_source_fingerprints(&project).unwrap(),
             strategic_region_sources: strategic_region_source_fingerprints(&project).unwrap(),
         };
         fs::write(
@@ -3185,6 +3278,27 @@ mod tests {
         let failure = verify_source_unchanged(&project, &snapshot)
             .expect_err("default.map is authoritative and must be revalidated before save");
         assert!(failure.diagnostic.message.contains("source file changed"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn descriptor_change_is_detected_without_copying_it_to_the_candidate() {
+        let (root, project, _) = test_project("descriptor-source-change");
+        let snapshot = SourceSnapshot {
+            files: enumerate_source_files(&project).unwrap(),
+            external_files: external_source_fingerprints(&project).unwrap(),
+            strategic_region_sources: strategic_region_source_fingerprints(&project).unwrap(),
+        };
+        fs::write(root.join("descriptor.mod"), "name=\"Changed Fixture\"\n").unwrap();
+
+        let failure = verify_source_unchanged(&project, &snapshot)
+            .expect_err("descriptor changes must invalidate temporary validation");
+        assert!(
+            failure
+                .diagnostic
+                .message
+                .contains("external source file changed")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3201,6 +3315,7 @@ mod tests {
         project.load_strategic_regions();
         let snapshot = SourceSnapshot {
             files: enumerate_source_files(&project).unwrap(),
+            external_files: external_source_fingerprints(&project).unwrap(),
             strategic_region_sources: strategic_region_source_fingerprints(&project).unwrap(),
         };
         fs::write(
@@ -3289,7 +3404,9 @@ mod tests {
     fn modified_candidate_roundtrips_and_leaves_source_unchanged() {
         let (root, project, mut edit) = test_project("roundtrip");
         let source_path = root.join("history/states/1-Test.txt");
+        let descriptor_path = root.join("descriptor.mod");
         let source_before = fs::read(&source_path).unwrap();
+        let descriptor_before = fs::read(&descriptor_path).unwrap();
         let mut properties = EditableStateProperties::from_state(
             project.state_document(1).unwrap().data.as_ref().unwrap(),
         );
@@ -3317,6 +3434,7 @@ mod tests {
         assert!(report.byte_comparison.differences.is_empty());
         assert!(report.workspace.cleaned);
         assert_eq!(fs::read(&source_path).unwrap(), source_before);
+        assert_eq!(fs::read(&descriptor_path).unwrap(), descriptor_before);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3853,7 +3971,6 @@ mod tests {
             "state={id=1 state_category=rural provinces={1} history={owner=TAG}}",
         )
         .unwrap();
-
         let paths = ProjectPaths::discover(&root).unwrap();
         let config = Config {
             preserve_ids: true,
@@ -3999,6 +4116,7 @@ mod tests {
             "state={id=1 state_category=rural provinces={1} history={owner=TAG}}",
         )
         .unwrap();
+        fs::write(root.join("descriptor.mod"), "name=\"Validation Fixture\"\n").unwrap();
         let paths = ProjectPaths::discover(&root).unwrap();
         let config = Config {
             preserve_ids: true,

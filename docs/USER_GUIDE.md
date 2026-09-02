@@ -80,12 +80,14 @@ active project source graph (mod, then compatible lower sources). It applies
 the editor-supported dated history commands only up to that initial date and
 labels owner/controller as declared, dated, or implicit from owner. If no
 bookmark can be resolved, the Inspector explicitly reports the direct-history
-fallback and does not guess a date. Dated source blocks are never flattened;
-political, Victory Point, and building edits to such a State remain blocked at
-save preview until dedicated dated-history editing exists. The Inspector marks
-the selected State as dated-history protected and opening a State or Province
-draft explains that the displayed values may be effective dated values the
-editor cannot safely rewrite.
+fallback and does not guess a date. Dated source blocks are never flattened.
+The save planner protects only edits whose values conflict with applicable
+dated history: Owner and Controller, Cores and Claims by country tag, Victory
+Points by province, and buildings by their State or Province key. Unrelated
+direct values remain editable. The Inspector marks the selected State as
+dated-history protected and affected State or Province drafts explain that the
+displayed values may be effective dated values the editor cannot safely
+rewrite.
 Brush, Lasso, and Fill preview province-level changes in memory. `Esc` cancels;
 `Enter` confirms an applicable preview.
 

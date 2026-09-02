@@ -52,8 +52,9 @@ pub use edit::{
 };
 pub(crate) use generation::ProjectGeneration;
 pub use history::{
-    BOOKMARKS_DIRECTORY, EffectiveHistoryDate, EffectiveHistoryOrigin, EffectiveStateHistory,
-    effective_state_history, resolve_effective_history_date,
+    BOOKMARKS_DIRECTORY, DatedHistoryImpact, EffectiveHistoryDate, EffectiveHistoryOrigin,
+    EffectiveStateHistory, dated_history_impact, effective_state_history,
+    resolve_effective_history_date,
 };
 pub use indexes::{StateIndexes, index_state_documents};
 pub use lasso::{
@@ -297,6 +298,10 @@ impl Hoi4Project {
         data: &crate::app::state::StateData,
     ) -> EffectiveStateHistory {
         effective_state_history(data, self.effective_history_date.date())
+    }
+
+    pub fn dated_history_impact(&self, data: &crate::app::state::StateData) -> DatedHistoryImpact {
+        dated_history_impact(data, self.effective_history_date.date())
     }
 
     pub fn effective_history_date_label(&self) -> String {

@@ -3136,8 +3136,11 @@ mod tests {
             1,
             1,
             EditableProvinceData {
-                victory_point: None,
-                buildings: BTreeMap::from([("bunker".to_owned(), 2)]),
+                victory_point: Some(5),
+                buildings: BTreeMap::from([
+                    ("bunker".to_owned(), 3),
+                    ("anti_air_building".to_owned(), 1),
+                ]),
             },
         )
         .unwrap();
@@ -3147,13 +3150,151 @@ mod tests {
     }
 
     #[test]
-    fn dated_history_keeps_political_edits_blocked() {
+    fn dated_history_keeps_controller_edits_blocked() {
         let (root, project, mut edit) = dated_history_project("dated-political");
+        let mut properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+        properties.controller = Some("ALT".to_owned());
+        edit.update_state_properties(1, properties).unwrap();
+
+        assert_dated_history_blocked(&plan_state_patches(&project, &edit), "Controller");
+        cleanup(&root);
+    }
+
+    #[test]
+    fn dated_controller_allows_unrelated_direct_history_edits() {
+        let (root, project, mut edit) = dated_history_project("dated-controller-unrelated");
+        let mut properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+        properties.cores.remove("TAG");
+        properties.claims.remove("ITA");
+        edit.update_state_properties(1, properties).unwrap();
+
+        let plan = plan_state_patches(&project, &edit);
+        assert_eq!(
+            plan.summary.blocked_files,
+            0,
+            "{}\n{:#?}",
+            plan.summary_text(),
+            plan.diagnostics
+        );
+        assert_eq!(
+            save_real(&project, &edit, StateSaveFault::None).outcome,
+            StateSaveOutcome::Completed
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn duplicate_direct_cores_are_all_removed_despite_unrelated_dated_controller() {
+        let source =
+            "history={owner=TOL add_core_of=TOL 1924.1.1={controller=KOZ} add_core_of=TOL}";
+        let (root, project, mut edit) = history_project("duplicate-direct-cores", source, true);
+        let mut properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+        properties.cores.remove("TOL");
+        edit.update_state_properties(1, properties).unwrap();
+
+        let plan = plan_state_patches(&project, &edit);
+        assert_eq!(plan.summary.blocked_files, 0, "{}", plan.summary_text());
+        assert_eq!(
+            save_real(&project, &edit, StateSaveFault::None).outcome,
+            StateSaveOutcome::Completed
+        );
+        let text = fs::read_to_string(root.join("history/states/1-Test.txt")).unwrap();
+        assert!(!text.contains("add_core_of"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn dated_values_allow_unrelated_victory_points_and_buildings() {
+        let (root, project, mut edit) = dated_history_project("dated-value-keys-allowed");
+        let mut properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+        properties
+            .state_buildings
+            .insert("arms_factory".to_owned(), 2);
+        edit.update_state_properties(1, properties).unwrap();
+        edit.update_province_data(
+            1,
+            1,
+            EditableProvinceData {
+                victory_point: Some(5),
+                buildings: BTreeMap::from([
+                    ("bunker".to_owned(), 2),
+                    ("anti_air_building".to_owned(), 2),
+                ]),
+            },
+        )
+        .unwrap();
+        edit.update_province_data(
+            2,
+            1,
+            EditableProvinceData {
+                victory_point: Some(10),
+                buildings: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        let plan = plan_state_patches(&project, &edit);
+        assert_eq!(plan.summary.blocked_files, 0, "{}", plan.summary_text());
+        assert_eq!(
+            save_real(&project, &edit, StateSaveFault::None).outcome,
+            StateSaveOutcome::Completed
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn dated_core_and_claim_conflicts_are_tracked_by_tag() {
+        let source = "history={owner=TAG add_core_of=POL add_claim_by=FRA 1924.1.1={add_core_of=GER add_claim_by=ITA}}";
+        let (root, project, mut edit) = history_project("dated-tags-allowed", source, true);
+        let mut properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+        properties.cores.remove("POL");
+        properties.claims.remove("FRA");
+        edit.update_state_properties(1, properties).unwrap();
+        let plan = plan_state_patches(&project, &edit);
+        assert_eq!(plan.summary.blocked_files, 0, "{:#?}", plan.diagnostics);
+        cleanup(&root);
+
+        let (root, project, mut edit) = history_project("dated-tags-blocked", source, true);
+        let mut properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+        properties.cores.remove("GER");
+        properties.claims.remove("ITA");
+        edit.update_state_properties(1, properties).unwrap();
+        let plan = plan_state_patches(&project, &edit);
+        assert_dated_history_blocked(&plan, "Cores");
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == PatchDiagnosticKind::DatedHistoryConflict
+                && diagnostic.message.contains("Claims")
+        }));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn future_dated_effects_do_not_block_the_initial_bookmark() {
+        let source = "history={owner=TAG 1925.1.1={owner=LATER}}";
+        let (root, project, mut edit) = history_project("future-dated-owner", source, true);
         let mut properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
         properties.owner = Some("ALT".to_owned());
         edit.update_state_properties(1, properties).unwrap();
 
-        assert_dated_history_blocked(&plan_state_patches(&project, &edit), "Political");
+        assert_eq!(plan_state_patches(&project, &edit).summary.blocked_files, 0);
+        cleanup(&root);
+    }
+
+    #[test]
+    fn unknown_bookmark_conservatively_tracks_each_dated_value() {
+        let source = "history={owner=TAG add_core_of=POL 1924.1.1={add_core_of=GER}}";
+        let (root, project, mut edit) = history_project("unknown-bookmark-allowed", source, false);
+        let mut properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+        properties.cores.remove("POL");
+        edit.update_state_properties(1, properties).unwrap();
+        assert_eq!(plan_state_patches(&project, &edit).summary.blocked_files, 0);
+        cleanup(&root);
+
+        let (root, project, mut edit) = history_project("unknown-bookmark-blocked", source, false);
+        let mut properties = EditableStateProperties::from_state(&edit.state_data(1).unwrap());
+        properties.cores.insert("GER".to_owned());
+        edit.update_state_properties(1, properties).unwrap();
+        assert_dated_history_blocked(&plan_state_patches(&project, &edit), "Cores");
         cleanup(&root);
     }
 
@@ -4616,10 +4757,34 @@ mod tests {
     }
 
     fn dated_history_project(name: &str) -> (PathBuf, Hoi4Project, StateEditSession) {
-        let (root, _, _) = test_project(name);
+        history_project(
+            name,
+            "history={owner=TAG add_core_of=TAG add_claim_by=ITA victory_points={1 3 2 7} buildings={infrastructure=1 arms_factory=1 1={bunker=1 anti_air_building=1}} 1924.1.1={controller=KOZ victory_points={1 5} buildings={infrastructure=2 1={bunker=2}}}}",
+            true,
+        )
+    }
+
+    fn history_project(
+        name: &str,
+        history: &str,
+        with_initial_bookmark: bool,
+    ) -> (PathBuf, Hoi4Project, StateEditSession) {
+        let (root, _, _) = test_project_with_map(
+            name,
+            "0;0;0;0;land;false;unknown;0\n1;1;2;3;land;false;plains;1\n2;4;5;6;land;false;plains;1\n",
+            image::RgbImage::from_raw(2, 1, vec![1, 2, 3, 4, 5, 6]).unwrap(),
+        );
+        if with_initial_bookmark {
+            fs::create_dir_all(root.join("common/bookmarks")).unwrap();
+            fs::write(
+                root.join("common/bookmarks/initial.txt"),
+                "bookmarks={ bookmark={ date=1924.1.1.12 } }",
+            )
+            .unwrap();
+        }
         fs::write(
             root.join("history/states/1-Test.txt"),
-            "state={id=1 state_category=rural provinces={1} manpower=1 history={owner=TAG 1924.1.1={victory_points={1 5} buildings={infrastructure=1 1={bunker=1}}}}}",
+            format!("state={{id=1 state_category=rural provinces={{1 2}} manpower=1 {history}}}"),
         )
         .unwrap();
         let (project, edit) = load_real_project(&root);
@@ -4634,7 +4799,7 @@ mod tests {
                 && diagnostic.message.contains(field)
                 && diagnostic
                     .message
-                    .contains("displayed effective values may come from dated history")
+                    .contains("displayed effective values cannot be rewritten safely")
         }));
     }
 

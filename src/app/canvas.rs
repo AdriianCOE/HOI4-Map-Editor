@@ -4839,23 +4839,29 @@ impl Canvas {
             DeveloperDiagnosticsMode::Detailed => usize::MAX,
             DeveloperDiagnosticsMode::Off => usize::MAX,
         };
+        let line_height = font::get_height_metric() * 1.15;
+        let viewport = interface.get_map_viewport();
+        let pos = [
+            interface.get_sidebar_width() as f64 + 6.0,
+            interface.get_toolbar_height() as f64 + line_height + 10.0,
+        ];
+        let right_edge = interface
+            .get_inspector_viewport()
+            .map_or(viewport.right(), |inspector| inspector.x)
+            .min(viewport.right());
+        let max_text_width = (right_edge - pos[0] - 12.0).max(font::get_width_metric_str("W"));
         let lines = project_status
             .lines()
             .chain(selection_info.into_iter().flat_map(str::lines))
+            .flat_map(|line| wrap_project_information_line(line, max_text_width))
             .take(max_lines)
             .collect::<Vec<_>>();
-        let line_height = font::get_height_metric() * 1.15;
         let width = lines
             .iter()
             .map(|line| font::get_width_metric_str(line))
             .fold(0.0, f64::max)
             + 12.0;
         let height = lines.len() as f64 * line_height + 8.0;
-        let pos = [
-            interface.get_sidebar_width() as f64 + 6.0,
-            interface.get_toolbar_height() as f64 + line_height + 10.0,
-        ];
-
         graphics::rectangle(
             colors::OVERLAY_T,
             [pos[0], pos[1], width, height],
@@ -4867,7 +4873,7 @@ impl Canvas {
                 pos[0] + 6.0,
                 pos[1] + 4.0 + font::get_v_metrics().ascent + index as f64 * line_height,
             );
-            graphics::text(colors::WHITE, FONT_SIZE, line, glyph_cache, transform, gl)
+            graphics::text(colors::WHITE, FONT_SIZE, &line, glyph_cache, transform, gl)
                 .expect("unable to draw state information");
         }
     }
@@ -13996,7 +14002,7 @@ fn draw_inspector_tag(
 
 fn dated_history_editing_notice(state_id: u32) -> String {
     format!(
-        "State {state_id} has dated history. Political, Victory Point, and Building values may be effective values from dated blocks; the editor cannot rewrite those blocks safely."
+        "State {state_id} has dated history. Only values affected at the initial bookmark are protected; without a bookmark, every dated value is protected. The editor cannot rewrite those blocks safely. Other direct values, including Cores and Claims when no dated block changes that tag, remain editable."
     )
 }
 
@@ -14031,6 +14037,40 @@ fn fit_editor_text(text: &str, max_width: f64) -> String {
         }
     }
     "…".to_owned()
+}
+
+fn wrap_project_information_line(line: &str, max_width: f64) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut wrapped = Vec::new();
+    let mut current = String::new();
+    for word in line.split_whitespace() {
+        let candidate = if current.is_empty() {
+            word.to_owned()
+        } else {
+            format!("{current} {word}")
+        };
+        if font::get_width_metric_str(&candidate) <= max_width {
+            current = candidate;
+            continue;
+        }
+        if !current.is_empty() {
+            wrapped.push(std::mem::take(&mut current));
+        }
+        for character in word.chars() {
+            let candidate = format!("{current}{character}");
+            if !current.is_empty() && font::get_width_metric_str(&candidate) > max_width {
+                wrapped.push(std::mem::take(&mut current));
+            }
+            current.push(character);
+        }
+    }
+    if !current.is_empty() {
+        wrapped.push(current);
+    }
+    wrapped
 }
 
 fn format_integer_input(value: &str, grouped: bool) -> String {
@@ -15226,6 +15266,29 @@ mod tests {
             &snapshot,
             ProjectGeneration(5)
         ));
+    }
+
+    #[test]
+    fn project_information_wraps_inside_the_available_width() {
+        let message = "State 404 has dated history. Other direct values remain editable.";
+        let lines = wrap_project_information_line(message, 120.0);
+
+        assert!(lines.len() > 1);
+        assert!(
+            lines
+                .iter()
+                .all(|line| font::get_width_metric_str(line) <= 120.0)
+        );
+        assert_eq!(lines.join(" "), message);
+
+        let path = "C:/very/long/unbroken/path/that/must/not/overflow/the/status/panel";
+        let lines = wrap_project_information_line(path, 80.0);
+        assert!(
+            lines
+                .iter()
+                .all(|line| font::get_width_metric_str(line) <= 80.0)
+        );
+        assert_eq!(lines.concat(), path);
     }
 
     #[test]

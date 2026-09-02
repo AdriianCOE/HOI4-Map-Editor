@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.0-preview.5 - 2026-09-01
+## v0.1.0-preview.5 - 2026-09-02
 
 ### Added
 
@@ -35,8 +35,10 @@
   supported dated owner/controller, core/claim, building, and victory-point
   changes through the earliest source-resolved bookmark date, and identifies
   declared, dated, and implicit controller values.
-- Conservative save protection for effective Victory Point and building values
-  from dated State history; they remain readable but are not rewritten.
+- Granular save protection for values affected by applicable dated State history:
+  Owner and Controller, Cores and Claims by country tag, Victory Points by
+  province, and buildings by their State or Province key remain readable but
+  are not rewritten until dated-history editing exists.
 
 ### Changed
 
